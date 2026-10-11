@@ -1189,13 +1189,12 @@ class PickerApi:
         try:
             import shutil
 
-            from app.services.backup_service import BACKUP_DIR, _safe_backup_filename
+            from app.services.backup_service import backup_path
 
-            safe_name = _safe_backup_filename(filename)
-            if safe_name is None:
+            src = backup_path(filename)
+            if src is None:
                 return {"success": False, "error": "Invalid backup filename"}
-            src = (BACKUP_DIR / safe_name).resolve()
-            if not src.is_relative_to(BACKUP_DIR.resolve()) or not src.exists():
+            if not src.exists():
                 return {"success": False, "error": "Backup file not found"}
 
             downloads = Path.home() / "Downloads"

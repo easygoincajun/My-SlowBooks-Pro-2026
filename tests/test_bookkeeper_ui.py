@@ -193,6 +193,14 @@ SETTINGS_TAKEN = {
         "/api/backups/download/harbor-light_2026-09-25_2210.db",
         None,
     ),
+    "Backup / Restore › Restore from File…": ("POST", "/api/backups/upload", UPLOAD),
+    "Backup / Restore › Save Schedule": (
+        "PUT",
+        "/api/backups/schedule",
+        {"frequency": "off"},
+    ),
+    "Backup / Restore › Save Folder": ("PUT", "/api/backups/folder", {"folder": ""}),
+    "Backup / Restore › Use Default": ("PUT", "/api/backups/folder", {"folder": ""}),
     "AI Insights › Save AI settings": (
         "PUT",
         "/api/analytics/ai-config",
@@ -221,6 +229,8 @@ SETTINGS_TAKEN_FROM_A_SIGN_IN = {
     ),
 }
 SETTINGS_TAKEN_PARTS = {
+    "Backup / Restore › #auto-backup-frequency": "Backup / Restore › Save Schedule",
+    "Backup / Restore › #backup-folder-path": "Backup / Restore › Save Folder",
     "AI Insights › #ai-settings-provider": "AI Insights › Save AI settings",
     "AI Insights › #ai-settings-model-select": "AI Insights › Save AI settings",
     "AI Insights › #ai-settings-key": "AI Insights › Save AI settings",
