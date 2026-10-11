@@ -157,5 +157,7 @@ def _loop(stop: threading.Event) -> None:
 def start() -> threading.Event:
     """Start the background checker; set the returned event to stop it."""
     stop = threading.Event()
-    threading.Thread(target=_loop, args=(stop,), name="auto-backup", daemon=True).start()
+    threading.Thread(
+        target=_loop, args=(stop,), name="auto-backup", daemon=True
+    ).start()
     return stop

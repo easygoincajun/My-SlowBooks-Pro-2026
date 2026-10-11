@@ -127,7 +127,9 @@ def set_backup_dir(folder: str | None) -> Path:
         return BACKUP_DIR
     path = Path(folder).expanduser()
     if not path.is_absolute():
-        raise ValueError("Enter the folder's full path, e.g. /Volumes/Backup/SlowBooks.")
+        raise ValueError(
+            "Enter the folder's full path, e.g. /Volumes/Backup/SlowBooks."
+        )
     if not path.is_dir():
         raise ValueError(f"There is no folder at {path}.")
     try:

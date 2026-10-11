@@ -36,7 +36,7 @@ def _company_file(tmp_path, company, value):
     return path.read_bytes()
 
 
-def test_a_backup_from_elsewhere_is_restored(books, client, tmp_path):
+def test_a_backup_from_elsewhere_is_restored(books, client, tmp_path):  # noqa: F811
     data = _company_file(tmp_path, "Harbor Light Bakery", "from the drive")
     r = _upload(client, "harbor-light-bakery_20260101_120000.db", data)
     assert r.status_code == 200, r.text
@@ -51,7 +51,7 @@ def test_a_backup_from_elsewhere_is_restored(books, client, tmp_path):
 
 
 def test_another_companys_file_still_needs_a_second_confirmation(
-    books, client, tmp_path
+    books, client, tmp_path  # noqa: F811
 ):
     data = _company_file(tmp_path, "Riverbend Books", "theirs")
     name = _upload(client, "riverbend.db", data).json()["filename"]
@@ -60,7 +60,7 @@ def test_another_companys_file_still_needs_a_second_confirmation(
     assert _value(books.live) == "original"
 
 
-def test_a_file_that_is_not_a_backup_is_refused(books, client, tmp_path):
+def test_a_file_that_is_not_a_backup_is_refused(books, client, tmp_path):  # noqa: F811
     plain = tmp_path / "plain.db"
     with closing(sqlite3.connect(plain)) as conn:
         conn.execute("CREATE TABLE notes (v TEXT)")
@@ -74,7 +74,9 @@ def test_a_file_that_is_not_a_backup_is_refused(books, client, tmp_path):
     assert [p.name for p in books.backups.iterdir()] == []
 
 
-def test_a_name_never_overwrites_or_escapes_the_folder(books, client, tmp_path):
+def test_a_name_never_overwrites_or_escapes_the_folder(
+    books, client, tmp_path  # noqa: F811
+):
     data = _company_file(tmp_path, "Harbor Light Bakery", "v1")
     first = _upload(client, "same.db", data).json()["filename"]
     second = _upload(client, "same.db", data).json()["filename"]
