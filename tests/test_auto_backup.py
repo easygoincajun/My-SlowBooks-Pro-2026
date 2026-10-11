@@ -73,7 +73,7 @@ def test_a_failed_backup_is_tried_again_an_hour_later():
 
 
 @pytest.fixture
-def scheduled(books, TestSession, monkeypatch):
+def scheduled(books, TestSession, monkeypatch):  # noqa: F811
     clock = {}
 
     class _Clock(datetime):  # backup names carry the time they were taken
@@ -90,7 +90,9 @@ def scheduled(books, TestSession, monkeypatch):
     return run
 
 
-def test_a_due_backup_is_taken_and_old_ones_cleaned_up(books, client, scheduled):
+def test_a_due_backup_is_taken_and_old_ones_cleaned_up(
+    books, client, scheduled  # noqa: F811
+):
     manual = _backup(client)
     auto_backup.set_schedule(_sched("hours", every_hours=1, keep=2), now=SAT_3PM)
     assert scheduled(SAT_3PM + timedelta(minutes=30)) is None  # not yet
@@ -109,7 +111,7 @@ def test_a_due_backup_is_taken_and_old_ones_cleaned_up(books, client, scheduled)
 
 
 def test_a_failure_is_recorded_and_nothing_is_cleaned_up(
-    books, client, scheduled, tmp_path
+    books, client, scheduled, tmp_path  # noqa: F811
 ):
     drive = tmp_path / "drive"
     drive.mkdir()
@@ -124,7 +126,9 @@ def test_a_failure_is_recorded_and_nothing_is_cleaned_up(
     assert info["next_run"] == (SAT_3PM + timedelta(hours=3)).isoformat()
 
 
-def test_a_backup_already_running_elsewhere_is_left_alone(books, scheduled):
+def test_a_backup_already_running_elsewhere_is_left_alone(
+    books, scheduled  # noqa: F811
+):
     auto_backup.set_schedule(_sched("hours", every_hours=1), now=SAT_3PM)
     auto_backup._lock_path().touch()
     try:
@@ -133,8 +137,10 @@ def test_a_backup_already_running_elsewhere_is_left_alone(books, scheduled):
         auto_backup._lock_path().unlink()
 
 
-def test_the_schedule_is_checked_when_saved(books, client):
-    r = client.put("/api/backups/schedule", json={"frequency": "daily", "time": "25:00"})
+def test_the_schedule_is_checked_when_saved(books, client):  # noqa: F811
+    r = client.put(
+        "/api/backups/schedule", json={"frequency": "daily", "time": "25:00"}
+    )
     assert r.status_code == 422
     r = client.put(
         "/api/backups/schedule",

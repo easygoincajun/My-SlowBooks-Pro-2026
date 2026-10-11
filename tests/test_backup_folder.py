@@ -15,14 +15,14 @@ from tests.test_backups_per_company import (  # noqa: F401 (fixture)
 )
 
 
-def test_the_default_folder_until_one_is_chosen(books, client):
+def test_the_default_folder_until_one_is_chosen(books, client):  # noqa: F811
     r = client.get("/api/backups/folder")
     assert r.status_code == 200, r.text
     assert r.json()["is_default"] is True
     assert r.json()["folder"] == str(books.backups)
 
 
-def test_new_backups_go_to_the_chosen_folder(books, client, tmp_path):
+def test_new_backups_go_to_the_chosen_folder(books, client, tmp_path):  # noqa: F811
     old = _backup(client)
     chosen = tmp_path / "external"
     chosen.mkdir()
@@ -44,7 +44,7 @@ def test_new_backups_go_to_the_chosen_folder(books, client, tmp_path):
     assert (chosen / r.json()["safety_backup"]).exists()
 
 
-def test_a_folder_that_cannot_be_used_is_refused(books, client, tmp_path):
+def test_a_folder_that_cannot_be_used_is_refused(books, client, tmp_path):  # noqa: F811
     for folder in (str(tmp_path / "missing"), "relative/path"):
         r = client.put("/api/backups/folder", json={"folder": folder})
         assert r.status_code == 400, r.text
@@ -52,7 +52,7 @@ def test_a_folder_that_cannot_be_used_is_refused(books, client, tmp_path):
 
 
 def test_an_unplugged_folder_fails_the_backup_and_creates_nothing(
-    books, client, tmp_path
+    books, client, tmp_path  # noqa: F811
 ):
     chosen = tmp_path / "drive"
     chosen.mkdir()
@@ -66,7 +66,7 @@ def test_an_unplugged_folder_fails_the_backup_and_creates_nothing(
     assert not chosen.exists()
 
 
-def test_blank_goes_back_to_the_default(books, client, tmp_path):
+def test_blank_goes_back_to_the_default(books, client, tmp_path):  # noqa: F811
     chosen = tmp_path / "external"
     chosen.mkdir()
     client.put("/api/backups/folder", json={"folder": str(chosen)})
