@@ -101,6 +101,7 @@ const RecurringPage = {
                         ${rec.lines.map((l, i) => RecurringPage.lineRowHtml(i, l)).join('')}
                     </tbody>
                 </table>
+                ${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.panelHtml('rec') : ''}
                 <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="RecurringPage.addLine()">+ Add Line</button>
                 <div class="invoice-totals" id="rec-totals">
                     <div class="total-row"><span class="label">Subtotal</span><span class="value" id="rec-subtotal">$0.00</span></div>
@@ -122,7 +123,7 @@ const RecurringPage = {
     lineRowHtml(idx, line) {
         const opts = RecurringPage._items.map(it => `<option value="${it.id}" ${line.item_id==it.id?'selected':''}>${escapeHtml(it.name)}</option>`).join('');
         return `<tr data-recline="${idx}">
-                <td><select class="line-item" onchange="RecurringPage.itemSelected(${idx})"><option value="">--</option>${opts}</select></td>
+                <td><select class="line-item" onchange="RecurringPage.itemSelected(${idx})"><option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${opts}</select></td>
                 <td><input class="line-desc" value="${escapeHtml(line.description || '')}"></td>
                 <td><input class="line-qty" type="number" step="0.01" value="${line.quantity || 1}" oninput="RecurringPage.recalc()"></td>
                 <td><input class="line-rate" type="number" step="0.0001" min="0" value="${Number(line.rate) || 0}" oninput="RecurringPage.recalc()"></td>
@@ -149,12 +150,14 @@ const RecurringPage = {
 
     removeLine(idx) {
         const row = $(`[data-recline="${idx}"]`);
+        if (row && typeof ItemQuickAdd !== 'undefined') ItemQuickAdd.close('rec', row.querySelector('.line-item'));
         if (row) row.remove();
         RecurringPage.recalc();
     },
 
     itemSelected(idx) {
         const row = $(`[data-recline="${idx}"]`);
+        if (typeof ItemQuickAdd !== 'undefined' && ItemQuickAdd.picked('rec', row, RecurringPage._items, $('#rec-lines'))) return;
         if (row && SalesLines.fillFromItem(row, RecurringPage._items)) RecurringPage.recalc();
     },
 
@@ -171,7 +174,7 @@ const RecurringPage = {
         const lines = [];
         $$('#rec-lines tr').forEach((row, i) => {
             lines.push({
-                item_id: row.querySelector('.line-item')?.value ? parseInt(row.querySelector('.line-item').value) : null,
+                item_id: parseInt(row.querySelector('.line-item')?.value) || null,  // "--" or a "+ New Item" never saved
                 description: row.querySelector('.line-desc')?.value || '',
                 quantity: parseFloat(row.querySelector('.line-qty')?.value) || 1,
                 is_taxable: row.querySelector('.line-taxable') ? row.querySelector('.line-taxable').checked : null,
