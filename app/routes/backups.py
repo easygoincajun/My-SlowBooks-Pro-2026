@@ -6,15 +6,17 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.schemas.common import StrictModel
-from typing import Optional
+from typing import Literal, Optional
+
+from pydantic import Field
 
 from app.database import get_db
 from app.routes._roles import require_admin
-from app.services import backup_service
+from app.services import auto_backup, backup_service
 from app.services.backup_service import (
     PRE_RESTORE_TAG,
     create_backup,
@@ -34,6 +36,78 @@ class RestoreRequest(StrictModel):
     # A backup that belongs to another company is refused (409, code
     # "other_company") unless the person has confirmed it a second time.
     allow_other_company: bool = False
+
+
+class FolderUpdate(StrictModel):
+    # Blank goes back to the default folder.
+    folder: Optional[str] = None
+
+
+def _folder_info() -> dict:
+    folder = backup_service.backup_dir()
+    return {
+        "folder": str(folder),
+        "default_folder": str(backup_service.BACKUP_DIR),
+        "is_default": backup_service.custom_backup_dir() is None,
+        "available": folder.is_dir(),
+    }
+
+
+@router.get("/folder")
+def get_backup_folder(request: Request):
+    """Where new backups are saved. A path on this machine: admin only."""
+    require_admin(request)
+    return _folder_info()
+
+
+@router.put("/folder")
+def set_backup_folder(data: FolderUpdate):
+    try:
+        backup_service.set_backup_dir(data.folder)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _folder_info()
+
+
+class ScheduleUpdate(StrictModel):
+    frequency: Literal["off", "hours", "daily", "weekly"]
+    every_hours: int = Field(24, ge=1, le=168)
+    time: str = Field("23:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    weekday: int = Field(6, ge=0, le=6)  # Monday is 0
+    keep: int = Field(14, ge=1, le=365)
+
+
+def _schedule_info() -> dict:
+    schedule = auto_backup.get_schedule()
+    last = auto_backup.last_run()
+    due = auto_backup.next_backup_at(schedule, last)
+    return {
+        **{k: schedule[k] for k in auto_backup.DEFAULT_SCHEDULE},
+        "last_run": last,
+        "next_run": due.isoformat(timespec="seconds") if due else None,
+    }
+
+
+@router.get("/schedule")
+def get_backup_schedule(request: Request):
+    require_admin(request)
+    return _schedule_info()
+
+
+@router.put("/schedule")
+def set_backup_schedule(data: ScheduleUpdate):
+    auto_backup.set_schedule(data.model_dump())
+    return _schedule_info()
+
+
+@router.post("/upload")
+def upload_backup(file: UploadFile = File(...)):
+    """Put a backup file from the person's computer in the backup folder.
+    Nothing is restored here: the page then offers the ordinary restore."""
+    result = backup_service.save_uploaded_backup(file.file, file.filename)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @router.get("")

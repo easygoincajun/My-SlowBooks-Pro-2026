@@ -399,7 +399,12 @@ async def lifespan(app: FastAPI):
             _db.close()
     except Exception:
         pass  # never block boot on the upgrader
+    # Automatic backups on the schedule set in Settings (off by default).
+    from app.services import auto_backup
+
+    stop_auto_backup = auto_backup.start()
     yield
+    stop_auto_backup.set()
 
 
 # FastAPI 0.121+ serializes return values to JSON bytes directly via Pydantic
