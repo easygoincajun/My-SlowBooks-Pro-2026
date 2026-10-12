@@ -199,6 +199,11 @@ SETTINGS_TAKEN = {
         "/api/backups/schedule",
         {"frequency": "off"},
     ),
+    "Sales Tax Agencies › Save Agencies": (
+        "PUT",
+        "/api/settings/sales-tax-agencies",
+        None,
+    ),
     "Backup / Restore › Save Folder": ("PUT", "/api/backups/folder", {"folder": ""}),
     "Backup / Restore › Use Default": ("PUT", "/api/backups/folder", {"folder": ""}),
     "AI Insights › Save AI settings": (
@@ -229,6 +234,7 @@ SETTINGS_TAKEN_FROM_A_SIGN_IN = {
     ),
 }
 SETTINGS_TAKEN_PARTS = {
+    "Sales Tax Agencies › Add Agency": "Sales Tax Agencies › Save Agencies",
     "Backup / Restore › #auto-backup-frequency": "Backup / Restore › Save Schedule",
     "Backup / Restore › #backup-folder-path": "Backup / Restore › Save Folder",
     "AI Insights › #ai-settings-provider": "AI Insights › Save AI settings",

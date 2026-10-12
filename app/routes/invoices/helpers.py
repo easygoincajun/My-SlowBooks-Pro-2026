@@ -257,14 +257,10 @@ def _build_invoice_journal_lines(
             }
         )
     if tax_amount and tax_amount > 0 and tax_account_id:
-        journal_lines.append(
-            {
-                "account_id": tax_account_id,
-                "debit": Decimal("0"),
-                "credit": Decimal(str(tax_amount)),
-                "description": "Sales tax",
-            }
-        )
+        # split across the state and parish when Settings names them
+        from app.services.sales_tax_agencies import tax_journal_lines
+
+        journal_lines += tax_journal_lines(db, tax_amount, tax_account_id)
     return journal_lines
 
 

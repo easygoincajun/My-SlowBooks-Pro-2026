@@ -6,6 +6,8 @@ import logging
 # ============================================================================
 
 from datetime import date
+from decimal import Decimal
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
@@ -246,3 +248,79 @@ def test_email(db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=500, detail="Email failed — see the email log for the reason"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sales tax agencies (app/services/sales_tax_agencies.py): the state and the
+# parish, each with its rate and its own liability account. Writes are the
+# administrator's like every /api/settings write.
+# ---------------------------------------------------------------------------
+
+
+class SalesTaxAgency(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    rate: Decimal  # percent, as on the form
+    # None: make "Sales Tax Payable – <name>"
+    account_id: Optional[int] = None
+
+
+def _agencies_out(db: Session) -> list[dict]:
+    from app.models.accounts import Account
+    from app.services.sales_tax_agencies import agencies
+
+    out = []
+    for a in agencies(db):
+        acct = db.get(Account, a["account_id"])
+        out.append(
+            {
+                "name": a["name"],
+                "rate": format(a["rate"].normalize(), "f"),
+                "account_id": a["account_id"],
+                "account_name": acct.name if acct else "",
+            }
+        )
+    return out
+
+
+@router.get("/sales-tax-agencies")
+def get_sales_tax_agencies(db: Session = Depends(get_db)):
+    return _agencies_out(db)
+
+
+@router.put("/sales-tax-agencies")
+def put_sales_tax_agencies(rows: list[SalesTaxAgency], db: Session = Depends(get_db)):
+    """Replace the list. An empty list goes back to one rate posting to
+    2200 Sales Tax Payable."""
+    from app.models.accounts import Account, AccountType
+    from app.services.accounting import ensure_account
+    from app.services.sales_tax_agencies import save_agencies
+
+    seen, clean = set(), []
+    for row in rows:
+        name = row.name.strip()
+        if not name or len(name) > 100:
+            raise HTTPException(status_code=400, detail="Each agency needs a name.")
+        if name.lower() in seen:
+            raise HTTPException(status_code=400, detail=f"{name} is listed twice.")
+        seen.add(name.lower())
+        if not (Decimal("0") < row.rate < Decimal("100")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name}: enter the rate as a percent, e.g. 5 for 5%.",
+            )
+        if row.account_id is None:
+            acct = ensure_account(
+                db, None, f"Sales Tax Payable – {name}"[:200], AccountType.LIABILITY
+            )
+        else:
+            acct = db.get(Account, row.account_id)
+            if acct is None or acct.account_type != AccountType.LIABILITY:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{name}: pick a liability account for the tax owed.",
+                )
+        clean.append({"name": name, "rate": row.rate, "account_id": acct.id})
+    save_agencies(db, clean)
+    db.commit()
+    return _agencies_out(db)

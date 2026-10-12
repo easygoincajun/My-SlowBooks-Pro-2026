@@ -1122,11 +1122,18 @@ const ReportsPage = {
             const agrees = ledger && Math.abs(ledger.difference) < 0.005;
             const reconcile = ledger ? `
                     <div style="font-size:12px; margin-top:8px; border-top:1px solid var(--gray-200); padding-top:6px;">
-                        ${escapeHtml(ledger.account_number)} ${escapeHtml(ledger.account_name)}: tax posted this period <strong>${formatCurrency(ledger.tax_posted)}</strong>
+                        ${(ledger.agencies || []).length ? 'Sales tax accounts' : `${escapeHtml(ledger.account_number)} ${escapeHtml(ledger.account_name)}`}: tax posted this period <strong>${formatCurrency(ledger.tax_posted)}</strong>
                         ${agrees
                             ? '— agrees with this report.'
                             : `— <span style="color:var(--danger); font-weight:700;">differs from this report by ${formatCurrency(ledger.difference)}</span>. Something other than a sale or credit memo posted to the account in these dates (tax on a bill, a journal entry, a void of an earlier sale).`}
                         <div>Paid this period: ${formatCurrency(ledger.payments)} · Owed at ${formatDate(data.end_date)}: <strong>${formatCurrency(ledger.balance)}</strong></div>
+                        ${(ledger.agencies || []).length ? `<div class="table-container" style="margin-top:6px;"><table>
+                            <thead><tr><th scope="col">Agency</th><th scope="col" class="amount">Rate</th><th scope="col">Account</th><th scope="col" class="amount">Tax posted</th><th scope="col" class="amount">Paid</th><th scope="col" class="amount">Owed at ${formatDate(data.end_date)}</th></tr></thead>
+                            <tbody>${ledger.agencies.map(a => `<tr>
+                                <td>${escapeHtml(a.name)}</td><td class="amount">${a.rate}%</td><td>${escapeHtml(a.account_name)}</td>
+                                <td class="amount">${formatCurrency(a.tax_posted)}</td><td class="amount">${formatCurrency(a.payments)}</td>
+                                <td class="amount"><strong>${formatCurrency(a.balance)}</strong></td></tr>`).join('')}</tbody>
+                        </table></div>` : ''}
                         ${Math.abs(ledger.purchase_tax_to_date || 0) >= 0.005 ? `<div style="margin-top:6px;">
                             Sales tax paid to suppliers on bills entered before SlowBooks Pro 2.18 was posted to ${escapeHtml(ledger.account_name)}, lowering that balance by <strong>${formatCurrency(ledger.purchase_tax)}</strong> this period; since 2.18 that tax is part of what the purchase cost. To correct it, post one journal entry: debit the expense or cost-of-goods account those purchases used, and credit ${escapeHtml(ledger.account_number)} ${escapeHtml(ledger.account_name)} <strong>${formatCurrency(ledger.purchase_tax_to_date)}</strong> (the total to ${formatDate(data.end_date)}).</div>` : ''}
                     </div>` : '';

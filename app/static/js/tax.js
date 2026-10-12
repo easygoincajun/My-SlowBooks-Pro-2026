@@ -73,14 +73,24 @@ const TaxPage = {
         // Tax is paid out of a bank or card account — never Accounts
         // Receivable, Inventory or Undeposited Funds, which the old
         // every-asset list offered (the server refuses those too).
-        const [accounts, balSheet] = await Promise.all([
+        const [accounts, balSheet, report] = await Promise.all([
             API.get('/accounts?bank=1&active_only=true'),
             API.get('/reports/balance-sheet'),
+            API.get('/reports/sales-tax').catch(() => null),
         ]);
 
         // Find Sales Tax Payable balance
         const taxLiability = balSheet.liabilities.find(l => l.account_number === '2200');
-        const taxBalance = taxLiability ? Math.abs(taxLiability.amount) : 0;
+        // With the state and parish split (Settings → Sales Tax Agencies),
+        // each is paid on its own: the amount follows the agency picked.
+        const agencies = (report && report.ledger && report.ledger.agencies) || [];
+        TaxPage._agencies = agencies;
+        const taxBalance = agencies.length ? agencies[0].balance
+            : (taxLiability ? Math.abs(taxLiability.amount) : 0);
+        const agencyField = agencies.length ? `<div class="form-group"><label>Agency *</label>
+                        <select name="tax_account_id" required onchange="TaxPage.agencyPicked(this)">
+                            ${agencies.map(a => `<option value="${a.account_id}">${escapeHtml(a.name)} (${formatCurrency(a.balance)} owed)</option>`).join('')}
+                        </select></div>` : '';
 
         const bankOpts = accounts.map(a => `<option value="${a.id}">${escapeHtml(a.name)} (${formatCurrency(a.balance)})</option>`).join('');
         const noBank = accounts.length ? '' : '<small style="color:var(--danger);">No bank or credit card account yet. Add one under Banking first.</small>';
@@ -88,9 +98,10 @@ const TaxPage = {
         openModal('Pay Sales Tax', `
             <form onsubmit="TaxPage.submitPaySalesTax(event)">
                 <div style="margin-bottom:12px; padding:8px; background:var(--primary-light); border-radius:4px;">
-                    <strong>Sales Tax Payable Balance:</strong> ${formatCurrency(taxBalance)}
+                    <strong>${agencies.length ? 'Owed to this agency' : 'Sales Tax Payable Balance'}:</strong> <span id="sales-tax-owed">${formatCurrency(taxBalance)}</span>
                 </div>
                 <div class="form-grid">
+                    ${agencyField}
                     <div class="form-group"><label>Amount *</label>
                         <input name="amount" type="number" step="0.01" required value="${taxBalance.toFixed(2)}"></div>
                     <div class="form-group"><label>Date *</label>
@@ -107,6 +118,13 @@ const TaxPage = {
             </form>`);
     },
 
+    agencyPicked(select) {
+        const a = (TaxPage._agencies || []).find(x => String(x.account_id) === select.value);
+        if (!a) return;
+        select.form.amount.value = a.balance.toFixed(2);
+        $('#sales-tax-owed').textContent = formatCurrency(a.balance);
+    },
+
     async submitPaySalesTax(e) {
         e.preventDefault();
         const form = e.target;
@@ -116,6 +134,7 @@ const TaxPage = {
                 date: form.date.value,
                 pay_from_account_id: parseInt(form.pay_from_account_id.value),
                 check_number: form.check_number.value || null,
+                ...(form.tax_account_id ? { tax_account_id: parseInt(form.tax_account_id.value, 10) } : {}),
             });
             toast('Sales tax payment recorded');
             App.refresh();
