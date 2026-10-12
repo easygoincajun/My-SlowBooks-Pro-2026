@@ -24,6 +24,9 @@ class SalesTaxPaymentRequest(StrictModel):
     date: Optional[dt_date] = None
     amount: Decimal
     pay_from_account_id: int
+    # Which agency's account the payment settles (Settings → Sales Tax
+    # Agencies); none means 2200 Sales Tax Payable.
+    tax_account_id: Optional[int] = None
     check_number: Optional[str] = ""
     reference: Optional[str] = None
 
@@ -137,19 +140,23 @@ def _sales_tax_ledger(db: Session, start_date, end_date, total_tax: Decimal):
     from app.models.transactions import Transaction, TransactionLine
     from app.services import control_accounts
 
+    from app.services.sales_tax_agencies import agencies, tax_account_ids
+
     tax_id = control_accounts.find(db, "2200")
     if tax_id is None:
         return None
     account = db.get(Account, tax_id)
+    # With agencies set up, the tax lives in their accounts too.
+    all_ids = tax_account_ids(db)
 
-    def owed(*conds) -> Decimal:
+    def owed(*conds, ids=all_ids) -> Decimal:
         dr, cr = (
             db.query(
                 sqlfunc.coalesce(sqlfunc.sum(TransactionLine.debit), 0),
                 sqlfunc.coalesce(sqlfunc.sum(TransactionLine.credit), 0),
             )
             .join(Transaction, TransactionLine.transaction_id == Transaction.id)
-            .filter(TransactionLine.account_id == tax_id, *conds)
+            .filter(TransactionLine.account_id.in_(ids), *conds)
             .one()
         )
         return _q(Decimal(str(cr)) - Decimal(str(dr)))
@@ -163,9 +170,31 @@ def _sales_tax_ledger(db: Session, start_date, end_date, total_tax: Decimal):
     purchase = Transaction.source_type.in_(
         ("bill", "bill_void", "vendor_credit", "vendor_credit_void")
     )
+    by_agency = []
+    for agency in agencies(db):
+        ids = [agency["account_id"]]
+        acct = db.get(Account, agency["account_id"])
+        by_agency.append(
+            {
+                "name": agency["name"],
+                "rate": float(agency["rate"]),
+                "account_id": agency["account_id"],
+                "account_name": acct.name if acct else "",
+                "tax_posted": float(
+                    owed(
+                        *in_period,
+                        or_(Transaction.source_type.is_(None), ~payment),
+                        ids=ids,
+                    )
+                ),
+                "payments": float(-owed(*in_period, payment, ids=ids)),
+                "balance": float(owed(Transaction.date <= end_date, ids=ids)),
+            }
+        )
     return {
         "account_number": account.account_number,
         "account_name": account.name,
+        "agencies": by_agency,
         "tax_posted": float(posted),
         "payments": float(-owed(*in_period, payment)),
         "balance": float(owed(Transaction.date <= end_date)),
@@ -210,6 +239,19 @@ def pay_sales_tax(data: SalesTaxPaymentRequest, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=400, detail="Sales Tax Payable account (2200) not found"
         )
+    if data.tax_account_id is not None:
+        from app.services.sales_tax_agencies import tax_account_ids
+
+        if data.tax_account_id not in tax_account_ids(db):
+            raise HTTPException(
+                status_code=400,
+                detail="That account is not a sales tax account. Pick the agency "
+                "the payment is for.",
+            )
+        tax_account_id = data.tax_account_id
+    description = "Sales Tax Payment"
+    if data.tax_account_id is not None:
+        description += f": {db.get(Account, tax_account_id).name}"
 
     journal_lines = [
         {
@@ -231,7 +273,7 @@ def pay_sales_tax(data: SalesTaxPaymentRequest, db: Session = Depends(get_db)):
     txn = create_journal_entry(
         db,
         pay_date,
-        "Sales Tax Payment",
+        description,
         journal_lines,
         source_type="sales_tax_payment",
         reference=reference,

@@ -16,6 +16,7 @@ from app.models.invoices import Invoice, InvoiceLine
 from app.models.items import Item
 from app.services.jobs_service import own_job
 from app.services.numbering import next_invoice_number
+from app.services.sales_tax_agencies import tax_journal_lines
 from app.services.accounting import (
     taxed_copy_lines,
     _q,
@@ -215,14 +216,7 @@ def generate_due_invoices(
                     }
                 )
             if tax_amount > 0 and tax_account_id:
-                journal_lines.append(
-                    {
-                        "account_id": tax_account_id,
-                        "debit": Decimal("0"),
-                        "credit": tax_amount,
-                        "description": "Sales tax",
-                    }
-                )
+                journal_lines += tax_journal_lines(db, tax_amount, tax_account_id)
             txn = create_journal_entry(
                 db,
                 rec.next_due,

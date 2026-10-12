@@ -39,6 +39,7 @@ from app.routes.invoices.helpers import confirm_zero_total, resolve_line_taxable
 from app.services.closing_date import check_closing_date
 from app.services.jobs_service import refuse_other_customers_jobs
 from app.services.numbering import next_credit_memo_number
+from app.services.sales_tax_agencies import tax_journal_lines
 from app.services.settings_service import get_all_settings as get_settings
 from app.services.request_utils import content_disposition
 
@@ -240,13 +241,8 @@ def create_credit_memo(data: CreditMemoCreate, db: Session = Depends(get_db)):
 
     # DR Sales Tax Payable if tax
     if tax_amount > 0 and tax_account_id:
-        journal_lines.append(
-            {
-                "account_id": tax_account_id,
-                "debit": tax_amount,
-                "credit": Decimal("0"),
-                "description": "Sales tax credit",
-            }
+        journal_lines += tax_journal_lines(
+            db, tax_amount, tax_account_id, debit=True, description="Sales tax credit"
         )
 
     # CR Accounts Receivable

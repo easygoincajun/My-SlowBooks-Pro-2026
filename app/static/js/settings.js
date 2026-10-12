@@ -78,6 +78,7 @@ const SettingsPage = {
         SettingsPage._savedClosingDate = s.closing_date || '';
         setTimeout(() => {
             SettingsPage.loadBackups();
+            SettingsPage.loadSalesTaxAgencies();
             SettingsPage.loadLegacyFiles();
             SettingsPage.loadEmailTemplates();
             SettingsPage.loadAiConfig();
@@ -197,6 +198,20 @@ const SettingsPage = {
                             </select></div>
                     </div>
                 </div>
+
+                ${SettingsPage._isAdmin() ? `<div class="settings-section" id="settings-sales-tax" data-admin role="group" aria-labelledby="settings-h-sales-tax">
+                    <h3 id="settings-h-sales-tax">Sales Tax Agencies</h3>
+                    <div style="font-size:10px; color:var(--text-muted); margin-bottom:8px;">
+                        Where sales tax is filed separately, e.g. the state and the parish. Documents keep one
+                        combined rate; the tax each one collects is split between these in proportion to their
+                        rates, each to its own account, and paid separately. With none listed, all sales tax
+                        goes to Sales Tax Payable.</div>
+                    <div id="sales-tax-agency-rows"></div>
+                    <div style="display:flex; gap:8px; margin-top:8px;">
+                        <button type="button" class="btn btn-secondary" data-write onclick="SettingsPage.addSalesTaxAgency()">Add Agency</button>
+                        <button type="button" class="btn btn-primary" data-write onclick="SettingsPage.saveSalesTaxAgencies()">Save Agencies</button>
+                    </div>
+                </div>` : ''}
 
                 <!-- Desktop app only (shown by loadSignInPref); the session used
                      to outlive the app, so a relaunch reopened the company
@@ -1083,6 +1098,76 @@ const SettingsPage = {
         } catch (e) {
             el.textContent = 'Could not check OCR status.';
         }
+    },
+
+    // ------------------------------------------------------------------
+    // Sales tax agencies: one row each, name / rate % / liability account.
+    // The account list is the chart's liabilities, plus "create one".
+    // ------------------------------------------------------------------
+    _taxAccounts: [],
+
+    _agencyRowHtml(a = {}) {
+        const opts = SettingsPage._taxAccounts.map(acct =>
+            `<option value="${acct.id}" ${a.account_id == acct.id ? 'selected' : ''}>${escapeHtml(acct.name)}</option>`).join('');
+        return `<div class="sales-tax-agency" style="display:flex; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
+            <input class="agency-name" placeholder="Agency, e.g. Louisiana State" aria-label="Agency name" value="${escapeHtml(a.name || '')}" style="flex:2; min-width:180px;">
+            <input class="agency-rate" type="number" min="0" max="100" step="0.0001" placeholder="Rate %" aria-label="Agency rate (%)" value="${escapeHtml(a.rate || '')}" style="width:90px;">
+            <select class="agency-account" aria-label="Agency liability account" data-no-search style="flex:2; min-width:180px;">
+                <option value="">Create "Sales Tax Payable – name"</option>${opts}</select>
+            <button type="button" class="btn btn-sm btn-secondary" data-write aria-label="Remove agency" onclick="this.parentElement.remove()">Remove</button>
+        </div>`;
+    },
+
+    _showSalesTaxAgencies(rows) {
+        const box = $('#sales-tax-agency-rows');
+        if (!box) return;
+        box.innerHTML = rows.length ? rows.map(a => SettingsPage._agencyRowHtml(a)).join('')
+            : '<div class="agency-none" style="font-size:11px; color:var(--text-muted);">None: one rate, all to Sales Tax Payable.</div>';
+        // The default rate is the agencies' total while there are any.
+        const rate = document.querySelector('#settings-form [name="default_tax_rate"]');
+        if (rate) {
+            rate.readOnly = rows.length > 0;
+            rate.title = rows.length ? 'The total of the Sales Tax Agencies below' : rate.title;
+        }
+    },
+
+    async loadSalesTaxAgencies() {
+        if (!$('#sales-tax-agency-rows')) return;
+        try {
+            const [rows, accounts] = await Promise.all([
+                API.get('/settings/sales-tax-agencies'),
+                API.get('/accounts?account_type=liability&active_only=true'),
+            ]);
+            SettingsPage._taxAccounts = accounts.filter(a => a.account_type === 'liability');
+            SettingsPage._showSalesTaxAgencies(rows);
+        } catch (e) { /* ignore */ }
+    },
+
+    addSalesTaxAgency() {
+        $('#sales-tax-agency-rows .agency-none')?.remove();
+        $('#sales-tax-agency-rows').insertAdjacentHTML('beforeend', SettingsPage._agencyRowHtml());
+    },
+
+    async saveSalesTaxAgencies() {
+        const rows = $$('#sales-tax-agency-rows .sales-tax-agency').map(row => ({
+            name: row.querySelector('.agency-name').value.trim(),
+            rate: row.querySelector('.agency-rate').value,
+            account_id: parseInt(row.querySelector('.agency-account').value, 10) || null,
+        })).filter(r => r.name || r.rate);
+        try {
+            const saved = await API.put('/settings/sales-tax-agencies', rows);
+            await SettingsPage.loadSalesTaxAgencies();
+            if (saved.length) {
+                // the server set the default rate to their total: show it, and
+                // count it as saved so Save Settings doesn't put the old one back
+                const total = saved.reduce((t, a) => t + parseFloat(a.rate), 0);
+                const rate = document.querySelector('#settings-form [name="default_tax_rate"]');
+                if (rate) rate.value = +total.toFixed(4);
+                if (SettingsPage._snapshot && rate) SettingsPage._snapshot.default_tax_rate = rate.value;
+                SettingsPage._updateDirty();
+            }
+            toast(saved.length ? `Sales tax split between ${saved.length} agencies` : 'Sales tax goes to Sales Tax Payable');
+        } catch (err) { toast(err.message, 'error'); }
     },
 
     async createBackup() {

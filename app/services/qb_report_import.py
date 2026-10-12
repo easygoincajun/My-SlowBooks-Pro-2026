@@ -340,15 +340,12 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                 if rec["tax_amount"]:
                     from app.services.accounting import get_sales_tax_account_id
 
+                    from app.services.sales_tax_agencies import tax_journal_lines
+
                     tax_id = get_sales_tax_account_id(db)
                     if tax_id:
-                        journal_lines.append(
-                            {
-                                "account_id": tax_id,
-                                "debit": Decimal("0"),
-                                "credit": rec["tax_amount"],
-                                "description": "Sales tax",
-                            }
+                        journal_lines += tax_journal_lines(
+                            db, rec["tax_amount"], tax_id
                         )
                 total_dr = sum(jl["debit"] for jl in journal_lines)
                 total_cr = sum(jl["credit"] for jl in journal_lines)
