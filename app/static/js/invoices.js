@@ -667,6 +667,7 @@ const InvoicesPage = {
                         ${inv.lines.map((l, i) => InvoicesPage.lineRowHtml(i, l, items)).join('')}
                     </tbody>
                 </table>
+                ${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.panelHtml('inv') : ''}
                 <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="InvoicesPage.addLine()">+ Add Line</button>
                 <div class="invoice-totals" id="inv-totals">
                     <div class="total-row"><span class="label">Subtotal</span><span class="value" id="inv-subtotal">$0.00</span></div>
@@ -756,7 +757,7 @@ const InvoicesPage = {
         const dim = (v) => (v == null ? '' : escapeHtml(String(v)));
         return `<tr data-line="${idx}" data-job-id="${dim(line.job_id)}" data-class-id="${dim(line.class_id)}" data-cost-code-id="${dim(line.cost_code_id)}">
             <td><select class="line-item" onchange="InvoicesPage.itemSelected(${idx})">
-                <option value="">--</option>${itemOpts}</select></td>
+                <option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${itemOpts}</select></td>
             <td><input class="line-desc" value="${escapeHtml(line.description || '')}"></td>
             ${InvoicesPage.lineClasses() ? Nonprofit.classCellHtml('line-class', line.class_id) : ''}
             <td><input class="line-qty" type="number" step="0.01" value="${line.quantity || 1}" oninput="InvoicesPage.recalc()"></td>
@@ -776,12 +777,14 @@ const InvoicesPage = {
 
     removeLine(idx) {
         const row = $(`[data-line="${idx}"]`);
+        if (row && typeof ItemQuickAdd !== 'undefined') ItemQuickAdd.close('inv', row.querySelector('.line-item'));
         if (row) row.remove();
         InvoicesPage.recalc();
     },
 
     itemSelected(idx) {
         const row = $(`[data-line="${idx}"]`);
+        if (typeof ItemQuickAdd !== 'undefined' && ItemQuickAdd.picked('inv', row, InvoicesPage._items, $('#inv-lines'))) return;
         if (row && SalesLines.fillFromItem(row, InvoicesPage._items)) InvoicesPage.recalc();
     },
 
@@ -838,7 +841,7 @@ const InvoicesPage = {
         $$('#inv-lines tr').forEach((row, i) => {
             const item_id = row.querySelector('.line-item')?.value;
             lines.push({
-                item_id: item_id ? parseInt(item_id) : null,
+                item_id: parseInt(item_id) || null,  // "--" or a "+ New Item" never saved
                 description: row.querySelector('.line-desc')?.value || '',
                 quantity: parseFloat(row.querySelector('.line-qty')?.value) || 1,
                 is_taxable: row.querySelector('.line-taxable') ? row.querySelector('.line-taxable').checked : null,

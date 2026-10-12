@@ -125,6 +125,7 @@ const CreditMemosPage = {
                     <thead><tr><th scope="col">Item</th><th scope="col">Description</th><th scope="col" class="col-qty">Qty</th><th scope="col" class="col-rate">Rate</th><th scope="col" title="Sales tax applies to this line">Tax</th><th scope="col" class="col-amount">Amount</th><th scope="col" class="col-actions"></th></tr></thead>
                     <tbody id="cm-lines">${CreditMemosPage.lineRowHtml(0)}</tbody>
                 </table>
+                ${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.panelHtml('cm') : ''}
                 <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="CreditMemosPage.addLine()">+ Add Line</button>
                 <div class="invoice-totals" id="cm-totals">
                     <div class="total-row"><span class="label">Subtotal</span><span class="value" id="cm-subtotal">$0.00</span></div>
@@ -145,7 +146,7 @@ const CreditMemosPage = {
     lineRowHtml(idx) {
         const itemOpts = CreditMemosPage._items.map(i => `<option value="${i.id}">${escapeHtml(i.name)}</option>`).join('');
         return `<tr data-cmline="${idx}">
-                <td><select class="line-item" onchange="CreditMemosPage.itemSelected(${idx})"><option value="">--</option>${itemOpts}</select></td>
+                <td><select class="line-item" onchange="CreditMemosPage.itemSelected(${idx})"><option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${itemOpts}</select></td>
                 <td><input class="line-desc"></td>
                 <td><input class="line-qty" type="number" step="0.01" value="1" oninput="CreditMemosPage.recalc()"></td>
                 <td><input class="line-rate" type="number" step="0.0001" min="0" value="0" oninput="CreditMemosPage.recalc()"></td>
@@ -163,12 +164,14 @@ const CreditMemosPage = {
 
     removeLine(idx) {
         const row = $(`[data-cmline="${idx}"]`);
+        if (row && typeof ItemQuickAdd !== 'undefined') ItemQuickAdd.close('cm', row.querySelector('.line-item'));
         if (row) row.remove();
         CreditMemosPage.recalc();
     },
 
     itemSelected(idx) {
         const row = $(`[data-cmline="${idx}"]`);
+        if (typeof ItemQuickAdd !== 'undefined' && ItemQuickAdd.picked('cm', row, CreditMemosPage._items, $('#cm-lines'))) return;
         if (row && SalesLines.fillFromItem(row, CreditMemosPage._items)) CreditMemosPage.recalc();
     },
 
@@ -210,7 +213,7 @@ const CreditMemosPage = {
         const lines = [];
         $$('#cm-lines tr').forEach((row, i) => {
             lines.push({
-                item_id: row.querySelector('.line-item')?.value ? parseInt(row.querySelector('.line-item').value) : null,
+                item_id: parseInt(row.querySelector('.line-item')?.value) || null,  // "--" or a "+ New Item" never saved
                 description: row.querySelector('.line-desc')?.value || '',
                 quantity: parseFloat(row.querySelector('.line-qty')?.value) || 1,
                 rate: parseFloat(row.querySelector('.line-rate')?.value) || 0,

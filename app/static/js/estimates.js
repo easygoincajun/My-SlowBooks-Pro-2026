@@ -184,6 +184,7 @@ const EstimatesPage = {
                         ${est.lines.map((l, i) => EstimatesPage.lineRowHtml(i, l, items)).join('')}
                     </tbody>
                 </table></div>
+                ${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.panelHtml('est') : ''}
                 <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="EstimatesPage.addLine()">+ Add Line</button>
                 <div class="invoice-totals" id="est-totals">
                     <div class="total-row"><span class="label">Subtotal</span><span class="value" id="est-subtotal">$0.00</span></div>
@@ -204,7 +205,7 @@ const EstimatesPage = {
         const itemOpts = items.map(i => `<option value="${i.id}" ${line.item_id==i.id?'selected':''}>${escapeHtml(i.name)}</option>`).join('');
         return `<tr data-eline="${idx}">
             <td><select class="line-item" style="min-width:150px" onchange="EstimatesPage.itemSelected(${idx})">
-                <option value="">--</option>${itemOpts}</select></td>
+                <option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${itemOpts}</select></td>
             <td><input class="line-desc" value="${escapeHtml(line.description || '')}"></td>
             ${CostCodes.cellHtml('line-cost-code', line.cost_code_id || null)}
             <td><input class="line-unit-cost" type="number" step="0.01" value="${line.unit_cost ?? ''}" placeholder="cost" title="Unit cost (budget side); rate is what you charge"></td>
@@ -225,12 +226,14 @@ const EstimatesPage = {
 
     removeLine(idx) {
         const row = $(`[data-eline="${idx}"]`);
+        if (row && typeof ItemQuickAdd !== 'undefined') ItemQuickAdd.close('est', row.querySelector('.line-item'));
         if (row) row.remove();
         EstimatesPage.recalc();
     },
 
     itemSelected(idx) {
         const row = $(`[data-eline="${idx}"]`);
+        if (typeof ItemQuickAdd !== 'undefined' && ItemQuickAdd.picked('est', row, EstimatesPage._items, $('#est-lines'))) return;
         const item = row && SalesLines.fillFromItem(row, EstimatesPage._items);
         if (item) {
             // the item's standard cost is the budget side of the line; blank
@@ -255,7 +258,7 @@ const EstimatesPage = {
         $$('#est-lines tr').forEach((row, i) => {
             const item_id = row.querySelector('.line-item')?.value;
             lines.push({
-                item_id: item_id ? parseInt(item_id) : null,
+                item_id: parseInt(item_id) || null,  // "--" or a "+ New Item" never saved
                 description: row.querySelector('.line-desc')?.value || '',
                 quantity: parseFloat(row.querySelector('.line-qty')?.value) || 1,
                 rate: parseFloat(row.querySelector('.line-rate')?.value) || 0,

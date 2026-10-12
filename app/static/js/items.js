@@ -402,3 +402,117 @@ const ItemsPage = {
         }
     },
 };
+
+/**
+ * "+ New Item" in a sales form's line Item picker: create an item without
+ * leaving the form, as "+ New Customer" does for the customer. The panel
+ * sits under the lines table (a row inside it would be counted as a line),
+ * remembers which line asked, and on Save creates the item, adds it to every
+ * line's picker and picks it on that line, whose change handler fills the
+ * description, price and tax flag. Income goes to the default income
+ * account until one is set in Items.
+ *
+ * A form gives the panel an id prefix: panelHtml('inv'), then
+ * open('inv', select, items, tbody) when a line's picker reads NEW. `items`
+ * is the form's item list (the new item joins it, so the line's fill finds
+ * it); `tbody` holds the lines whose pickers get the new option.
+ */
+const ItemQuickAdd = {
+    NEW: '__new__',
+    _for: {},  // prefix -> {select, items, tbody} of the line that asked
+
+    option() { return `<option value="${this.NEW}">+ New Item</option>`; },
+
+    panelHtml(p) {
+        const types = [['service', 'Service'], ['product', 'Product'], ['material', 'Material'], ['labor', 'Labor']];
+        return `
+            <div id="${p}-new-item" style="display:none; margin-top:8px; padding:8px; border:1px solid var(--gray-300); border-radius:4px; background:var(--primary-light);">
+                <div style="font-weight:700; font-size:11px; margin-bottom:6px;">Quick Add Item</div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:4px;">
+                    <input id="${p}-new-item-name" placeholder="Name *" aria-label="Item name" aria-required="true" style="flex:2; min-width:160px;">
+                    <select id="${p}-new-item-type" aria-label="Item type" data-no-search>
+                        ${types.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>
+                    <input id="${p}-new-item-rate" type="number" step="0.01" min="0" placeholder="Price" aria-label="Item price" style="width:100px;">
+                    <label style="font-weight:normal; display:flex; align-items:center; gap:4px;">
+                        <input type="checkbox" id="${p}-new-item-taxable" checked> Taxable</label>
+                </div>
+                <input id="${p}-new-item-desc" placeholder="Description" aria-label="Item description" style="width:100%; margin-bottom:4px;">
+                <div style="display:flex; gap:6px;">
+                    <button type="button" class="btn btn-sm btn-primary" onclick="ItemQuickAdd.save('${p}')">Save</button>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="ItemQuickAdd.cancel('${p}')">Cancel</button>
+                </div>
+            </div>`;
+    },
+
+    open(p, select, items, tbody) {
+        this._for[p] = { select, items, tbody };
+        $(`#${p}-new-item`).style.display = 'block';
+        $(`#${p}-new-item-name`).focus();
+    },
+
+    // A line's picker changed. True when it asked for "+ New Item": the
+    // panel opens and the line waits for it. Otherwise a panel open for this
+    // line closes, and the form fills the line from the item as before.
+    picked(p, row, items, tbody) {
+        const select = row?.querySelector('.line-item');
+        if (!select) return false;
+        if (select.value === this.NEW) {
+            this.open(p, select, items, tbody);
+            return true;
+        }
+        this.close(p, select);
+        return false;
+    },
+
+    // A line that picks something else while the panel is open for it.
+    close(p, select) {
+        if (select && this._for[p]?.select !== select) return;
+        const panel = $(`#${p}-new-item`);
+        if (panel) panel.style.display = 'none';
+        delete this._for[p];
+    },
+
+    cancel(p) {
+        const select = this._for[p]?.select;
+        this.close(p);
+        if (select && select.value === this.NEW) {
+            select.value = '';
+            select.dispatchEvent(new Event('change'));
+        }
+    },
+
+    async save(p) {
+        if (!this._for[p]) return null;
+        const { select, items, tbody } = this._for[p];
+        const name = $(`#${p}-new-item-name`).value.trim();
+        if (!name) { toast('Item name is required', 'error'); return null; }
+        let item = items.find(i => (i.name || '').toLowerCase() === name.toLowerCase());
+        if (item) {
+            toast(`Using existing item "${item.name}"`);
+        } else {
+            try {
+                item = await API.post('/items', {
+                    name,
+                    item_type: $(`#${p}-new-item-type`).value,
+                    rate: parseFloat($(`#${p}-new-item-rate`).value) || 0,
+                    is_taxable: $(`#${p}-new-item-taxable`).checked,
+                    description: $(`#${p}-new-item-desc`).value.trim() || null,
+                });
+            } catch (err) { toast(err.message, 'error'); return null; }
+            items.push(item);
+            for (const sel of tbody.querySelectorAll('.line-item')) {
+                sel.insertAdjacentHTML('beforeend', `<option value="${item.id}">${escapeHtml(item.name)}</option>`);
+            }
+            toast(`Item "${item.name}" created`);
+        }
+        for (const id of ['name', 'rate', 'desc']) $(`#${p}-new-item-${id}`).value = '';
+        $(`#${p}-new-item-type`).value = 'service';
+        $(`#${p}-new-item-taxable`).checked = true;
+        this.close(p);
+        if (select && select.isConnected) {
+            select.value = item.id;
+            select.dispatchEvent(new Event('change'));
+        }
+        return item;
+    },
+};
