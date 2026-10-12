@@ -7,8 +7,10 @@
     # 2. edit the match files (rename, merge, pick accounts), plan again
     python scripts/import_crm_export.py ~/Downloads/crm-data-export --company "My Books"
 
-    # 3. import: all of it in one transaction, or nothing
-    python scripts/import_crm_export.py ~/Downloads/crm-data-export --company "My Books" --import
+    # 3. import: all of it in one transaction, or nothing. --bank-balance
+    #    sets the payments' bank account to its real balance on --as-of
+    python scripts/import_crm_export.py ~/Downloads/crm-data-export --company "My Books" \
+        --import --bank-balance 2311.55 --as-of 2026-10-11
 
 --company names a desktop company (the company list under SLOWBOOKS_DATA_DIR);
 --create makes it first, empty, when there is none by that name.
@@ -18,6 +20,8 @@ See app/services/crm_import.py for what is read and how.
 
 import argparse
 import sys
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -59,6 +63,18 @@ def main() -> int:
     ap.add_argument(
         "--import", dest="do_import", action="store_true", help="post the plan"
     )
+    ap.add_argument(
+        "--bank-balance",
+        type=Decimal,
+        help="the real balance of the account payments go to; the difference "
+        "posts to Opening Balance Equity",
+    )
+    ap.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        default=date.today(),
+        help="the date of --bank-balance (YYYY-MM-DD, default today)",
+    )
     args = ap.parse_args()
 
     if not (args.export / "invoices.csv").exists():
@@ -87,6 +103,9 @@ def main() -> int:
             return 1
         try:
             made = crm_import.apply_plan(db, plan)
+            if args.bank_balance is not None:
+                txn = crm_import.true_up_bank(db, plan, args.bank_balance, args.as_of)
+                made["bank adjustment"] = 1 if txn else 0
             db.commit()
         except Exception:
             db.rollback()

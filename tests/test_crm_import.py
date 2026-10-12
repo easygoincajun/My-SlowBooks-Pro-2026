@@ -9,6 +9,7 @@ screens post; a second import adds nothing.
 """
 
 import csv
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -326,3 +327,19 @@ def test_a_second_import_adds_nothing(export, db_session, seed_accounts):
     made = crm_import.apply_plan(db_session, crm_import.build_plan(db_session, export))
     assert made == {}
     assert db_session.query(Transaction).count() == txns
+
+
+def test_the_bank_is_brought_to_its_real_balance(export, db_session, seed_accounts):
+    plan = crm_import.build_plan(db_session, export)
+    crm_import.apply_plan(db_session, plan)
+    checking = db_session.query(Account).filter(Account.name == "Checking").one()
+    assert checking.balance == Decimal("518.50")
+    on = date(2026, 3, 31)
+    assert crm_import.true_up_bank(db_session, plan, Decimal("200.00"), on) is not None
+    db_session.refresh(checking)
+    assert checking.balance == Decimal("200.00")
+    equity = db_session.query(Account).filter(Account.account_number == "3900").one()
+    assert equity.name == "Opening Balance Equity"
+    assert equity.balance == Decimal("-318.50")
+    # run again: the books already agree, nothing more posts
+    assert crm_import.true_up_bank(db_session, plan, Decimal("200.00"), on) is None

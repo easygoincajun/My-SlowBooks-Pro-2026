@@ -860,3 +860,19 @@ def apply_plan(db: Session, plan: Plan) -> dict:
         made["transfers"] += 1
     db.flush()
     return dict(made)
+
+
+def true_up_bank(db: Session, plan: Plan, balance: Decimal, as_of: date):
+    """Bring the account customer payments went to up (or down) to what the
+    bank says on ``as_of``. The CRM didn't hold every expense, so its
+    history alone leaves the account wrong; the difference posts against
+    3900 Opening Balance Equity, as a bank feed's statement balance does.
+    Returns the posting, or None when the books already agree."""
+    from app.services.bank_posting import post_statement_balance
+
+    name = plan.accounts[("deposit", DEPOSIT_ROW)]["slowbooks_account"]
+    txn = post_statement_balance(
+        db, _existing_account(db, name), as_of, balance, post_difference=True
+    )
+    db.flush()
+    return txn
