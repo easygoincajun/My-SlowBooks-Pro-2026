@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 PRODUCT_NAME = "SlowBooks Pro 2026"
-COMPANY_NAME = "VonHoltenCodes"
+COMPANY_NAME = "easygoincajun"  # modified build; copyright below stays the author's
 INTERNAL_NAME = "SlowBooksPro"
 ORIGINAL_FILENAME = "SlowBooksPro.exe"
 DESCRIPTION = "SlowBooks Pro 2026 — bookkeeping"
