@@ -343,3 +343,39 @@ def test_the_bank_is_brought_to_its_real_balance(export, db_session, seed_accoun
     assert equity.balance == Decimal("-318.50")
     # run again: the books already agree, nothing more posts
     assert crm_import.true_up_bank(db_session, plan, Decimal("200.00"), on) is None
+
+
+def test_tax_sent_to_an_agency_is_a_sales_tax_payment(
+    export, db_session, seed_accounts, client
+):
+    """Agencies set, the CRM's tax splits between them; a CRM "expense" mapped
+    to an agency's account is a payment of the tax owed, which the Sales Tax
+    report counts as paid and which still agrees with the books."""
+    crm_import.write_match_files(crm_import.build_plan(db_session, export), export)
+    rows = _match(export, "accounts.csv")
+    for r in rows:
+        if r["source_name"] == "Web Hosting":  # stands in for "LA Dept of Revenue"
+            r["slowbooks_account"] = "Sales Tax Payable – Louisiana State"
+            r["new_account_type"] = "liability"
+    _rewrite(export, "accounts.csv", rows)
+    plan = crm_import.build_plan(db_session, export)
+    assert plan.problems == []
+    crm_import.set_tax_agencies(
+        db_session, ["Louisiana State=5", "Jefferson Parish=5.25"]
+    )
+    made = crm_import.apply_plan(db_session, plan)
+    db_session.commit()
+    assert made["sales tax payments"] == 1 and "expenses" not in made
+
+    ledger = client.get(
+        "/api/reports/sales-tax?start_date=2026-01-01&end_date=2026-12-31"
+    ).json()["ledger"]
+    assert ledger["difference"] == 0
+    by_name = {a["name"]: a for a in ledger["agencies"]}
+    # $41 tax on invoice 101: 20.00 state, 21.00 parish; 12.50 paid to the state
+    assert (
+        by_name["Louisiana State"]["tax_posted"],
+        by_name["Louisiana State"]["payments"],
+    ) == (20.0, 12.5)
+    assert by_name["Jefferson Parish"]["tax_posted"] == 21.0
+    assert by_name["Louisiana State"]["balance"] == 7.5

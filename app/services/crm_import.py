@@ -795,11 +795,17 @@ def apply_plan(db: Session, plan: Plan) -> dict:
         payment.transaction_id = txn.id
         made["payments"] += 1
 
+    from app.services.sales_tax_agencies import tax_account_ids
+
+    tax_ids = set(tax_account_ids(db))
     for e in plan.expenses:
         if _already_posted(db, e["ref"]):
             continue
         row = plan.accounts[("expense", e["category"])]
         to, paid_from = acct(row["slowbooks_account"]), acct(row["paid_from"])
+        # sales tax sent to the state or parish: a payment of what's owed,
+        # which the Sales Tax report counts as paid, not an expense
+        tax_paid = to.id in tax_ids
         vendor = _named(db, Vendor, e["payee"]) if e["payee"] else None
         if vendor is None and e["payee"]:
             vendor = Vendor(name=e["payee"][:200])
@@ -810,7 +816,11 @@ def apply_plan(db: Session, plan: Plan) -> dict:
         create_journal_entry(
             db,
             e["date"],
-            f"Expense: {e['payee']}" if e["payee"] else "Expense",
+            (
+                f"Sales Tax Payment: {to.name}"
+                if tax_paid
+                else f"Expense: {e['payee']}" if e["payee"] else "Expense"
+            ),
             [
                 {
                     "account_id": to.id,
@@ -825,11 +835,11 @@ def apply_plan(db: Session, plan: Plan) -> dict:
                     "description": desc,
                 },
             ],
-            source_type="expense",
-            source_id=vendor.id if vendor else None,
+            source_type="sales_tax_payment" if tax_paid else "expense",
+            source_id=None if tax_paid else vendor.id if vendor else None,
             reference=e["ref"],
         )
-        made["expenses"] += 1
+        made["sales tax payments" if tax_paid else "expenses"] += 1
 
     for t in plan.transfers:
         if _already_posted(db, t["ref"]):
@@ -876,3 +886,30 @@ def true_up_bank(db: Session, plan: Plan, balance: Decimal, as_of: date):
     )
     db.flush()
     return txn
+
+
+def set_tax_agencies(db: Session, specs: list[str]) -> list[dict]:
+    """``["Louisiana State=5", "Jefferson Parish=5.25"]`` -> the company's
+    sales tax agencies, each with a "Sales Tax Payable – <name>" account
+    (found by name, else made). Run before apply_plan so the import's tax
+    splits between them. Doesn't commit."""
+    from app.services.accounting import ensure_account
+    from app.services.sales_tax_agencies import save_agencies
+
+    rows = []
+    for spec in specs:
+        name, _, rate = spec.rpartition("=")
+        name = name.strip()
+        if not name or not rate.strip():
+            raise ValueError(
+                f"--tax-agency {spec!r}: write it as NAME=RATE, e.g. 'Louisiana State=5'."
+            )
+        acct = ensure_account(
+            db, None, f"Sales Tax Payable – {name}"[:200], AccountType.LIABILITY
+        )
+        rows.append(
+            {"name": name, "rate": Decimal(rate.strip()), "account_id": acct.id}
+        )
+    save_agencies(db, rows)
+    db.flush()
+    return rows
