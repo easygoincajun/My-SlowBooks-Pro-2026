@@ -14,8 +14,9 @@
 AppId={{f67ccf1c-2072-4f4a-9102-4e3897758a97}
 AppName=SlowBooks Pro 2026
 AppVersion={#AppVersion}
-AppPublisher=VonHoltenCodes
-AppPublisherURL=https://github.com/VonHoltenCodes/SlowBooks-Pro-2026
+; A modified build (LICENSE allows it); the copyright stays the original author's.
+AppPublisher=easygoincajun
+AppPublisherURL=https://github.com/easygoincajun/My-SlowBooks-Pro-2026
 DefaultDirName={autopf}\SlowBooks Pro 2026
 DefaultGroupName=SlowBooks Pro 2026
 UninstallDisplayIcon={app}\SlowBooksPro.exe

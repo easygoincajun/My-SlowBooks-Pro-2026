@@ -28,6 +28,11 @@ jobs:
     permissions:
       contents: write
       id-token: write             # required for federated OIDC → Azure login
+    # A fork without its own Trusted Signing account (no AZURE_CLIENT_ID
+    # secret) builds unsigned: the three signing steps are skipped and
+    # Windows SmartScreen asks "Run anyway" on first launch.
+    env:
+      HAS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -156,6 +161,7 @@ jobs:
       # Sign SlowBooksPro.exe BEFORE zipping so the portable archive
       # contains the signed binary. OIDC login; no client secret stored.
       - name: Azure login (OIDC for Trusted Signing)
+        if: env.HAS_SIGNING == 'true'
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -163,6 +169,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Sign portable SlowBooksPro.exe (Trusted Signing)
+        if: env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0.5.1
         with:
           endpoint: https://cus.codesigning.azure.net/
@@ -196,6 +203,7 @@ jobs:
           Copy-Item packaging\windows\SlowBooksPro-Setup-x64.exe .\SlowBooksPro-Setup-x64.exe
 
       - name: Sign installer SlowBooksPro-Setup-x64.exe (Trusted Signing)
+        if: env.HAS_SIGNING == 'true'
         uses: azure/trusted-signing-action@v0.5.1
         with:
           endpoint: https://cus.codesigning.azure.net/
