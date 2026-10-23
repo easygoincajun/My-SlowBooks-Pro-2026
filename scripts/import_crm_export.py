@@ -12,6 +12,15 @@
     python scripts/import_crm_export.py ~/Downloads/crm-data-export --company "My Books" \
         --import --bank-balance 2311.55 --as-of 2026-10-11
 
+Contacts on their own (--contacts) map every contact, not just the ones
+invoiced, to a customer: the plan writes <export>/match/contacts.csv (one
+row per contact: import yes/no, the customer it becomes, its details, and
+a "decide" question where the answer isn't obvious) and contacts-report.txt.
+Answer the questions in the file, plan again, then add --import:
+
+    python scripts/import_crm_export.py ~/Desktop/hybcrm --company "My Books" --contacts
+    python scripts/import_crm_export.py ~/Desktop/hybcrm --company "My Books" --contacts --import
+
 --company names a desktop company (the company list under SLOWBOOKS_DATA_DIR);
 --create makes it first, empty, when there is none by that name.
 --database-url points at any database instead (a server's PostgreSQL).
@@ -83,9 +92,15 @@ def main() -> int:
         help="a sales tax agency and its rate in percent, e.g. 'Louisiana State=5'; "
         "repeat for each (state, parish). Set before the import posts.",
     )
+    ap.add_argument(
+        "--contacts",
+        action="store_true",
+        help="map every contact to a customer (match/contacts.csv) instead of "
+        "importing sales; needs only contacts.csv",
+    )
     args = ap.parse_args()
 
-    if not (args.export / "invoices.csv").exists():
+    if not args.contacts and not (args.export / "invoices.csv").exists():
         sys.exit(f"{args.export} has no invoices.csv.")
     url = args.database_url or _company_url(args.company, args.create)
 
@@ -98,6 +113,9 @@ def main() -> int:
     engine = create_engine(url)
     if url.startswith("sqlite"):
         enable_sqlite_tuning(engine)
+    if args.contacts:
+        with Session(engine) as db:
+            return _contacts(db, args, crm_import)
     with Session(engine) as db:
         plan = crm_import.build_plan(db, args.export)
         out = crm_import.write_match_files(plan, args.export)
@@ -121,6 +139,28 @@ def main() -> int:
             db.rollback()
             print("Import failed; nothing was written.")
             raise
+    print("Imported: " + ", ".join(f"{n} {what}" for what, n in made.items()))
+    return 0
+
+
+def _contacts(db, args, crm_import) -> int:
+    plan = crm_import.build_contacts_plan(db, args.export)
+    out = crm_import.write_contacts_files(plan, args.export)
+    print(crm_import.contacts_report(plan))
+    print(f"Mapping file: {out / 'contacts.csv'}")
+    if not args.do_import:
+        print("Dry run: nothing was written to the books. Add --import to post.")
+        return 1 if plan.problems else 0
+    if plan.problems:
+        print("Not imported: answer the questions above first.")
+        return 1
+    try:
+        made = crm_import.apply_contacts_plan(db, plan)
+        db.commit()
+    except Exception:
+        db.rollback()
+        print("Import failed; nothing was written.")
+        raise
     print("Imported: " + ", ".join(f"{n} {what}" for what, n in made.items()))
     return 0
 

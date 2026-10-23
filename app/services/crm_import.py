@@ -123,6 +123,9 @@ def day(raw) -> date | None:
 
 def _rows(folder: Path, name: str) -> list[dict]:
     path = folder / name
+    if not path.exists() and folder.is_dir():
+        # a later export names its files Contacts.csv, Vendors.csv
+        path = next((p for p in folder.iterdir() if p.name.lower() == name), path)
     if not path.exists():
         return []
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -140,6 +143,24 @@ def _label(raw: str) -> tuple[str, str]:
 def _payee_name(raw: str) -> str:
     name, company = _label(raw)
     return company or name
+
+
+def phone(raw) -> str:
+    """ "'+15043775434", "504439-6088", "+1 (504) 432-3858" -> "(504) 377-5434".
+    Anything that isn't a US number is returned as it was, less the
+    spreadsheet's leading quote."""
+    s = (raw or "").strip().lstrip("'").strip()
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return s
+
+
+def _is_phone(raw: str) -> bool:
+    """A bulk-loaded contact has its company in businessPhone: no digits."""
+    return any(ch.isdigit() for ch in raw or "")
 
 
 def _address(raw: str) -> dict:
@@ -334,11 +355,19 @@ def build_plan(db: Session, folder: Path) -> Plan:
             "source": source,
             "slowbooks_name": default,
             "email": (contact or {}).get("email", "").strip(),
-            "phone": (
-                (contact or {}).get("businessPhone")
-                or (contact or {}).get("phone")
-                or ""
-            ).strip(),
+            "phone": phone(
+                next(
+                    (
+                        v
+                        for v in (
+                            (contact or {}).get("businessPhone", ""),
+                            (contact or {}).get("mobile", ""),
+                        )
+                        if _is_phone(v)
+                    ),
+                    "",
+                )
+            ),
             "address": (contact or {}).get("address", "").strip(),
             "invoices": n,
         }
@@ -913,3 +942,424 @@ def set_tax_agencies(db: Session, specs: list[str]) -> list[dict]:
     save_agencies(db, rows)
     db.flush()
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Contacts: every contact, mapped one by one (--contacts)
+#
+# build_plan makes customers only of contacts that were invoiced. This reads
+# every row of contacts.csv into match/contacts.csv, one row per contact:
+# import yes/no, the customer it becomes, and its cleaned details. A row
+# whose answer isn't obvious carries a question in "decide"; an imported
+# row with a question still in it blocks the import, so nothing is guessed.
+#
+# What the contacts export says:
+# - Bulk-loaded contacts have their company in businessPhone (no digits).
+# - Phones are "'+15043775434", "504439-6088", "(504) 329-0149".
+# - One email can sit on several rows (two people at one office, or one
+#   person's several businesses); one cell can hold two emails.
+# - Company names drift between rows: "Golf Cars Of Louisiana" and "Golf
+#   Cars of LA", "Patrician Mangement NAS".
+#
+# An existing customer is matched by name, by a name that differs only in
+# punctuation/LLC/case, or by email. Its blank fields are filled and its
+# broken ones repaired (a company name in the phone, an unformatted phone,
+# two emails in one); nothing it already has is overwritten.
+# ---------------------------------------------------------------------------
+
+CONTACTS_HEADER = [
+    "source_key",
+    "import",
+    "slowbooks_name",
+    "decide",
+    "action",
+    "contact_person",
+    "company",
+    "email",
+    "phone",
+    "mobile",
+    "address",
+    "notes",
+    "tags",
+    "source",
+    "created",
+]
+# match/contacts.csv columns a person may edit; the rest are worked out.
+CONTACT_EDITS = (
+    "import",
+    "slowbooks_name",
+    "decide",
+    "contact_person",
+    "company",
+    "email",
+    "phone",
+    "mobile",
+    "address",
+    "notes",
+)
+YES = {"yes", "y", "true", "1", "x"}
+NEAR = 0.8  # name similarity that is worth a question
+_NOISE_WORDS = {"llc", "inc", "the", "co", "ltd", "pllc", "dds", "cpa", "cpas"}
+
+
+def _norm(name: str) -> str:
+    """A name with its punctuation, case and LLC/Inc/The dropped, so "Chuck's
+    on the Avenue" and "Chucks on the Avenue" compare equal."""
+    s = re.sub(r"\blouisiana\b", "la", (name or "").lower())
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return " ".join(w for w in s.split() if w not in _NOISE_WORDS)
+
+
+def _near(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
+def _same_business(a: str, b: str) -> bool:
+    """Close spellings, or one name the start of the other ("Manhattan Animal
+    Clinic & Boarding Kennel")."""
+    na, nb = _norm(a), _norm(b)
+    return bool(na and nb) and (
+        _near(a, b) >= NEAR or na.startswith(nb) or nb.startswith(na)
+    )
+
+
+def _emails(raw: str) -> list[str]:
+    return [e.strip() for e in re.split(r"[,;\s]+", raw or "") if "@" in e]
+
+
+@dataclass
+class ContactsPlan:
+    rows: dict = field(default_factory=OrderedDict)  # source_key -> row
+    problems: list = field(default_factory=list)  # block the import
+    notes: list = field(default_factory=list)  # said in the report
+    totals: dict = field(default_factory=dict)
+
+
+def _contact_defaults(c: dict) -> dict:
+    """One contacts.csv row, cleaned: who, which company, how to reach them."""
+    person = f"{c['firstName'].strip()} {c['lastName'].strip()}".strip()
+    company = c["company"].strip()
+    business = c.get("businessPhone", "").strip()
+    moved = ""
+    if business and not _is_phone(business):
+        moved = business
+        company = company or business
+        business = ""
+    if _norm(person) == _norm(company):
+        person = ""  # the business itself, e.g. "Dale's Towing"
+    emails = _emails(c["email"])
+    notes = []
+    if c.get("tags", "").strip():
+        notes.append(f"HYBCRM tags: {c['tags'].strip()}")
+    if c.get("source", "").strip():
+        notes.append(f"Source: {c['source'].strip()}")
+    if len(emails) > 1:
+        notes.append(f"Also emailed: {', '.join(emails[1:])}")
+    return {
+        "contact_person": person,
+        "company": company,
+        "email": emails[0] if emails else "",
+        "phone": phone(business),
+        "mobile": phone(c.get("mobile", "")),
+        "address": c.get("address", "").strip(),
+        "notes": "; ".join(notes),
+        "tags": c.get("tags", "").strip(),
+        "source": c.get("source", "").strip(),
+        "created": c.get("createdAt", "").strip()[:10],
+        "_moved": moved,
+    }
+
+
+def _source_key(c: dict) -> str:
+    person = f"{c['firstName'].strip()} {c['lastName'].strip()}".strip()
+    return " | ".join((person, c["email"].strip(), c["company"].strip()))
+
+
+def build_contacts_plan(db: Session, folder: Path) -> ContactsPlan:
+    folder = Path(folder)
+    plan = ContactsPlan()
+    contacts = _rows(folder, "contacts.csv")
+    if not contacts:
+        plan.problems.append(f"{folder} has no contacts.csv.")
+        return plan
+    edits = _read_edits(folder / MATCH_DIR / "contacts.csv", lambda r: r["source_key"])
+
+    existing = db.query(Customer).all()
+    by_email = {}
+    by_norm = {}
+    for cust in existing:
+        for e in _emails(cust.email):
+            by_email.setdefault(e.lower(), cust)
+        by_norm.setdefault(_norm(cust.name), []).append(cust)
+    for i, a in enumerate(existing):
+        for b in existing[i + 1 :]:
+            if _norm(a.name) == _norm(b.name) or _near(a.name, b.name) >= 0.9:
+                plan.notes.append(
+                    f"Existing customers {a.name!r} and {b.name!r} look like one "
+                    "business. Each keeps its invoices; combine them in SlowBooks "
+                    "if they are one."
+                )
+
+    # Every row, cleaned, before any is decided: a row without a company is
+    # resolved through the other rows that share its email or person.
+    rows = []
+    seen = Counter()
+    for c in contacts:
+        row = _contact_defaults(c)
+        key = _source_key(c)
+        seen[key] += 1
+        row["source_key"] = key if seen[key] == 1 else f"{key} #{seen[key]}"
+        rows.append(row)
+    companies_of = {}  # email or person -> {normalized company: company}
+    for row in rows:
+        if row["company"]:
+            for k in (row["email"].lower(), row["contact_person"].lower()):
+                if k:
+                    companies_of.setdefault(k, OrderedDict())[_norm(row["company"])] = (
+                        row["company"]
+                    )
+
+    new_names = []  # names this plan makes, for near-duplicate questions
+    moved = []  # companies found in the phone column
+    for row in rows:
+        company, person = row["company"], row["contact_person"]
+        name, decide, matched = company or person, "", None
+        email = row["email"].lower()
+        if not company:
+            # "Robert Hamer" with no company, whose email is on RoboTech's row
+            found = OrderedDict()
+            for k in (email, person.lower()):
+                found.update(companies_of.get(k, {}))
+            if len(found) == 1:
+                name = company = row["company"] = next(iter(found.values()))
+            elif len(found) > 1:
+                decide = (
+                    f"{person or email} is on rows for {' / '.join(found.values())}: "
+                    f"which customer is this, or keep {name!r}?"
+                )
+        exact = _named(db, Customer, name) if name else None
+        same = by_norm.get(_norm(name), []) if name else []
+        if exact is not None:
+            matched = exact
+        elif len(same) == 1:
+            matched = same[0]
+            plan.notes.append(f"{name!r} is the existing customer {matched.name!r}.")
+        elif len(same) > 1:
+            decide = decide or (
+                f"Existing customers {' / '.join(repr(c.name) for c in same)} look "
+                f"like {name!r}: which one?"
+            )
+            matched = same[0]
+        elif email in by_email:
+            cust = by_email[email]
+            matched = cust
+            if company and not _same_business(company, cust.name):
+                decide = decide or (
+                    f"{email} belongs to existing customer {cust.name!r}, but this "
+                    f"row's company is {company!r}: keep it on {cust.name!r} (the "
+                    "company is saved with it), or make a new customer?"
+                )
+        if matched is None and name and not decide:
+            close = max(existing, key=lambda c: _near(name, c.name), default=None)
+            if close is not None and _near(name, close.name) >= NEAR:
+                decide = (
+                    f"Looks like existing customer {close.name!r}: use that, or keep "
+                    f"{name!r} as a new customer?"
+                )
+                matched = close
+            else:
+                twin = next((n for n in new_names if _norm(n) == _norm(name)), None)
+                near = next(
+                    (n for n in new_names if n != twin and _near(name, n) >= NEAR),
+                    None,
+                )
+                if twin:
+                    name = twin  # one new customer for both rows
+                elif near:
+                    decide = f"Looks like {near!r} on another row: same customer?"
+                else:
+                    new_names.append(name)
+        if matched is not None:
+            name = matched.name
+        if not name:
+            decide = decide or "No name or company: what is this customer called?"
+
+        is_client = matched is not None or bool(
+            company and "contact" not in row["tags"].lower()
+        )
+        row.update(
+            {
+                "import": "yes" if is_client else "no",
+                "slowbooks_name": name,
+                "decide": decide,
+            }
+        )
+        if row.pop("_moved"):
+            moved.append(company)
+        if row["source_key"] in edits:
+            for col in CONTACT_EDITS:
+                row[col] = (edits[row["source_key"]].get(col) or "").strip()
+            row["phone"], row["mobile"] = phone(row["phone"]), phone(row["mobile"])
+        plan.rows[row["source_key"]] = row
+
+    if moved:
+        plan.notes.append(
+            f"{len(moved)} contacts had their company in the phone column; it is "
+            f"read as the company: {', '.join(moved)}."
+        )
+
+    # actions, problems and totals, from the rows as edited
+    taken = Counter()
+    shown = {}
+    for key, row in plan.rows.items():
+        if row["import"].lower() not in YES:
+            row["action"] = "skip"
+            continue
+        if not row["slowbooks_name"]:
+            plan.problems.append(f"{key}: no slowbooks_name.")
+        elif row["decide"]:
+            plan.problems.append(f"{key}: {row['decide']}")
+        cust = _named(db, Customer, row["slowbooks_name"])
+        row["action"] = f"update {cust.name}" if cust else "new"
+        taken[row["slowbooks_name"].lower()] += 1
+        shown.setdefault(row["slowbooks_name"].lower(), row["slowbooks_name"])
+    for name, n in taken.items():
+        if n > 1:
+            plan.notes.append(f"{n} contacts become one customer: {shown[name]!r}.")
+    yes = [r for r in plan.rows.values() if r["action"] != "skip"]
+    plan.totals = {
+        "rows": len(plan.rows),
+        "import": len(yes),
+        "skip": len(plan.rows) - len(yes),
+        "new": len({r["slowbooks_name"].lower() for r in yes if r["action"] == "new"}),
+        "update": len(
+            {r["slowbooks_name"].lower() for r in yes if r["action"] != "new"}
+        ),
+        "questions": sum(1 for r in plan.rows.values() if r["decide"]),
+    }
+    return plan
+
+
+def contacts_report(plan: ContactsPlan) -> str:
+    t = plan.totals
+    out = ["CRM contacts plan", "================="]
+    if t:
+        out += [
+            f"Contacts: {t['rows']}   to import: {t['import']}   skipped: {t['skip']}",
+            f"Customers: {t['new']} new, {t['update']} existing filled in",
+            f"Questions (decide column): {t['questions']}, "
+            f"{len(plan.problems)} of them on imported rows",
+            "",
+        ]
+    if plan.problems:
+        out += [
+            f"PROBLEMS ({len(plan.problems)}) - answer these in match/contacts.csv "
+            "(set slowbooks_name, then clear decide; or set import to no):"
+        ]
+        out += [f"  - {p}" for p in plan.problems] + [""]
+    else:
+        out += ["No problems: ready to import.", ""]
+    if plan.notes:
+        out += ["Notes:"] + [f"  - {n}" for n in plan.notes]
+    return "\n".join(out) + "\n"
+
+
+def write_contacts_files(plan: ContactsPlan, folder: Path) -> Path:
+    out = Path(folder) / MATCH_DIR
+    out.mkdir(exist_ok=True)
+    # utf-8-sig: Excel opens it with the apostrophes and accents intact
+    with open(out / "contacts.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=CONTACTS_HEADER, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(plan.rows.values())
+    (out / "contacts-report.txt").write_text(contacts_report(plan), encoding="utf-8")
+    return out
+
+
+def _add_note(cust: Customer, line: str) -> bool:
+    if not line or line in (cust.notes or ""):
+        return False
+    cust.notes = f"{cust.notes}\n{line}" if cust.notes else line
+    return True
+
+
+def _repair(cust: Customer) -> bool:
+    """Fix what the first import stored badly: a company name in the phone,
+    an unformatted phone, two emails in one field."""
+    changed = False
+    for col in ("phone", "mobile"):
+        value = getattr(cust, col)
+        if not value:
+            continue
+        if not _is_phone(value):
+            if not cust.company:
+                cust.company = value[:200]
+            setattr(cust, col, None)
+            changed = True
+        elif phone(value) != value:
+            setattr(cust, col, phone(value)[:50])
+            changed = True
+    emails = _emails(cust.email)
+    if len(emails) > 1:
+        cust.email = emails[0]
+        _add_note(cust, f"Also emailed: {', '.join(emails[1:])}")
+        changed = True
+    return changed
+
+
+def apply_contacts_plan(db: Session, plan: ContactsPlan) -> dict:
+    """Make or fill in the customers ``plan`` says, without committing.
+    Refuses a plan with problems. A second run changes nothing."""
+    if plan.problems:
+        raise ValueError(
+            f"The plan has {len(plan.problems)} problem(s); see contacts-report.txt."
+        )
+    created = set()
+    changed_ids = set()
+    for row in plan.rows.values():
+        if row["action"] == "skip":
+            continue
+        cust = _named(db, Customer, row["slowbooks_name"])
+        changed = False
+        if cust is None:
+            cust = Customer(name=row["slowbooks_name"][:200])
+            db.add(cust)
+            db.flush()
+            created.add(cust.id)
+        elif cust.id not in created:
+            changed = _repair(cust)
+        person = row["contact_person"]
+        company = row["company"]
+        if not person and company and _norm(company) != _norm(cust.name):
+            # a row that is its own "company" ("Tom Wilkinson") merged into a
+            # customer of another name ("Thomas G. Wilkinson"): a contact of
+            # that customer, not its company
+            person, company = company, ""
+        for col, value, size in (
+            ("company", company, 200),
+            ("email", row["email"], 200),
+            ("phone", row["phone"], 50),
+            ("mobile", row["mobile"], 50),
+        ):
+            if value and not getattr(cust, col):
+                setattr(cust, col, value[:size])
+                changed = True
+        if row["address"] and not cust.bill_address1:
+            for k, v in _address(row["address"]).items():
+                setattr(cust, k, v)
+            changed = True
+        if person and _norm(person) != _norm(cust.name):
+            reach = [row["email"], row["mobile"] and f"mobile {row['mobile']}"]
+            line = ", ".join([f"Contact: {person}"] + [r for r in reach if r])
+            changed = _add_note(cust, line) or changed
+        for line in filter(None, row["notes"].split("; ")):
+            changed = _add_note(cust, line) or changed
+        db.flush()
+        if changed:
+            changed_ids.add(cust.id)
+    return {
+        "customers created": len(created),
+        "existing customers updated": len(changed_ids - created),
+    }

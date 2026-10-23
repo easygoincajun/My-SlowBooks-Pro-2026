@@ -379,3 +379,265 @@ def test_tax_sent_to_an_agency_is_a_sales_tax_payment(
     ) == (20.0, 12.5)
     assert by_name["Jefferson Parish"]["tax_posted"] == 21.0
     assert by_name["Louisiana State"]["balance"] == 7.5
+
+
+# ---------------------------------------------------------------------------
+# Contacts on their own (--contacts): every contact mapped to a customer
+# ---------------------------------------------------------------------------
+
+CONTACTS_HEAD = [
+    "firstName",
+    "lastName",
+    "email",
+    "mobile",
+    "businessPhone",
+    "company",
+    "address",
+    "source",
+    "tags",
+    "pipelineStage",
+    "createdAt",
+]
+CONTACTS = [
+    # a client with a multi-line address, referred by someone
+    [
+        "Rosie",
+        "Pena",
+        "r.pena@lsdental.test",
+        "",
+        "504-833-3200",
+        "Lakeside Dental Care",
+        "2400 Veterans Blvd.\nSte. 210\nKenner, LA 70062",
+        "referral",
+        "Lloyd Johns",
+        "",
+        "2026-07-28T15:36:29.924Z",
+    ],
+    # bulk-loaded: the company sits in businessPhone; a networking contact
+    [
+        "Lori",
+        "Estess",
+        "lori@estess.test",
+        "'+15049121368",
+        "Estess CPAs",
+        "",
+        "",
+        "",
+        "data network systems; networking contact",
+        "",
+        "2026-07-06",
+    ],
+    # one person, two rows: the second has no company
+    [
+        "Robert",
+        "Hamer",
+        "rhamer@robo.test",
+        "504-348-4737",
+        "504-427-5491",
+        "RoboTech Automotive",
+        "",
+        "",
+        "",
+        "",
+        "2026-07-18",
+    ],
+    [
+        "Robert",
+        "Hamer",
+        "rhamer@robo.test",
+        "'+15043484737",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "2026-07-06",
+    ],
+    # an existing customer under a different spelling
+    [
+        "Corey",
+        "Arbourgh",
+        "corey@gcofla.test",
+        "504-782-6754",
+        "",
+        "Golf Cars Of Louisiana",
+        "",
+        "",
+        "",
+        "",
+        "2026-07-18",
+    ],
+    # close to another row's company: not obvious, so it's asked
+    [
+        "Norma",
+        "Zermeno",
+        "norma@lsdental.test",
+        "",
+        "",
+        "Lakeside Dental Center",
+        "",
+        "",
+        "",
+        "",
+        "2026-07-06",
+    ],
+]
+
+
+@pytest.fixture
+def contacts_export(tmp_path):
+    with open(tmp_path / "Contacts.csv", "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows([CONTACTS_HEAD] + CONTACTS)
+    return tmp_path
+
+
+@pytest.fixture
+def golf_cars(db_session):
+    cust = Customer(
+        name="Golf Cars of LA",
+        email="billing@gcofla.test",
+        phone="'+15047826754",
+        notes="Gate code 1234",
+    )
+    db_session.add(cust)
+    db_session.flush()
+    return cust
+
+
+def _plan_contacts(export, db):
+    plan = crm_import.build_contacts_plan(db, export)
+    crm_import.write_contacts_files(plan, export)
+    with open(export / "match" / "contacts.csv", newline="", encoding="utf-8-sig") as f:
+        return plan, {r["source_key"]: r for r in csv.DictReader(f)}
+
+
+def test_phone_reads_the_exports_formats():
+    assert crm_import.phone("'+15043775434") == "(504) 377-5434"
+    assert crm_import.phone("504439-6088") == "(504) 439-6088"
+    assert crm_import.phone("'+1 (504) 432-3858") == "(504) 432-3858"
+    assert crm_import.phone("555-0199") == "555-0199"
+
+
+def test_every_contact_is_mapped_and_nothing_written(
+    contacts_export, db_session, golf_cars
+):
+    plan, rows = _plan_contacts(contacts_export, db_session)
+    rosie = rows["Rosie Pena | r.pena@lsdental.test | Lakeside Dental Care"]
+    assert (rosie["import"], rosie["action"]) == ("yes", "new")
+    assert rosie["slowbooks_name"] == "Lakeside Dental Care"
+    assert rosie["phone"] == "(504) 833-3200"
+    assert rosie["notes"] == "HYBCRM tags: Lloyd Johns; Source: referral"
+    # the company in the phone column is the company; a networking contact
+    # is not imported unless someone says so
+    lori = rows["Lori Estess | lori@estess.test | "]
+    assert (lori["company"], lori["phone"], lori["mobile"]) == (
+        "Estess CPAs",
+        "",
+        "(504) 912-1368",
+    )
+    assert lori["import"] == "no"
+    # the row with no company is the same person's business
+    second = rows["Robert Hamer | rhamer@robo.test | "]
+    assert (second["slowbooks_name"], second["import"]) == (
+        "RoboTech Automotive",
+        "yes",
+    )
+    corey = rows["Corey Arbourgh | corey@gcofla.test | Golf Cars Of Louisiana"]
+    assert corey["action"] == "update Golf Cars of LA"
+    norma = rows["Norma Zermeno | norma@lsdental.test | Lakeside Dental Center"]
+    assert "Lakeside Dental Care" in norma["decide"]
+    assert plan.problems == [f"{norma['source_key']}: {norma['decide']}"]
+    assert plan.totals["new"] == 3  # Lakeside Dental Care, RoboTech, Center
+    assert db_session.query(Customer).count() == 1
+
+
+def test_a_question_blocks_the_import_until_answered(
+    contacts_export, db_session, golf_cars
+):
+    plan, rows = _plan_contacts(contacts_export, db_session)
+    with pytest.raises(ValueError):
+        crm_import.apply_contacts_plan(db_session, plan)
+
+    for r in rows.values():
+        if r["contact_person"] == "Norma Zermeno":
+            r["slowbooks_name"], r["decide"] = "Lakeside Dental Care", ""
+    _rewrite(contacts_export, "contacts.csv", list(rows.values()))
+    plan = crm_import.build_contacts_plan(db_session, contacts_export)
+    assert plan.problems == []
+    crm_import.apply_contacts_plan(db_session, plan)
+
+    lakeside = db_session.query(Customer).filter_by(name="Lakeside Dental Care").one()
+    assert (lakeside.bill_address1, lakeside.bill_address2) == (
+        "2400 Veterans Blvd.",
+        "Ste. 210",
+    )
+    assert (lakeside.bill_city, lakeside.bill_state, lakeside.bill_zip) == (
+        "Kenner",
+        "LA",
+        "70062",
+    )
+    assert "Contact: Rosie Pena, r.pena@lsdental.test" in lakeside.notes
+    assert "Contact: Norma Zermeno, norma@lsdental.test" in lakeside.notes
+    assert (
+        db_session.query(Customer).filter_by(name="Lakeside Dental Center").count() == 0
+    )
+
+
+def test_an_existing_customer_is_filled_in_never_overwritten(
+    contacts_export, db_session, golf_cars
+):
+    _plan, rows = _plan_contacts(contacts_export, db_session)
+    for r in rows.values():
+        if r["contact_person"] == "Norma Zermeno":
+            r["import"] = "no"
+    _rewrite(contacts_export, "contacts.csv", list(rows.values()))
+    plan = crm_import.build_contacts_plan(db_session, contacts_export)
+    made = crm_import.apply_contacts_plan(db_session, plan)
+    assert made == {"customers created": 2, "existing customers updated": 1}
+
+    db_session.refresh(golf_cars)
+    assert golf_cars.email == "billing@gcofla.test"  # kept
+    assert golf_cars.phone == "(504) 782-6754"  # repaired
+    assert golf_cars.mobile == "(504) 782-6754"  # filled
+    assert golf_cars.notes.startswith("Gate code 1234\n")
+    assert "Contact: Corey Arbourgh" in golf_cars.notes
+    robo = db_session.query(Customer).filter_by(name="RoboTech Automotive").one()
+    assert robo.email == "rhamer@robo.test"
+    # both rows give the same details: one line, not two
+    assert (
+        robo.notes == "Contact: Robert Hamer, rhamer@robo.test, mobile (504) 348-4737"
+    )
+
+    # a second import changes nothing
+    plan = crm_import.build_contacts_plan(db_session, contacts_export)
+    assert crm_import.apply_contacts_plan(db_session, plan) == {
+        "customers created": 0,
+        "existing customers updated": 0,
+    }
+
+
+def test_a_row_named_for_the_person_is_a_contact_of_the_customer(tmp_path, db_session):
+    """ "Tom Wilkinson", company "Tom Wilkinson", merged into "Thomas G.
+    Wilkinson": his email is kept as a contact; the company stays blank."""
+    db_session.add(Customer(name="Thomas G. Wilkinson", email="tom@wg.test"))
+    db_session.flush()
+    row = ["Tom", "Wilkinson", "tg@home.test", "504439-6088", "", "Tom Wilkinson"]
+    with open(tmp_path / "contacts.csv", "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows([CONTACTS_HEAD, row + ["", "", "", "", "2026-07-23"]])
+    _plan, rows = _plan_contacts(tmp_path, db_session)
+    for r in rows.values():
+        r["slowbooks_name"], r["decide"] = "Thomas G. Wilkinson", ""
+    _rewrite(tmp_path, "contacts.csv", list(rows.values()))
+    plan = crm_import.build_contacts_plan(db_session, tmp_path)
+    crm_import.apply_contacts_plan(db_session, plan)
+
+    tom = db_session.query(Customer).filter_by(name="Thomas G. Wilkinson").one()
+    assert tom.company is None
+    assert tom.email == "tom@wg.test"
+    assert tom.notes == "Contact: Tom Wilkinson, tg@home.test, mobile (504) 439-6088"
+    plan = crm_import.build_contacts_plan(db_session, tmp_path)
+    assert crm_import.apply_contacts_plan(db_session, plan) == {
+        "customers created": 0,
+        "existing customers updated": 0,
+    }
