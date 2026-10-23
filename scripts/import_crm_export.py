@@ -75,6 +75,14 @@ def main() -> int:
         default=date.today(),
         help="the date of --bank-balance (YYYY-MM-DD, default today)",
     )
+    ap.add_argument(
+        "--tax-agency",
+        action="append",
+        default=[],
+        metavar="NAME=RATE",
+        help="a sales tax agency and its rate in percent, e.g. 'Louisiana State=5'; "
+        "repeat for each (state, parish). Set before the import posts.",
+    )
     args = ap.parse_args()
 
     if not (args.export / "invoices.csv").exists():
@@ -102,6 +110,8 @@ def main() -> int:
             print("Not imported: fix the problems above first.")
             return 1
         try:
+            if args.tax_agency:
+                crm_import.set_tax_agencies(db, args.tax_agency)
             made = crm_import.apply_plan(db, plan)
             if args.bank_balance is not None:
                 txn = crm_import.true_up_bank(db, plan, args.bank_balance, args.as_of)
