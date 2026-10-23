@@ -1,9 +1,11 @@
 # ============================================================================
-# QBO Entity Mapping — tracks QuickBooks Online ID <-> Slowbooks ID
+# QBO Entity Mapping — which local record a QuickBooks Online record became.
 #
-# When importing from or exporting to QBO, we need to know which Slowbooks
-# entity corresponds to which QBO entity. This table provides that mapping
-# plus the QBO SyncToken (required for updates) and last sync timestamp.
+# Written by the QuickBooks Online connector's import while it existed (the
+# connector was retired in 2.23.2; services/qbo_common.py says why). The
+# table stays so that a company connected back then still knows which of
+# its documents the import created (services/qbo_documents.py) and which
+# item a QuickBooks Online discount came in on. Nothing writes to it now.
 # ============================================================================
 
 from sqlalchemy import Column, Integer, String, DateTime, func

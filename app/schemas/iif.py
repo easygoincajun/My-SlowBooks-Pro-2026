@@ -13,7 +13,16 @@ class IIFImportResult(BaseModel):
     estimates: int = 0
     bills: int = 0
     deposits: int = 0
+    # checks, card charges, transfers, bill payments and journal entries
+    # (#344), and the GENERAL JOURNAL ones of those
+    ledger_entries: int = 0
+    journal_entries: int = 0
     duplicates_skipped: int = 0
+    # #288: a mixed file reconciles — parsed blocks = imported + duplicates
+    # + unsupported + failed; the unsupported ones are named
+    transaction_blocks: int = 0
+    unsupported: int = 0
+    unsupported_blocks: list[dict] = []
     # ALL-CAPS names rewritten on request ("Change ALL-CAPS names", #195)
     names_changed: int = 0
     errors: list[dict] = []
@@ -30,3 +39,5 @@ class IIFValidationReport(BaseModel):
     # of them as "Change ALL-CAPS names" would import them.
     caps_names: int = 0
     caps_name_examples: list[dict] = []
+    unsupported: list[dict] = []  # #288: the blocks the import would not take
+    unsupported_counts: dict = {}

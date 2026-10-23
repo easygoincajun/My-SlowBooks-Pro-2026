@@ -103,6 +103,7 @@ const DepositsPage = {
                 <td class="amount">${formatCurrency(d.amount)}</td>
                 <td>${escapeHtml(status)}</td>
                 <td class="actions"><button class="btn btn-sm btn-secondary" onclick="DepositsPage.view(${d.id})">View</button>
+                    ${d.voided ? '' : `<button class="btn btn-sm btn-secondary" onclick="window.open('/api/deposits/${d.id}/print-preview','_blank')" title="The deposit slip">Print</button>`}
                     ${canVoid ? `<button data-destructive class="btn btn-sm btn-secondary" onclick="DepositsPage.voidDeposit(${d.id})">Void</button>` : ''}</td>
             </tr>`;
         }).join('');
@@ -152,8 +153,12 @@ const DepositsPage = {
             ${payments}
             <div class="form-actions">
                 ${canVoid ? `<button data-destructive type="button" class="btn btn-danger" onclick="DepositsPage.voidDeposit(${d.id})">Void</button>` : ''}
+                ${d.voided ? '' : `<button type="button" class="btn btn-secondary" onclick="window.open('/api/deposits/${d.id}/pdf','_blank')">Save PDF</button>
+                <button type="button" class="btn btn-secondary" onclick="window.open('/api/deposits/${d.id}/print-preview','_blank')">Print</button>`}
                 <button type="button" class="btn btn-secondary" onclick="closeModal()">Close</button>
             </div>`);
+        // the document's own address, so Back returns to the list and the Open group lists it (NEW-164)
+        if (App.documentAddress) App.documentAddress(`#/deposits/${Number(id)}`);
     },
 
     toggleAll() {

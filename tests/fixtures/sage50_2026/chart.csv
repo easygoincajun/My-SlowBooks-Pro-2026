@@ -1,0 +1,17 @@
+Account ID,Account Description,Account Type,Inactive,Tax Code,Next Check Number,Current Balance,1099 Settings
+10000-00,Petty Cash,0,FALSE,,,327.55,0
+11000-00,Accounts Receivable,1,FALSE,,,182989.83,0
+12000-00,Inventory,2,FALSE,,,24336.06,0
+14000-00,Prepaid Expenses,4,FALSE,,,14221.30,0
+15000-00,Furniture and Fixtures,5,FALSE,,,62769.25,0
+17000-00,Accum. Depreciation-Furniture,6,FALSE,,,-54680.57,0
+19000-00,Deposits,8,FALSE,,,15000.00,0
+20000-00,Accounts Payable,10,FALSE,,,-97810.51,0
+23000-00,Accrued Expenses,12,FALSE,,,-3022.55,0
+27000-00,Notes Payable-Noncurrent,14,FALSE,,,-4000.00,0
+39002-00,Beginning Balance Equity,16,FALSE,,,0.00,0
+39005-00,Retained Earnings,18,FALSE,,,-189037.60,0
+39007-00,Dividends Paid,19,FALSE,,,0.00,0
+40000-00,Sales,21,FALSE,,,-4795.00,0
+50000-00,Product Cost,23,FALSE,,,-68.50,0
+57500-00,Freight,24,FALSE,,,50.00,0

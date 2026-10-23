@@ -12,11 +12,13 @@ const vm = require('node:vm');
 function page(entry) {
     const dialogs = [];
     const context = {
+        $: () => null,  // the view's attachments block (2.22.3) looks for its list
         API: { get: async () => entry },
         escapeHtml: value => String(value ?? '').replace(/[&<>"']/g, character => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
         })[character]),
         formatDate: value => value, formatCurrency: value => `$${value}`,
+        sourceWord: value => String(value || ''),
         CostCodes: { headHtml: () => '' },
         openModal: (title, html) => dialogs.push({ title, html }),
     };
@@ -52,11 +54,13 @@ for (const kind of ['manual_void', 'qbo_ledger_void', 'bill_payment', 'deposit']
 // list and in its view (a second Void used to answer "already voided").
 function listPage(entries) {
     const context = {
+        $: () => null,
         API: { get: async url => (url === '/journal' ? entries : entries[0]) },
         escapeHtml: value => String(value ?? '').replace(/[&<>"']/g, character => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
         })[character]),
         formatDate: value => value, formatCurrency: value => `$${value}`,
+        sourceWord: value => String(value || ''),
         CostCodes: { headHtml: () => '' },
         openModal: (title, html) => { context.shown = html; },
     };

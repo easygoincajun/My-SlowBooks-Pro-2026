@@ -42,6 +42,7 @@ module, where playwright or its Chromium is not installed.
 """
 
 import re
+import sys
 from urllib.parse import urlsplit
 
 import pytest
@@ -384,10 +385,43 @@ def _served_by(client, handled, served):
     return serve
 
 
+# The suite's browser is a Linux one, whatever machine runs it: the app reads
+# navigator.platform for its shortcuts and their labels (Alt+← and "Alt+B" here,
+# ⌘[ and "⌥B" on a Mac), and the keyboard tests press and read the Linux ones.
+# On a Mac host Playwright's Chromium said MacIntel, and sixteen of them were
+# red on macbase1's and Keith's Macs. A test that wants the Mac's keys sets
+# the platform itself, as the keyboard tests do, and `HOST_PLATFORM` is what
+# the browser really is, for a click the browser itself answers to (a new tab).
+# (a statement, not a function: an init script is run as source, not called)
+LINUX_PLATFORM = """Object.defineProperty(Navigator.prototype, 'platform',
+    { get: () => 'Linux x86_64', configurable: true });"""
+HOST_PLATFORM = {"darwin": "MacIntel", "win32": "Win32"}.get(
+    sys.platform, "Linux x86_64"
+)
+
+
+def new_page(browser, **kwargs):
+    """`browser.new_page(...)`, as a Linux browser."""
+    page = browser.new_page(**kwargs)
+    page.add_init_script(LINUX_PLATFORM)
+    return page
+
+
+def _platform(page, platform):
+    """The platform the page says it is, from here on, with the labels that
+    read it redrawn."""
+    page.evaluate(
+        """(p) => { Object.defineProperty(Navigator.prototype, 'platform',
+            { get: () => p, configurable: true });
+            if (window.App && App.labelBack) App.labelBack(); }""",
+        platform,
+    )
+
+
 def _open(browser, client, served=None):
     handled = []
     # the gate's window: 1500 x 980
-    page = browser.new_page(viewport={"width": 1500, "height": 980})
+    page = new_page(browser, viewport={"width": 1500, "height": 980})
     page.route(
         "**/*", _served_by(client, handled, SERVED if served is None else served)
     )

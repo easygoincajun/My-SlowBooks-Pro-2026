@@ -33,6 +33,7 @@ from tests.test_theme_contrast import (  # noqa: E402,F401  (the fixtures)
     _served_by,
     _visit,
     browser_fixture,
+    new_page,
     company_fixture,
     settle,
 )
@@ -151,8 +152,8 @@ def _open_at(browser, client, page_hash, width=1280, height=800):
     # JavaScript violates…"), which made a slow redraw a red test. The
     # page under test is the same; only Playwright's own polling is let
     # past the policy.
-    page = browser.new_page(
-        viewport={"width": width, "height": height}, bypass_csp=True
+    page = new_page(
+        browser, viewport={"width": width, "height": height}, bypass_csp=True
     )
     page.route("**/*", _served_by(client, handled, SERVED))
     page.goto(f"{ORIGIN}/{page_hash}")
@@ -854,6 +855,8 @@ def test_choosing_only_classes_with_no_activity_shows_the_empty_state_and_the_co
         page.get_by_role("button", name="Apply").click()
         page.wait_for_selector(".empty-state.grid-filtered")
         page.get_by_role("link", name="Show every class").click()
+        # Navigation removes the old note before the replacement grid arrives.
+        page.wait_for_selector("#report-content .pivot-grid")
         page.wait_for_function("() => !document.querySelector('.grid-filtered')")
         assert len(_heads(page)) == 14  # Account, twelve classes, Total
         assert page.evaluate(choice) == ""

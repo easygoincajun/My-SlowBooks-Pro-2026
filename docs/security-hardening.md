@@ -150,6 +150,52 @@ Ciphertext is now prefixed with `v1:` so older unversioned blobs still
 decrypt cleanly. Decrypt tries the current key first, then any
 configured previous key.
 
+### Company file encryption (SQLCipher, #290)
+
+A desktop company is one SQLite file. Turned on, it is a SQLCipher file:
+every page is encrypted under the driver (AES-256-CBC with a per-page
+HMAC), WAL and random access keep working, and a backup is a copy of
+ciphertext under the same key.
+
+- The engine takes `sqlcipher3` in place of `sqlite3` and keys each
+  connection first, before the WAL and `secure_delete` PRAGMAs. The key
+  goes in as a raw key (`x'…'`), so SQLCipher's own KDF does not run on
+  every checkout from the pool.
+- The key is found once, before the file is opened:
+  `SLOWBOOKS_COMPANY_FILE_KEY` (the launcher's hand-off to the server child
+  and to the migration) or `COMPANY_FILE_ENCRYPTION_SECRET` (an operator's,
+  for Server Edition), derived with PBKDF2-HMAC-SHA256 at 480,000 rounds
+  under the salt `slowbooks-company-file-v1`, so it never equals the
+  payroll key however the secrets are set.
+- An encrypted file with no key, or the wrong key, stops the start with one
+  sentence; SQLCipher's `ERROR CORE` lines are silenced on every connection
+  (`PRAGMA cipher_log_level = NONE`).
+- Turning it on or off is `POST /api/company-file/encryption`: administrator
+  only (the role middleware and the route), the company's name typed to
+  confirm, the file rewritten in place by SQLCipher's export under a write
+  lock.
+- PostgreSQL deployments are the database host's job, and the Settings
+  page says so.
+- The desktop's own key (2.24.0): with no operator secret set, turning
+  encryption on makes a **recovery key** (160 random bits, shown once as
+  eight groups of four characters, downloadable as a text file) and derives
+  the file's key from it (PBKDF2-HMAC-SHA256, 480,000 rounds, salt
+  `slowbooks-company-recovery-v1`), so the recovery key alone opens the
+  file, and every backup of it, on any machine. The key is wrapped for each
+  administrator's password (PBKDF2 under a per-wrapping salt, then Fernet)
+  in `<company>.db.keyring` beside the file; the keyring holds nothing
+  secret. The picker unlocks the file with an administrator's sign-in or
+  the recovery key and hands the key to the server child the way it hands
+  any key (`SLOWBOOKS_COMPANY_FILE_KEY`); the key is never written to
+  disk. An administrator with no wrapping (added later, or after a
+  password change) gets one at their next sign-in from the running
+  process; one removed, demoted or reset loses theirs. A new recovery key
+  re-keys the file in place (`PRAGMA rekey`) and retires the old one; a
+  wrapping names the key it holds, so a stale one is told from a current
+  one. A restore of a backup made under another key asks for the recovery
+  key it was made under and re-keys a staged copy; the backup is never
+  changed. `docs/company-file-encryption.md` is the owner's page.
+
 ---
 
 ## OWASP Top 10 coverage

@@ -37,8 +37,7 @@ def _money_columns(precision: int) -> list[tuple[str, str]]:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
         rows = bind.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT c.table_name, c.column_name
                 FROM information_schema.columns c
                 JOIN information_schema.tables t
@@ -50,8 +49,7 @@ def _money_columns(precision: int) -> list[tuple[str, str]]:
                   AND c.numeric_precision = :precision
                   AND c.numeric_scale = 2
                 ORDER BY c.table_name, c.column_name
-                """
-            ),
+                """),
             {"precision": precision},
         ).fetchall()
         return [(row[0], row[1]) for row in rows]

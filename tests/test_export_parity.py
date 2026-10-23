@@ -148,7 +148,8 @@ def test_export_all_carries_classes_jobs_bills_deposits_and_sales_receipts(
     inv_blk = by_type["INVOICE"][0]
     assert inv_blk["trns"]["CLASS"] == "Field:North"
     assert all(s["CLASS"] == "Field:North" for s in inv_blk["spl"])
-    assert inv_blk["trns"]["NAME"] == seed_customer.name
+    # the job rides on the name as QuickBooks' Customer:Job (#199)
+    assert inv_blk["trns"]["NAME"] == f"{seed_customer.name}:Deck"
 
     bill_blk = by_type["BILL"][0]
     assert bill_blk["trns"]["NAME"] == "Lumber & Co"

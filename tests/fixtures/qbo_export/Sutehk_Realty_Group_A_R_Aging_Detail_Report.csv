@@ -1,0 +1,20 @@
+Sutehk Realty Group,,,,,,,
+A/R Aging Detail Report,,,,,,,
+All Dates,,,,,,,
+,,,,,,,
+,Date,Transaction type,Num,Customer full name,Due date,Amount,Open balance
+91 or more days past due,,,,,,,
+,06/30/2026,Payment,4417,Sam Ortiz - CUST,06/30/2026,-600,-150
+Total for 91 or more days past due,,,,,,=G7,=H7
+31 - 60 days past due,,,,,,,
+,09/02/2026,Invoice,1004,Sam Ortiz - CUST,09/02/2026,275,275
+Total for 31 - 60 days past due,,,,,,=G10,=H10
+1 - 30 days past due,,,,,,,
+,08/20/2026,Invoice,1003,Dana Reyes - CUST,09/19/2026,800,500
+,10/01/2026,Payment,,Dana Reyes - CUST,10/01/2026,-100,-100
+Total for 1 - 30 days past due,,,,,,=G13+G14,=H13+H14
+TOTAL,,,,,,=G8+G11+G15,=H8+H11+H15
+,,,,,,,
+,,,,,,,
+,,,,,,,
+" Thursday, October 15, 2026 09:00 AM GMT-07:00",,,,,,,

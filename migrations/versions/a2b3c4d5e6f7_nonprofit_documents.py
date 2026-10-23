@@ -80,9 +80,7 @@ def upgrade() -> None:
             "source_class_id", sa.Integer(), sa.ForeignKey("classes.id"), nullable=True
         ),
         sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column(
-            "is_active", sa.Boolean(), nullable=False, server_default=sa.true()
-        ),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
         *_timestamps(),
     )
     op.create_table(

@@ -347,7 +347,16 @@ def account_register(
                 "line_id": tl.id,
                 "transaction_id": txn.id,
                 "date": txn.date.isoformat(),
-                "description": txn.description or tl.description or "",
+                # a register entry's memo lives on its lines, its payee on
+                # the entry: the Memo column shows the memo when there is
+                # one, else the payee (2.23.5 round 2, W-14)
+                "description": (
+                    tl.description
+                    if txn.source_type == "bank_entry"
+                    and tl.description
+                    and tl.description != payees.get(txn.id, "")
+                    else (txn.description or tl.description or "")
+                ),
                 "payee": payees.get(txn.id, ""),
                 "reference": refs.get(txn.id, ""),
                 "debit": float(dr),

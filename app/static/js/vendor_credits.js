@@ -50,6 +50,8 @@ const VendorCreditsPage = {
             </table></div>
             <p style="margin-top:8px;">Total ${formatCurrency(c.total)} &middot; applied ${formatCurrency(c.amount_applied)} &middot; remaining <strong>${formatCurrency(c.balance_remaining)}</strong></p>
             <div class="form-actions"><button class="btn btn-secondary" onclick="closeModal()">Close</button></div>`);
+        // the document's own address, so Back returns to the list and the Open group lists it (NEW-164)
+        if (App.documentAddress) App.documentAddress(`#/vendor-credits/${Number(id)}`);
         return '';
     },
 
@@ -122,7 +124,7 @@ const VendorCreditsPage = {
                 <td><select class="line-item" onchange="VendorCreditsPage.itemSelected(this)"><option value="">--</option>${itemOpts}</select></td>
                 <td><select class="line-account" title="Blank: the item's expense account, else the vendor's default"><option value="">Item / vendor default</option>${acctOpts}</select></td>
                 <td><input class="line-desc"></td>
-                <td><input class="line-qty" type="number" step="0.01" value="1" oninput="VendorCreditsPage.recalc()"></td>
+                <td><input class="line-qty" type="number" step="0.0001" value="1" oninput="VendorCreditsPage.recalc()"></td>
                 <td><input class="line-rate" type="number" step="0.0001" value="0" oninput="VendorCreditsPage.recalc()"></td>
                 <td class="col-amount line-amount">$0.00</td>
             </tr>`;

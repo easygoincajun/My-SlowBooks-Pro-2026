@@ -1,19 +1,16 @@
 """A negative amount prints "-$10.00" on a document, not "$-10.00" (2.18.0).
 
-A discount line from QuickBooks Online is a negative line, and the money
-filters every document template shares put the minus after the dollar
-sign: "$-10.00" on the invoice PDF, its print preview and the sales
-receipt. The filters now put the sign first, as the app's pages do
-(formatCurrency: "-$10.00"); every positive amount prints as it did.
+A discount line is a negative line, and the money filters every document
+template shares put the minus after the dollar sign: "$-10.00" on the
+invoice PDF, its print preview and the sales receipt. The filters now put
+the sign first, as the app's pages do (formatCurrency: "-$10.00"); every
+positive amount prints as it did.
 """
 
 from decimal import Decimal
 
-import pytest
-
+from app.models.items import Item, ItemType
 from app.services import pdf_service
-from tests.test_qbo_import_discounts import Discounts, _discount, _discounted
-from tests.test_qbo_import_tax import _line, _tax
 
 
 def test_the_money_filters_put_the_minus_before_the_dollar_sign():
@@ -38,22 +35,57 @@ def test_every_positive_amount_prints_as_it_did():
     ] == ["$12.50", "$0.045", "$1,234.50"]
 
 
-@pytest.fixture
-def books(db_session, seed_accounts, monkeypatch):
-    return Discounts(db_session, seed_accounts, monkeypatch)
+def _discount_item(db):
+    """An item a discount came in on (services/qbo_common.py): a line on it
+    may carry a negative price."""
+    from app.services.qbo_common import create_mapping
+
+    item = Item(name="Discount", item_type=ItemType.SERVICE, is_active=True)
+    db.add(item)
+    db.flush()
+    create_mapping(db, "discount_item", item.id, "")
+    db.commit()
+    return item
 
 
-def test_a_discount_prints_with_its_minus_first(client, books):
-    lines = [_line(1, 100, "Catering", "TAX")]
-    tax = _tax(8.01, (8.9, 90, 8.01))
-    books.invoices(
-        _discounted("180", "1080", lines + [_discount(2, 10, 10)], 98.01, tax, True)
+def test_a_discount_prints_with_its_minus_first(
+    client, db_session, seed_accounts, seed_customer
+):
+    item = _discount_item(db_session)
+    lines = [
+        {"description": "Catering", "quantity": 1, "rate": 100, "is_taxable": True},
+        {
+            "item_id": item.id,
+            "description": "Discount",
+            "quantity": 1,
+            "rate": -10,
+            "is_taxable": True,
+        },
+    ]
+    invoice = client.post(
+        "/api/invoices",
+        json={
+            "customer_id": seed_customer.id,
+            "date": "2026-08-03",
+            "tax_rate": "0.089",
+            "lines": lines,
+        },
     )
-    books.sales_receipts(
-        _discounted("181", "SR-18", lines + [_discount(2, 10, 10)], 98.01, tax, True)
+    assert invoice.status_code == 201, invoice.text
+    receipt = client.post(
+        "/api/sales-receipts",
+        json={
+            "customer_id": seed_customer.id,
+            "date": "2026-08-03",
+            "tax_rate": "0.089",
+            "method": "Cash",
+            "lines": [{**line, "line_order": n} for n, line in enumerate(lines)],
+        },
     )
-    for number in ("1080", "SR-18"):
-        html = client.get(f"/api/invoices/{books.get(number).id}/print-preview").text
-        assert html.count("-$10.00") == 2, number  # its price and its amount
-        assert "$-" not in html, number
-        assert "$98.01" in html, number
+    assert receipt.status_code == 201, receipt.text
+    for document in (invoice.json(), receipt.json()["invoice"]):
+        assert Decimal(str(document["total"])) == Decimal("98.01"), document
+        html = client.get(f"/api/invoices/{document['id']}/print-preview").text
+        assert html.count("-$10.00") == 2, document["id"]  # its price and its amount
+        assert "$-" not in html
+        assert "$98.01" in html

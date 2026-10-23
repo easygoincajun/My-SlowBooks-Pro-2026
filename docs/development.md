@@ -19,7 +19,6 @@ internal hardening notes see
 | PDF | WeasyPrint 60.2 + Jinja2 |
 | Bank Import | ofxparse (OFX/QFX) |
 | Payments | Stripe Checkout (hosted) |
-| QBO Sync | python-quickbooks + intuit-oauth (OAuth 2.0) |
 | Port | 3001 |
 
 ---
@@ -62,7 +61,7 @@ SlowBooks-Pro-2026/
 │   │   ├── pto.py            # PTO policies, requests, accruals
 │   │   ├── time_entries.py   # Time entry tracking with approval workflow
 │   │   ├── deductions.py     # Deduction types, employee deductions, garnishments
-│   │   ├── qbo_mapping.py    # QBO ↔ Slowbooks ID mappings
+│   │   ├── qbo_mapping.py    # what an earlier QuickBooks Online import left behind
 │   │   ├── attachments.py    # File attachments
 │   │   ├── bank_rules.py     # Bank transaction categorization rules
 │   │   ├── budgets.py        # Budget tracking by account/period
@@ -90,9 +89,7 @@ SlowBooks-Pro-2026/
 │   │   ├── iif_import.py     # IIF parser + import + validation
 │   │   ├── pdf_service.py    # WeasyPrint PDF generation
 │   │   ├── stripe_service.py # Stripe Checkout + webhook verification
-│   │   ├── qbo_service.py    # QBO OAuth + token management + client factory
-│   │   ├── qbo_import.py     # Import 6 entity types from QBO
-│   │   ├── qbo_export.py     # Export 6 entity types to QBO
+│   │   ├── qbo_export_import.py # QuickBooks Online's Export data zip → Migrate Data
 │   │   ├── auth.py           # Single-user password auth + session management
 │   │   ├── rate_limit.py     # slowapi rate limiting
 │   │   ├── settings_service.py # Settings CRUD with sensitive key filtering

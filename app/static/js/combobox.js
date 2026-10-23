@@ -167,6 +167,11 @@ class ComboBox {
         for (const p of ['width', 'minWidth', 'maxWidth', 'flex', 'marginLeft', 'marginRight', 'marginTop', 'marginBottom']) {
             if (sel.style[p]) wrap.style[p] = sel.style[p];
         }
+        // The select's own classes, as cbx--<class> on the visible box, so a
+        // stylesheet can size what is drawn: a width rule on the select itself
+        // reaches a 1px hidden element and does nothing (2.23.1 gate, NEW-103 /
+        // W-5: the bill form's Account box stayed 55px wide).
+        for (const c of sel.classList) if (c !== 'cbx-select') wrap.classList.add(`cbx--${c}`);
         if (parent && (parent.classList.contains('form-group') || /^(TD|TH)$/.test(parent.tagName))) {
             wrap.classList.add('cbx--fill');
         } else if (!sel.style.width && sel.offsetWidth) {

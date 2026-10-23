@@ -25,6 +25,9 @@ class TimeEntryUpdate(StrictModel):
     job_id: Optional[int] = None
     cost_code_id: Optional[int] = None
     notes: Optional[str] = None
+    # Accepted so a client can round-trip the whole entry, but PUT may only
+    # resend the CURRENT status. A real change (e.g. to "approved")
+    # is rejected — status moves only through /submit, /approve and /reject.
     status: Optional[str] = None
 
 
@@ -47,8 +50,18 @@ class TimeEntryResponse(BaseModel):
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
     pay_run_id: Optional[int] = None
+    # from QuickBooks (#323): the importer's name, the billing status, the
+    # service item and the customer or job label as printed
+    source: Optional[str] = None
+    billing: Optional[str] = None
+    service: Optional[str] = None
+    customer_job: Optional[str] = None
     model_config = {"from_attributes": True}
 
 
 class TimeEntryApprove(StrictModel):
+    # Accepted for backward compatibility but IGNORED: the approver is
+    # taken from the signed-in principal, not the request body, so no caller
+    # can record an approval in someone else's name. The field stays so older
+    # clients that still send it don't get a 422.
     approved_by: str = "manager"

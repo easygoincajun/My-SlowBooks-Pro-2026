@@ -5,7 +5,1157 @@ Notable changes between releases. Format roughly follows
 used during development is captured here so the README can stay focused
 on what the software does, not on what sprint shipped what.
 
-## [Unreleased]
+### v2.26.0 — Direct deposit from the page, and last year beside this one
+
+The sentence a Server Edition server answers for a company it cannot open
+now is always one of its own, looked up by the server rather than read off
+the exception that carried it (two code-scanning alerts on 2.25.0 read that
+path as a possible traceback; it never was one, and now cannot be).
+
+**A new Docker install no longer signs people out at random.** The image runs
+two server processes, and on a first start each made its own session key
+when none was on disk yet, so a request reaching the other process was
+refused as not signed in (12 of 30 in one session on a fresh stack) until
+the container restarted. The first process to write the key now wins and
+the other reads it. `SESSION_SECRET_KEY` in the environment still overrides
+the file.
+
+**A Postgres backup restores again** (Discussion #417, @teich). On the Docker and
+server installs that keep the books in PostgreSQL, every restore from the
+Backups page or `POST /api/backups/restore` was refused as "made under another
+key" and asked for a recovery key, since 2.24.0: the check meant for an
+encrypted company file took any backup that wasn't plain SQLite for one, and
+a pg_dump backup isn't SQLite. Only a `.db` backup is checked for a key now,
+and the backup lists no longer mark Postgres backups encrypted.
+
+**A processed pay run's direct deposit file, from the page** (discussion
+#211, @ContractorKeith). The NACHA file could only be made by an API client
+that sent the bank's numbers in the request body; the page had no button,
+and nothing kept the numbers. Settings → Direct Deposit (ACH) keeps them
+now: the bank's routing number and name, the company account the pay comes
+from (encrypted at rest) and the two identifiers the bank assigns, "1" +
+EIN from the company tax id when blank. A processed run's view has a
+**Direct deposit file** button (`GET /api/payroll/{id}/nacha`), the file
+named for the pay date, and says who it pays and who is paid by check
+(`direct_deposit` on each stub, a Paid by column). A run nobody on has an
+account, or a company with the bank details blank, is refused with the
+sentence that says what to do. `POST .../nacha` takes each field as
+optional now, outranking the saved one, and its `effective_date` reaches
+the batch header, which always carried the pay date. The file header holds
+a 10-character immediate origin whole: a space and nine digits dropped the
+leading "1" of "1" + EIN. The builder itself refuses a run with no
+credits rather than returning a well-formed empty file (from PNWImport's
+fork, 5f522667). Settings refuse a routing number that is not one and an
+identifier longer than its field. Each file made leaves an `EXPORT` row in
+the audit trail (who, which run, how many it pays, the total and the
+effective date, never an account number), and the Audit Log page lists and
+filters it, as it now does a backup `RESTORE`.
+
+**Docker build context and compose hardening**. `.dockerignore` now
+excludes the auto-generated encryption/signing keys (`.slowbooks-master.key`,
+`.slowbooks-session.key`), SQLite company files and their WAL/shm/journal
+sidecars, `app/static/uploads/`, and log/coverage artifacts, so `COPY . .`
+can't bake a developer's secrets or data into a shared image — while still
+copying everything the container needs at runtime (alembic migrations,
+`app/static` assets, `index.html`, the entrypoint). `docker-compose.yml` now
+binds both published ports to `127.0.0.1` by default (`POSTGRES_BIND` /
+`APP_BIND` to override, `POSTGRES_PORT` still sets the host port), so the dev
+database — which keeps its convenient default `bookkeeper` password — is no
+longer reachable from the LAN on a routable host. `docker-compose.prod.yml`
+already published neither service; unchanged. The image's HEALTHCHECK moved to
+a stdlib `scripts/docker_healthcheck.py` that no longer follows redirects, so
+it stays healthy when `FORCE_HTTPS=true` answers `/health` with a 307. New
+tests parse `.dockerignore` (secrets excluded, runtime paths kept), assert the
+compose ports are loopback-bound, and exercise the healthcheck probe.
+
+**Time-entry approval integrity.** Approving a time entry records the
+signed-in user as the approver — the same name the audit log carries — instead
+of taking it from the request body, so no caller can stamp an approval in
+someone else's name. The `approved_by` field is still accepted on
+`POST /api/time-entries/{id}/approve` for backward compatibility but is ignored.
+`PUT /api/time-entries/{id}` no longer changes an entry's status: it still
+accepts `status` so a client can round-trip the whole entry, but only to resend
+the current value — a real change (e.g. straight to `approved`) is rejected with
+a 400, so status moves only through `/submit`, `/approve` and `/reject`. PUT and
+DELETE now also refuse an entry already costed to a job (`job_cost_id` set),
+mirroring the existing pay-run lock, so a job's posted labor cost can't be left
+orphaned. QuickBooks-imported entries keep the approval name from their import.
+
+**API change.** Callers of `/api/time-entries/{id}/approve` that relied on
+`approved_by` from the body no longer control the recorded approver. Callers of
+`PUT /api/time-entries/{id}` can no longer change `status`.
+
+**The uploads folder is refused whatever the address says.** The guard that
+keeps pre-2.18 files in `app/static/uploads/` (logos, attachments, W-4s) off
+the web matched only the plain `/static/uploads/…` path; `/static//uploads/…`
+and `/static/css/%2e%2e/uploads/…` reached the static mount and were served
+without signing in. The mount now resolves each request and refuses anything
+inside the uploads folder, however it is spelled, symlinks and case included.
+Only installs upgraded from before 2.18 that still have files there, served
+over the network, were exposed. Found in MorrisAEGIS's fork (arkcpa-slowbooks).
+
+**A permit's Copy buttons copy the text, never run it.** The reseller permit
+Verify dialog built each Copy button as an inline handler with the value
+inside a JavaScript string. `escapeHtml` turns a quote into an entity, but
+the browser decodes that before the script runs, so a permit number or tax
+ID with a quote broke the button, and a crafted one ran script for whoever
+opened the permit. The buttons now carry the value in a `data-` attribute,
+read as text. The same dialog showed a customer's or vendor's name as
+`[object Object]`; it shows the name. A test now fails on any escaped value
+inside a quoted inline-handler string. Found in LayoverLogic's fork.
+
+**Sessions end when access changes.** A signed-in session is now
+re-checked against the users table on every request instead of being trusted
+from the signed cookie alone. Sessions end on the next request when a user is
+deactivated, their role changes, or their password changes or is reset; the
+role is read from the user row, so a role change takes effect at once. A
+user's own password change keeps the session that made it and ends their
+others. A switch to another company (`POST /api/auth/company`) re-checks the
+session the same way before the cookie's role opens anything, so a demoted or
+deactivated administrator cannot set up a new company from a stale session. A
+sign-in past its end date is signed out on its next request, and setting an
+end date in the past ends the sessions at once. Sign out ends the user's other
+sessions too, so a cookie copied before it stops working. Single-user desktop
+sign-in and API-token requests are unchanged; an API token outlives its
+maker's deactivation by design, until it is revoked itself. Adds
+`users.session_version` (one Alembic migration, run in each company file).
+Found in MorrisAEGIS's fork (arkcpa-slowbooks).
+
+**Account balances update atomically under concurrency.** Posting a
+journal entry used to read each account into memory and add the line's amount
+in Python (`account.balance += delta`). On PostgreSQL, two sessions posting to
+the same account at once could both read the same starting balance and one
+overwrite the other, so `accounts.balance` drifted. The journal lines were
+always correct — only the stored balance was affected — but anything reading
+`Account.balance` saw the drift. Posting now aggregates each account's change
+and applies it as a single `UPDATE accounts SET balance = balance + delta`, so
+the database performs the addition and no concurrent update is lost; the same
+atomic path now backs the invoice/bill journal rebuild. Per-account updates are
+applied in ascending account-id order, so a single posting cannot deadlock with
+another; an edit's reversal followed by its repost in one transaction can still
+contend with a concurrent edit of the same accounts, which the database resolves
+by failing one of them. NULL balances are coalesced to zero, and in-session
+Account objects are refreshed so a response built in the same request reflects
+the new balance. Behaviour is unchanged on SQLite. Found in MorrisAEGIS's fork (arkcpa-slowbooks).
+The Audit Log no longer lists an account row for each balance a posting
+moves (a change of `balance` alone); the posting's own lines, which are what
+moved it, are recorded as before.
+
+**Reverse-proxy client IP and shared rate-limit counters** (fix). Behind a
+TLS-terminating reverse proxy the app saw the proxy's address on every request
+instead of the caller's, because uvicorn trusts `X-Forwarded-For` only from
+`127.0.0.1` by default and nothing widened that trust. That collapsed the login
+rate limiter into one shared bucket for all users (5 attempts/minute across
+everyone, not per client) and recorded the proxy's IP in the `login_attempts` /
+`portal_accesses` audit tables. Separately, rate-limit counters lived in
+per-worker memory, so `APP_WORKERS=4` made every configured limit 4x looser.
+Set `FORWARDED_ALLOW_IPS` to the proxy's address or CIDR: uvicorn reads it from
+the environment itself, so the Docker entrypoint passes no flag. The client
+address is now decided in that one place — `client_ip()` (login and portal
+audit rows) reads what uvicorn reports and no longer parses `X-Forwarded-For`
+itself, and the `TRUST_PROXY_HEADERS` knob is retired (removed from
+`.env.example`, `docker-compose.prod.yml` and the docs). The limiter honours
+`RATE_LIMIT_STORAGE_URI` (e.g. `redis://…`) for shared counters, defaulting to
+in-memory as before; the `redis` client now ships in `requirements.txt` (a
+`redis://` URI used to fail at import without it), and when the URI is set the
+storage is health-checked once at startup, so an unreachable Redis stops the
+app with a clear message instead of making every login a 500. The app logs a
+startup warning when a proxy is implied (`FORCE_HTTPS` on) but the trust list
+is empty, or when more than one worker runs with in-memory counters.
+`docker-compose.prod.yml` passes `FORWARDED_ALLOW_IPS` through; left blank, it
+starts as before with the warning. Desktop and single-worker installs are
+unaffected. See `docs/tls-proxy-setup.md`.
+
+**CORS and the security headers now sit outside the login gate.** Starlette
+makes the last-registered middleware the outermost layer, so registering CORS
+and the security-header middleware before the auth gate had made them the
+inner layers — the gate wrapped them. Two consequences, both fixed by
+registering the gate inside CORS and the headers: an unauthenticated CORS
+preflight (browsers send it without credentials) was answered 401 with no
+`Access-Control-Allow-*` headers, so a deployment with a configured
+`CORS_ALLOW_ORIGINS` allow-list could sign in and then fail every cross-origin
+API call; and the gate's own 401/403/503 refusals (unauthenticated, role
+refusal, a company that cannot be opened) carried no CSP, `X-Frame-Options`,
+nosniff or Referrer-Policy. The allow-list and credential handling are
+unchanged, and a route that chose a stricter header of its own (the portal's
+`Referrer-Policy: no-referrer`) still wins.
+
+**Validators reject a trailing newline.** Several input validators built a
+Python `re` pattern ending in `$` and checked it with `.match()`/`.search()`.
+In Python `$` also matches just before a trailing `"\n"`, so a value like
+`"evil.db\n"` passed. The backup and company `.db` filename allow-lists, the
+Postgres database-name allow-list, the chart account number, the username, the
+preference key, the idempotency-request key, the Cloudflare account id and the
+AI worker-url host check now use `re.fullmatch` (anchored to the whole string),
+which rejects the trailing newline. HTTP entry points that already `strip()`
+their input were not reachable, but the regexes are hardened for any caller.
+Pydantic `pattern=` constraints are unaffected: they use the Rust regex engine,
+where `$` is end-of-text.
+
+**Bank-feed connection management is admin-only.** Connecting a SimpleFIN
+bank feed, remapping its accounts and disconnecting it change a stored
+credential and the books' wiring, so they now require the administrator
+role — the same boundary as Settings and the AI provider key. Running a
+sync or reading status on a feed the administrator has already connected
+stays available to the bookkeeper as daily books work; read-only is
+unchanged. Previously a non-admin sign-in or token could reach these.
+
+**Hostile input is a 422, not a 500.** Four malformed-input classes that
+passed schema validation and then crashed downstream are now refused at the
+request boundary, centrally in the shared request base model
+(`app/schemas/common.StrictModel`) rather than field by field:
+
+- A non-finite float (`NaN` / `Infinity`) in any float field — a bill line
+  quantity/rate hit `decimal.InvalidOperation`, a bill-payment amount became
+  a NULL insert — is rejected (`allow_inf_nan=False`); the ~200 float fields
+  are covered in one place. Decimal money fields already refused these.
+- A NUL byte (`\x00`) in any string, which SQLite stored silently and
+  PostgreSQL rejected with a 500, is refused everywhere a request carries text.
+- A document/transaction date outside 1900–2199 is refused: an invoice dated
+  `9999-12-31` overflowed computing its Net-30 due date. The window still fits
+  every real document, hire date and birth date, and file importers
+  (QuickBooks/Xero/IIF) build rows directly, so historical imports are
+  unaffected.
+- A PUT that explicitly sets a NOT NULL column to `null` (e.g.
+  `PUT /api/customers/{id}` or `/api/vendors/{id}` with `{"name": null}`) is
+  refused with a 422 naming the field, via a generic helper
+  (`reject_null_updates`) applied to every all-optional Update route, instead
+  of the IntegrityError 500 it caused. An empty `{}` PUT stays a no-op 200.
+
+The NUL check also walks `list[str]` fields, and `BudgetUpdate` now shares
+the strict request base, so an unknown field on it is a 422 like everywhere else.
+
+The four above were reported in PNWImport's fork as still present upstream,
+and each was checked against 2.25.0 before it was fixed.
+
+**An import's whole error list, and a file of it** (discussion #349,
+@ContractorKeith). The Transaction Detail by Account and categorized-sheet
+imports cut their list at twenty and said "… and 14,070 more", and the
+person asked whether there was a way to see the whole report. There was
+not. Both lists come whole now, as the IIF import's already did; the box
+on the Interoperability page says how many problems there are and has
+**Save the list**, a text file of every line (the desktop app saves it to
+Documents/SlowBooks Pro/Reports and says where).
+
+A QuickBooks Desktop ledger export whose parent accounts have sub-accounts
+imports: QuickBooks reports a parent's own postings in a section it names
+"<Parent> - Other", which is not an account, and the import refused the
+whole file as "accounts not in the chart" for each of them (discussion
+#349). Those lines post to the parent account itself now.
+
+**Profit & Loss and Balance Sheet compare to last year** (#347, PR #367, @JohnH-code). "Compare to
+same period last year" on the P&L, and "Compare to same date last year"
+on the Balance Sheet, add a Prior Year column on screen and in the PDF
+and CSV (`compare=prior_year` on `/api/reports/profit-loss`,
+`/api/reports/balance-sheet` and their exports), with $ Change and
+% Change columns that "Show $ and % change" turns off (`hide_changes=1`
+on the exports). The prior period is the same dates one year earlier, a
+month's last day mapping to that month's last day, so a full February
+compares with a full February across a leap year. An account with
+activity in only one of the two years shows 0 in the other; % Change is
+"—" against a zero. The rows keep the chosen order, and "Without
+adjusting entries" applies to both years. A prior-year amount drills into
+that year's transactions and "Back to …" returns to the comparison; both
+choices ride on the address and in saved reports. The Balance Sheet
+screen also shows the Liabilities + Equity total its PDF already had.
+
+A Balance Sheet line's drill-down for an as-of date in an earlier year
+started on January 1 of the current year, after its own end date, so the
+dates were refused and this year's transactions shown instead. It starts
+on January 1 of the as-of date's year (#347).
+
+**The served sign-in reaches the company chosen** (#369, #370, PR #372,
+@ContractorKeith). A session signed in to a company whose file then went
+missing chose another company on the sign-in screen and got a blank page;
+it switches there signed in now. The setup form on a served host offers the
+host's other companies a choice away.
+
+**The Mac app needs macOS 15 or later** (PR #376, @ContractorKeith). GitHub
+retires its macOS 14 build machines on November 2, so the Mac app is built
+on macOS 15. The PDF libraries it carries are built for the macOS they are
+built on, so 2.26.0 opens on macOS 15 (Sequoia) or later, and says so
+(`LSMinimumSystemVersion` 15.0) rather than closing at launch on macOS 14;
+every Apple Silicon Mac can update to 15. The build refuses a bundle whose
+libraries need a newer macOS than the app declares. latest.json names the
+lowest macOS (`macos_minimum`), and from this release the update check does
+not offer a Mac an update it can't open.
+
+One schema change: `users.session_version`, run in each company file.
+587 API operations (`GET /api/payroll/{id}/nacha`).
+
+### v2.25.0 — Several companies on one server
+
+**Server Edition serves every company file** (#358, PR #363, @ContractorKeith). The sign-in screen asks
+which company, then who; a session works in the company it chose, so two
+people work in two companies at once. Each company keeps its own users and
+roles. Signing in checks the same username and password against the other
+companies, and the topbar's company switch opens each one that matches in one
+click, with that company's role. The rest ask for their own password. Audit
+log, backups, bank feeds and settings stay per company. A company made under
+Companies is set up by the administrator who opens it. An API token's request
+names its company with `X-SlowBooks-Company`. Starting with `--serve-lan` brings
+every listed company up to this version first. The desktop window still opens
+one company at a time, and a PostgreSQL server still serves one database.
+A company the server cannot open now (its file missing, locked or from another
+version) answers with one sentence, from the gate as well as from a page, and
+the sign-in screen still lists the companies so another can be chosen. The
+one-click switch looks at the person as they are in the other company now:
+a password changed or reset there since the sign-in, or a one-time password
+waiting to be replaced, asks for that company's password instead. The setup
+wizard's encrypt box on a company served with the others leaves the started
+company's key alone (a served company is encrypted under the host's
+`COMPANY_FILE_ENCRYPTION_SECRET`). A company taken off the served list gives
+its engine up at once. Merged as contributed, with these on top.
+
+No schema change. 586 API operations (`POST /api/auth/company`).
+
+### v2.24.1 — Checks from the register, and a ledger export caught
+
+**Print Check for a check written in the bank register or as an expense**
+(PR #362, @ContractorKeith; discussion #354). Print Check sat on bill
+payments alone. A check typed straight into the register (+ Entry, the
+quick-entry row, a split) or entered as an Expense paid from a bank account
+now prints from its register row and from the expense's view, on the same
+3-per-page voucher as a bill payment's check: the payee from the vendor or
+the entry, the reference as the check number, the entry's memo, and each
+split line on the stub. A deposit, a card charge, a transfer and a void are
+refused with the reason, and a bill payment's check prints from its bill.
+Merged as contributed.
+
+**A QuickBooks ledger export with an added Account column is refused, not
+read as sales** (#359, PR #360, @ContractorKeith; discussion #349). A
+Transaction Detail by Account export with an Account column added matched
+the sales-report signature and posted sales receipts and payments instead
+of ledger history. The account-grouped layout is now recognized by its
+section headings before the sales check, and such a file is refused with
+the sentence that says to export again with the default columns and the
+All accounts filter. The default export is read exactly as before. Merged
+as contributed.
+
+No schema change. 585 API operations.
+
+- Refuse account-grouped QuickBooks ledger CSVs with an added Account column
+  before they can be mistaken for sales documents. The error explains the
+  default-column export and All accounts filter (#359, discussion #349).
+- Print Check for a check written straight into the bank register or
+  entered as an Expense paid from a bank account, from the register row
+  and the expense's view: the same 3-per-page voucher as a bill payment's
+  check, each split line on the stub (`GET
+  /api/checks/print?transaction_id=`). A deposit, card charge, transfer or
+  void is refused with the reason (discussion #354).
+### v2.24.0 — Working with your accountant
+
+**An Accountant role** (#340). Settings → Users offers Accountant: a sign-in
+that reads everything, the reports, every list and the audit log included,
+posts journal entries, voids the ones it posted and attaches the support
+behind one, and nothing else; every other write is refused with a sentence
+that says what the role is for. Payroll and HR stay the administrator's.
+Settings → Users also **invites** an accountant (#345): a one-time password
+shown once with the address, each line with a Copy button of its own and
+the password free of look-alike characters (no 0/O, 1/l/I), an end date if
+the engagement has one, and their own password set at the first sign-in;
+an ended sign-in is refused with the date, and the Users list shows each
+person's last sign-in.
+
+**Adjusting entries, marked and reported** (#341). A journal entry can be
+marked as an adjusting entry (the accountant's are, always), carries who
+posted it, and the Journal Entries list filters to them. Reports →
+Adjusting Journal Entries lists them for a period as PDF or CSV, and the
+Profit & Loss and Trial Balance run without them on request, so a
+before-and-after is one checkbox.
+
+**Closing Date Exceptions** (#342). Every change made into a closed period
+with the closing-date password is written to the audit log as such, and
+Reports → Closing Date Exceptions lists each use: who, when, the closing
+date at the time, and every row it changed before and after, as PDF or CSV.
+
+**The Accountant's Package** (#343). Reports → Accountant's Package is one
+zip for the period: the Financial Statements Pack, the General Ledger and
+Trial Balance as CSV, the A/R and A/P agings, each bank reconciliation
+completed in the period, the Adjusting Journal Entries and Closing Date
+Exceptions reports, and the audit log since the closing date; the dialog
+lists the files before the download.
+
+**The QuickBooks Desktop round trip, both ways** (#344). The IIF export
+carries checks, card charges, transfers, bill payments and journal entries
+(CHECK, CREDIT CARD, TRANSFER, BILLPMT, GENERAL JOURNAL), so the whole
+ledger reaches QuickBooks Desktop; the IIF import takes the same five
+blocks back as journal entries, a block already in the books posting
+nothing twice, and GENERAL JOURNAL blocks post as adjusting entries on
+request (tick *This is an accountant's file*). The Transaction Detail by
+Account import takes an *Adjusting entries only* mode that refuses the
+file whole if it holds anything but journal entries.
+
+**SlowBooks' own Accountant's Copy** (#346). Companies → Send to accountant
+writes an encrypted copy of the books (a passphrase shown once, your
+sign-ins and secrets left out) with a dividing date. The accountant opens
+it in their own SlowBooks Pro, where it takes journal entries dated on or
+before that date and nothing else, a banner on every page saying so, and
+sends one signed change file back. Apply accountant's changes shows every
+entry first, posts the new ones as adjusting entries in the accountant's
+name, once, and refuses a file from another company or altered on the way.
+The guide is docs/working-with-your-accountant.md.
+
+**A categorized bank sheet imports as posted transactions** (#328). The
+Transaction Pro / SaasAnt layout (Bank Account, Transaction Date, Memo,
+Payee, Account, Amount, by name in any order, the bank named in the
+header or per row) imports under Interoperability's report upload: each
+row the register entry it is, rows sharing the date, payee and memo one
+split entry, a transfer when the account is another bank or card account;
+the file is checked whole first, a row already in the books posts nothing
+twice, and payees not on the lists are added. A switch takes sheets that
+write money out as positive.
+
+**Reclassify Transactions** (#337). Reports → Reclassify Transactions: pick
+an account and a period, tick the lines to move, choose the account they
+belong on and a class, preview, then post the move as one audited change
+naming every line. A bill's own line follows its posting; the bank side of
+an entry and a document's item lines stay put and say why; a move dated
+into a closed period takes the closing-date password and shows on the
+Closing Date Exceptions report. The accountant role may use it.
+
+**Open screens** (#336). The pages, registers, documents and dialog reports
+opened in a session are listed under Open at the top of the sidebar, each
+a link back and each closable: a report with its period, a register by its
+account, a document by its title. The one showing is marked, closing it
+goes to the one before, a reload keeps the list and Close all empties it.
+
+**Company file encryption on the desktop** (#290). Settings → Company File
+Encryption → Turn on (or the box on first-run setup) makes a recovery key,
+shown once with Copy and Save as a text file, encrypts the company file
+under it, and wraps the key for your password in a keyring beside the
+file. The company picker then unlocks the books with an administrator's
+sign-in, or the recovery key; every other administrator unlocks after
+their next sign-in, and one removed, demoted or reset no longer does. New
+recovery key re-keys the file and retires the old one. The recovery key
+opens the file and every backup of it on any machine: a restore of a
+backup made under another key asks for the recovery key it was made under.
+Server Edition keeps COMPANY_FILE_ENCRYPTION_SECRET; the guide is
+docs/company-file-encryption.md.
+
+**Also.** The Companies page on a server install says how a company is
+switched there rather than offering the desktop's picker (#352, Docker);
+an imported journal entry (the lists IIF's opening balances, a Transaction
+Detail by Account journal, a migration's) voids from the page like a
+hand-typed one (#355); and the IIF import's unsupported-type note names
+the types it takes now.
+
+**Fixed.** On macOS and Linux, a plain (unencrypted) company file lost the
+entries made after Create Backup, or after Send to accountant, when the
+app quit or switched company: the backup read the file through a second
+SQLite library, which deleted the write-ahead log under the one the app
+writes with. Every release from 2.23.2 to 2.23.5 had it; an encrypted
+file never did. Every read of a company file goes through the one library
+now. The audit log no longer records a password hash or a secret setting's
+value (an UPDATE copied them before and after), and the Audit Log page,
+the Accountant's Package and the Accountant's Copy redact what earlier
+releases wrote. Closing Date Exceptions works on the page's clock, so an
+evening override is in the day it was made and times show in local time
+with the zone named; accounts on it are named, not numbered. First-run
+setup refused for a company name another file already has shows that
+sentence and stays on setup (it switched to a sign-in form for a company
+with no password).
+
+Schema: migration `c2d3e4f5a6b7` (an entry's adjusting flag and who posted
+it, a user's one-time-password flag and end date, the accountants_copies
+table). 585 API operations (the Adjusting Journal Entries, Closing Date
+Exceptions and Accountant's Package reports with their files, the four IIF
+exports, `POST /api/users/invite`, `POST /api/auth/password`, the seven
+`/api/accountants-copy/*` calls, `/api/reclassify/lines` and `POST
+/api/reclassify`, and `POST /api/company-file/encryption/recovery-key`).
+
+### v2.23.5 — A bookkeeper's first hour
+
+**A SimpleFIN feed that reports every sign the other way round imports
+right** (PR #327, @DefiAlan). Some bank connections present a checking
+account as a liability: a negative balance, deposits negative, withdrawals
+positive, so withdrawals imported as deposits and nothing auto-matched.
+The protocol gives no field to tell by, so the person says so: a Reverse
+signs checkbox per feed on Banking's bank-feed list, kept as a setting and
+applied before the rows reach matching, rules and dedup. Claim and
+disconnect reset it. Lines already imported the wrong way round are not
+rewritten; they dedup by their SimpleFIN id on the next sync.
+
+**The bank register you can type into** (#329). A bank or card account's
+register reads oldest to newest, as a ledger does, with the running balance
+down the right, and its last row is an entry row: date, payee, memo, ref,
+category, the amount out or in; Enter or Post posts it through the same
+call as + Entry, and the next row is ready. The dialog stays for anyone
+who prefers it.
+
+**A register entry split across accounts** (#330). A check that pays several
+things, or a loan payment that is principal and interest, is one entry
+with several lines: "Split this entry…" on the dialog takes an account and
+amount per line, says what is left to place, and posts one entry. On the
+API, `splits` on `POST /api/banking/transactions`; the lines must add up
+to the amount, take its sign, and a bank or card account is a transfer,
+never a split line.
+
+**Reconcile shows only the lines through a day** (#331). Several statements
+reconciled back to back are started with the last statement's date; "Show
+only lines through that date" hides the later lines while a month is worked
+and says how many it hid. The session's figures are the session's; Mark
+through takes the same day.
+
+**Account numbers are plainly optional, and the seeded chart's unused
+accounts go in one step** (#332). The account form says the number is
+optional (it always was in the books). "Remove unused seeded accounts…" on
+the Chart of Accounts lists every seeded account with no postings, no
+sub-accounts, no register or setting naming it and no control role, and
+removes them together; the ones that stay are named with why.
+
+**The drill-down saves as CSV and PDF** (#333), the figures on the screen,
+the account and range in the file name: what a client asks for when they
+want to know what was spent on one account.
+
+**The sidebar hides what a company doesn't use** (#334). Settings → Sidebar
+lists every section and link; the ticked ones leave the menu. A hidden page
+still opens by its address, and the list is on the Settings page.
+
+**Vendors: a search box and paid-to-date** (#335). The Vendors list filters
+as you type (name, company, phone, email) and says how many of how many
+show. A vendor's page carries paid this year and all time, and Save CSV
+lists the payments with a total, for any date range on the API.
+
+**Time by Job by Name detail imports as QuickBooks writes it.** 2.23.4's
+importer took that report with the by-Name layout's groupings swapped,
+which is not how QuickBooks Desktop lays it out: a user's real file has
+the customer:job as the outer heading, the service item as the inner one
+and the person as a Name column in place of Item. The importer read it as
+"Unrecognized report layout"; it reads both now, and the result names the
+report. (The fixture for it is invented timesheets in that exact layout;
+the real file stays private.)
+
+No schema change. 561 API operations (the drill-down's CSV and PDF, the
+vendor's payments CSV, the seeded chart's dry run and removal).
+
+### v2.23.4 — Every QuickBooks Desktop transaction, as journal entries
+
+**QuickBooks Desktop's Transaction Detail by Account imports.** The report a
+bookkeeper exports for everything (Reports > Accountant & Taxes >
+Transaction Detail by Account) lists every deposit, check, transfer, general
+journal entry and opening balance, grouped by account, with the other side
+of each in Split. Import from Report CSV refused it as an unrecognized
+layout, so a Desktop company's transfers and journal entries had no way in.
+It now posts each transaction as one balanced journal entry with its date,
+number, name and memo, on the accounts the lists IIF made, sub-accounts
+included. Before anything is written the whole file is checked: every
+account in the chart, every transaction balanced, and every account's lines
+adding up to the total QuickBooks printed for it; a file that fails is
+refused whole, with the reason. Same-day transactions with no number are
+told apart by name, and a journal entry whose number QuickBooks printed on
+one line only is still one entry. A second upload posts nothing twice. A
+register-style report (no account above its rows) is told which report to
+export instead. Built against a real company's report, a year of a small
+practice's books in which every account matched QuickBooks to the cent; the
+fixture is invented books in that layout, and its sample company, Morden
+Bookkeeping, is named for Kim Morden Bookkeeping, who brought the report.
+
+**Accounts in order on the Profit & Loss and Balance Sheet** (#326,
+@TigerCoder27). Both listed accounts in the order they were created (the
+query grouped by account with no ORDER BY), so a chart added to after
+seeding read 6000, 6200, 6600, 6900, 6250, 6410. They read by number, then
+name, as the Trial Balance and General Ledger do, with an account that has
+no number after the numbered ones and a sub-account right after its parent;
+"Sort by" on either report lists them by name instead, and the choice rides
+into the PDF, the CSV, the address and a saved report (`sort=name` on the
+API). A statement row names a sub-account by its path ("Automobile:
+Insurance") with its number first, so two accounts of one name tell apart
+and a sub-account whose parent has no amount still says where it sits; the
+Trial Balance and General Ledger put the accounts with no number last too
+(they came first, in creation order). A company-wide default for the order
+can follow if it is wanted.
+
+**QuickBooks Desktop's timesheets come across as time entries** (#323,
+@rcheetham). Desktop does not export timesheets to IIF, so a company has a
+report: Reports > Jobs, Time & Mileage > Time by Name by Job detail (or
+Time by Job by Name detail), saved as CSV or Excel, with a heading row per
+person and per customer:job, one row per entry (Date, Item, Billing Status,
+Duration, Notes) and QuickBooks' own Total rows. Import from Report CSV now
+takes it, Excel included: each row becomes an approved time entry under its
+employee, with the hours, the notes, the service item, the billing status
+(not billable, unbilled, billed) and the customer or job label as QuickBooks
+printed it, linked to the job when the label is one on the Jobs list. A
+person not on the Employees list is added from the name and named in the
+result, for their pay to be set. Imported time is history: it is marked as
+QuickBooks' on HR > Time Entries, and a pay run never picks it up. Before
+anything is written the whole file is checked, every group's hours against
+the total QuickBooks printed for it; a file that fails is refused whole. A
+second upload posts nothing twice; a row QuickBooks holds twice is two
+entries. Durations read as 2.25 or 2:15. Built against a real consultancy's
+half-year of timesheets (6,277 entries, every total matched); the fixture
+is invented timesheets in that layout.
+
+**The migration guide says what does not come across yet** (#323): payroll
+history, estimates and purchase orders as documents, inventory on hand,
+memorized transactions and attachments; each gets built around a real
+export someone sends.
+
+**From the gate's first round** (Windows W-1 to W-4; macOS NEW-122 to
+NEW-124): the imported entries list on Journal Entries, and their Type reads
+"QuickBooks Desktop import"; the result counts them ("Imported 8 records",
+not 0); the Import from Report CSV panel names Transaction Detail by
+Account; and a lists IIF's bank and credit card accounts come in as
+registers, so Banking lists them (they came in as plain accounts).
+
+**From the gate's second round** (macOS NEW-125, NEW-126): a lists IIF's
+credit card accounts (CCARD) come in as liabilities; they fell back to
+expense accounts, which the register flag then put on Banking as cards. A
+journal entry's view no longer prints "- " before an account with no
+number.
+
+**From the gate's third round** (Windows W-5, macOS NEW-127, both older):
+the lists IIF import matched an account by its leaf name alone, or by its
+number alone, whatever its type, and merged in silence: an income
+sub-account "Maintenance & Repairs" landed in the expense account of that
+name, "Retained Earnings" (3100 in the file) in the chart's 3100 Owner's
+Draw. An account is its whole path now, matched under the same parents and
+of the same type; a number alone never matches, and a number the chart
+already uses is dropped with a note; QuickBooks' own names the chart knows
+("Inventory Asset" is 1300 Inventory) still match, named in the result; an
+account of another type with the same name is created beside it, with a
+note. And a second upload of the same lists posted every opening balance
+again, doubling them all: a balance an earlier import posted is not posted
+again, and the result says how many were left alone.
+
+**From the gate's fourth round** (macOS NEW-128): lists first imported on
+an older version, whose matching merged accounts wrongly, and imported
+again on this one made the right accounts beside the wrong ones and posted
+their balances a second time, the same debt twice. Opening balances come
+with a company's first import of the lists; a later import posts none, and
+names the accounts it created that carry a balance in the file, for the
+person to enter any that are real by hand.
+
+**From the gate's fifth round** (Windows W-6; macOS NEW-129, older): that
+note names every account it created with a balance in the file, however
+many (it stopped at twelve, "and 15 more", and the rest appeared nowhere);
+the list of accounts matched to the chart by a name it knows is whole too.
+On the dashboard's A/R Aging bar, the light theme's 31-60 slice printed its
+figure in black on a bright orange, which WCAG 2's arithmetic clears and
+the eye does not; the slice is a deeper orange now and its figure prints
+white.
+
+**From the gate's seventh round** (macOS NEW-130 to NEW-135; Windows W-7
+to W-11): a timesheet in QuickBooks' Minutes format imports (0:20 three
+times under a total of 1:00 was refused as short: totals are compared in
+whole minutes now, and a decimal that is minutes shown to two places counts
+as those minutes); a Total the Excel export writes as a formula reads from
+the value Excel computed for it, and a Total that cannot be read refuses
+the file instead of being passed over; the New Pay Run form's time column
+leaves imported time out, and a run with nothing else to pay says the
+approved time there came from QuickBooks; the report file input takes
+.xlsx; the result names the report it read (by Name by Job, or by Job by
+Name); a seam between the aging bar's slices keeps two bands of one
+lightness apart; and What's new says the statements changed their order.
+
+**From the gate's eighth round** (Windows W-12, macOS NEW-137, NEW-138):
+the Trial Balance and General Ledger name a sub-account by its path and
+number too, on the page, in the CSV and in the PDF (they took the
+statements' order and printed "6210 Fuel" after a parent with no balance);
+and a Minutes-format timesheet opened in Excel or Numbers and saved as
+.xlsx, whose durations became times of day (00:20:00), imports.
+
+Schema: five nullable columns on time entries (the import's source and
+row fingerprint, billing status, service item, customer or job label),
+migration `b1c2d3e4f5a6`. 556 API operations.
+
+### v2.23.3 — Voids that always post, and imported invoices paid once
+
+**Voiding never fails on a long line memo** (#318, PR #319, @Justin-Rezamp).
+A reversal writes "VOID: " before each line's memo, so a memo of 295 to 300
+characters came out over the column's 300 and PostgreSQL refused the row:
+the void answered 500 and the entry could never be voided. The reversal's
+copy of the memo is cut to fit (the original keeps its full text), on every
+void path, and an in-kind gift's posted memo the same. A journal entry whose
+reversal still cannot post is left as it was with a sentence (400 or 422),
+and a value the database refuses anywhere answers 422 with a fixed sentence
+instead of a 500; the driver's text goes to the log only. Merged as
+contributed.
+
+**Invoices the QuickBooks Online import counted as paid twice are
+repaired** (#317, @tim-getthehayout). The connector removed in 2.23.2 set an
+imported invoice's amount paid from QuickBooks Online, then its payment
+import added each payment again: a paid invoice read paid twice with a
+negative balance, a partly paid one owed too little, and the aging,
+statements and open lists were off (the ledger was right). On the first
+start, an invoice the import created whose amount paid, less credits
+applied here, is exactly twice what its payments applied gets its paid
+amount, balance and status back. Any other invoice is left alone.
+
+**The Interoperability page says QuickBooks Desktop** (#316): its notes
+named QuickBooks 2003 Pro, as if IIF worked with that version only.
+
+No schema change. 556 API operations.
+
+### v2.23.2 — QuickBooks Online without the API, and the company file encrypted
+
+**Migrate from QuickBooks Online with its own export.** The QuickBooks
+Online path needed each user's own app in Intuit's developer portal, and
+keys that reach a real company sit behind Intuit's app questionnaire, an
+hour of vendor questions a bookkeeper connecting their own books cannot
+answer (@sutehk gave up after two, and said so; the sample company in the
+tests is named for them). QuickBooks Online's Export data (the
+gear, Tools, Export data) hands every user a zip of Excel workbooks, and
+Migrate Data takes that zip as downloaded, or its workbooks, or those saved
+as CSV, with no Intuit app at all. The chart comes from the Balance Sheet
+and the Profit and Loss, typed by the section each account sits under,
+sub-accounts named Parent:Child as QuickBooks writes them and placed under
+their parents, banks and cards marked as such. Every transaction in the
+Journal, invoices, payments, bills, checks, deposits, transfers and journal
+entries alike, posts as a journal entry with its date, type, number, name
+and memo, each block checked against the totals the file carries. The
+Customer and Vendor lists come across with their emails, phones and
+addresses. The General Ledger repeats the Journal by account and is left
+alone, as is the Employee list, which the export carries without payroll.
+A Trial Balance exported on the cash basis is set aside with a note rather
+than read as opening balances, since the Journal is accrual; exported on
+the accrual basis it verifies the import. Built against a real company's
+export, twenty-four years and 9,510 transactions, every block balanced to
+the cent; the repository's fixtures are invented books in that layout.
+
+**The QuickBooks Online connector is gone.** Intuit OAuth, the import and
+the export over Intuit's API, the QuickBooks Online page in the sidebar,
+the Intuit app credentials under Settings, the eleven `/api/qbo` routes,
+the setup guide and the two SDKs (python-quickbooks, intuit-oauth) are
+removed. The connector never served an end user (the paragraph above
+says why), and the product touted it as working; a dead end is not
+shipped. A company file that was connected while it existed is cleaned of
+the connection's credentials and tokens on the first start after
+upgrading, and keeps what the import made: the documents it created still
+void and edit as they did, the item a discount came in on still takes a
+negative line, and the mappings table stays (no schema change). On the
+Migrate Data page the journals' Type reads "QuickBooks Online export".
+
+**Also.** Migrate Data accepts a zip or an .xlsx for every source (a sheet
+is read as CSV), the migration engine reads a figure written as formula
+text ("=23683.16"), and a source may name an account's bank kind and
+parent. One new dependency, openpyxl.
+
+**Company-file encryption, the plumbing** (#290, PR #311, @grungenut).
+The first of the pull requests behind #290, encrypting the company file at
+rest. Nothing changes for a company that does not turn it on.
+
+- **The company file can be a SQLCipher file.** The app opens one when its
+  key is in hand: the launcher has the key before the "already running"
+  check, before the migrations and before the server starts, and hands it
+  to each. A migration or a start without the key stops with one sentence,
+  never a traceback or SQLCipher's own log lines.
+- **Server Edition unlocks from an operator-set credential.** Set
+  `COMPANY_FILE_ENCRYPTION_SECRET` where SlowBooks Pro starts, the way
+  `PAYROLL_ENCRYPTION_SECRET` is set; the key derives from it the way the
+  payroll key does, under its own salt.
+- **Settings → Company File Encryption**, administrators only: whether the
+  file is encrypted and where the key comes from, and the switch, which
+  asks for the company's name typed before it rewrites the file in place
+  (SQLCipher's own export). A PostgreSQL company is told that encryption at
+  rest is the database host's job.
+- **Backups of an encrypted company are encrypted** under the same key,
+  and a restore leaves the books in the state they are in, whichever state
+  the backup was in.
+- The desktop's own key management (a key per installation, wrapped for
+  each administrator and under a recovery key) is the next pull request;
+  until then a desktop company turns encryption on with the same
+  operator-set secret.
+- `sqlcipher3>=0.6.3,<0.7` is a new dependency (Windows, macOS and Linux
+  wheels, SQLCipher 4.12 linked in). Both installers' smoke tests read its
+  version through the frozen bundle, then write and read back an encrypted
+  scratch file.
+
+**Also in this release.** The 2.23.1 entry below now names the compose fix
+it shipped with (#307). The reader that decides whether a desktop's shared
+uploads folder is still needed leaves an encrypted company file alone: it
+cannot read one, and the plain-SQLite read it made would have written
+sidecar files beside the encrypted file for nothing.
+
+**From the gate's first round** (Windows W-1, W-2; macOS NEW-108 to
+NEW-110): a Turn off that could not replace the company file (another
+program had it open) left a plain copy beside the encrypted one; it now
+tries again for a moment, then says so in one sentence and leaves nothing
+behind, and the next start sweeps what an interrupted rewrite left. "The
+key comes from COMPANY_FILE_ENCRYPTION_SECRET" where Settings said
+"launcher". A wrong key is refused before anything opens the file (it
+used to write to it first). The dates of a user's last sign-in and a
+token's last use carry their time zone, so an evening in Central time is
+no longer tomorrow's date.
+
+**From the gate's second round** (Windows W-3, W-4; macOS NEW-111 to
+NEW-117): the Migrate Data page counts the customers and vendors with the
+accounts and journals ("Imported 13 accounts, 13 journals, 2 customers and
+4 vendors"), says "1 journal" rather than "1 journals", and a dry run
+counts what an import would make, so a second upload of the same export
+reads "0 accounts, 0 journals, 0 customers, 0 vendors ready to import"
+above the note that says why. The engine's "No trial balance file
+supplied" note stays out when the dialect set a cash-basis Trial Balance
+aside with its own. Chart of Accounts orders accounts without a number by
+name, so a sub-account sits with its parent. The guide says how
+receivables and payables cross over: the export's A/R and A/P come in as
+their own accounts, and the open documents at the cut-over are entered
+afterwards against them.
+
+**From the gate's third round** (Windows W-5; macOS NEW-114, NEW-118):
+the shell page still carried the connector's sidebar link, which opened
+"Page not found", and its script tag, a 404 on every page load; both are
+gone. The bank registers, the General Ledger's drill-down and a journal
+entry's view name a posting's source in words ("QuickBooks Online
+export", "Wave import") instead of its key. Journal Entries lists the
+journals a migration posted, every Migrate Data source's and the IIF
+opening entry; before, the 13 the export route posted were on no list,
+and a drill-down's link opened one over an empty page.
+
+**From the gate's fourth round** (the owner, NEW-119 and NEW-120): the
+sidebar's "QuickBooks Interop" entry reads "Interoperability", and so do the
+page's heading and its status line; the guides say the same. And the
+invoices still open come across: upload QuickBooks Online's A/R Aging Detail
+report (Reports → A/R Aging Detail → Export to Excel) beside the zip, and
+each open invoice arrives as an invoice with its number, date, due date and
+open balance, and each payment not yet applied as an unapplied payment for
+what is left of it, so the A/R aging and every customer's balance are right
+from the first day. Their postings move the open balance from the export's
+own receivable account, where the history left it, to 1100 Accounts
+Receivable, and touch no income; that account ends at zero. The report is
+checked against the Journal before anything is written, and a difference is
+named. Built against a real company's report, every row matched to its
+Journal block; the sample's report is invented books in the same layout.
+Unpaid bills are still entered after the import.
+
+No schema change. 556 API operations (the two company-file ones added,
+the eleven QuickBooks Online ones removed).
+
+### v2.23.1 — Entities keep their class
+
+A QuickBooks file that keeps its entities apart by class (a nonprofit and
+two LLCs in one file is the usual shape) lost that coding on every
+migration path, so the new books showed income under Uncategorized and
+lines under another entity's class (#308, raised the morning after 2.23.0
+by an accountant's advice to diff the trial balance and open AR/AP per
+entity before switching).
+
+**The IIF import carries CLASS on every block type.** It read the class
+for BILL and DEPOSIT blocks only, so an invoice, sales receipt or
+estimate whose rows all said North LLC arrived with no class on the
+document, its lines or its posting. Every block now takes the TRNS row's
+class as the document's and each split row's own class on its line and
+its journal line (an estimate's lines carry none, so an estimate takes
+the document's), with the header's as the fallback; a block whose lines
+belong to two entities imports with each line under its own (it was
+refused); and a class the file names that the list did not carry is
+created on first sight with a note, as a customer or a job is.
+
+**The report CSV import reads the Class column.** On all four reports it
+takes (Transaction Detail for invoices and sales receipts, Deposit
+Detail, Check Detail), the header row's class is the document's and each
+line's is its own, created on first sight with a note. The column was
+indexed and never read.
+
+**The IIF export writes each line's own class.** It wrote the document's
+header class on every split row, so a document with a North LLC line and
+a South LLC line left with both under North LLC; line-level classes
+exist since 2.22.0. The header's class is the fallback for a line without
+one. Deposits too, and a deposit's MEMO goes out as it was typed,
+without the "IIF Import — " an import wrote in front of its description
+(each round trip added another).
+
+**Contributed fixes** (@lEWFkRAD). Migration dry runs refuse a chart, ledger or supplied trial-balance file with no
+recognised records, instead of reporting a successful empty import or skipping balance verification (PR #304).
+IIF sales receipts keep the deposit account of their own allocated payment when the customer has other payments
+on the same day; the latest same-day payment could supply another receipt's account (PR #305). The Sage 50 US
+migration accepts the numeric account types the Chart of Accounts List export carries, checked against a Sage 50
+2026 sample-company export; a real export rejected all 156 accounts (PR #306).
+
+**Smaller things the gate found.** In the dark theme a green or red amount
+read as plain text (the theme's plain-amount rule outranked the colour by
+loading later), and the success toast kept 2.23.0's green; both carry the
+leaf green now, and so do bold and amber figures (the aging tables' totals
+and 30+ and 60+ columns, the cash forecast's net). The shared per-line
+Class box has a minimum width, so "North LLC" no longer reads "North LL",
+and the bill form's line table, the widest, has room for Item, Account
+and Cost Code: the dialog opens as wide as the window allows, like the
+estimate's and the job cost entry's, so every column shows at rest where
+there is room, and the table scrolls sideways in its container where
+there is not. Under every scrolling line table there is room for a
+classic scroll bar, so "+ Add Line" sits below the bar on a Mac rather
+than half under it (the job cost entry had that since 2.18.0). The IIF
+import's result ends in one sentence on a line of its own, "3 transaction
+blocks in the file: 3 imported, 0 already here, 0 not imported, 0 failed"
+(as a label beside a count it wrapped, the count reading as a superscript),
+and its toast counts what the panel counts, "Imported 1 class and 3
+transactions", rather than a total the panel never shows. The migration dry
+run no longer says a ledger had "no records recognised" when its rows
+were read and refused one by one for accounts an empty chart does not
+list; that sentence names a file only when its parser read nothing. And
+docker-compose.prod.yml parses again under Compose 2.40 (#307,
+@bracycpa): its two required-secret lines carried ": " inside unquoted
+messages, which that Compose read as a mapping; they are quoted, with the
+colon gone, and a test parses every compose file in the repo. The
+Windows CI skip budget counts the bill form's browser measurement (118).
+
+**A leaf green of our own.** The green that amounts, import results and
+the success toast use was the teal-leaning one the QuickBooks palette gave
+it, named for that heritage; it is a leaf green now (#257321 in the light
+theme, #6cc46a in the dark), named SlowBooks' own, at 5.91:1 on white,
+4.86 on a hovered totals row and 7.54 on the dark panel, white reading on
+it at 5.91 for the toast.
+
+No schema change. 565 API operations.
+
+### v2.23.0 — Both ways with QuickBooks
+
+Every issue that was open after 2.22.3, in one release.
+
+**Invoices from a QuickBooks Desktop report** (#291). Desktop's own IIF
+export is lists only, so a Desktop user's invoices never arrived by IIF,
+and the report-CSV path took sales receipts, deposits and checks but not
+invoices. The same Transaction Detail report filtered to Invoice now
+imports each invoice with its lines (item, quantity, price, tax), its
+Customer:Job and its number; open, partly paid or paid by the report's
+Open Balance column, with a payment for what was paid; without that column
+every invoice comes in open and the import says how many did, and
+uploading the report again with the column marks the open ones here paid or partly paid
+from it. An invoice is already here when it is the same customer's under
+the report's number, as it was numbered here or as the import renumbered
+it when that number was taken (QB-1031) — not when any invoice here
+carries the number. An invoice's header row posts to Accounts Receivable
+and a receipt's to the deposit account, so one file can hold both.
+
+**The IIF export keeps an invoice's job, items and quantities** (#199).
+It wrote the customer without the job and split rows with no item,
+quantity or price. Per Intuit's own sample import files: the TRNS row
+names the full Customer:Job; INVITEM, QNTY, PRICE and TAXABLE sit on the
+split rows only, the quantity negative and the price positive on a sale;
+the import reads TAXABLE back. On a document in another currency PRICE
+is the line's booked home-currency amount divided by its quantity, to the
+places the quantity needs, so QNTY × PRICE gives the file's AMOUNT to the
+cent at any quantity. Invoices and sales receipts.
+
+**Quantities keep four decimal places.** Every sale and purchase line's
+quantity was stored to two, so the IIF import and the report import kept
+2.125 as 2.12 (or 2.13), the edit form showed the rounded quantity with a
+total cents short, and the export wrote it beside the line's real amount.
+Invoice, estimate, credit memo, recurring invoice, bill, purchase order
+and vendor credit lines now hold four places (migration e8f9a0b1c2d3), as
+unit prices have since 2.17.3; the API and the documents show a quantity
+as entered (2.125; 3.00 as before), the forms take four places, a finer
+one is refused, and the imports round one with a note, setting its unit
+price so that quantity × price still gives the line's amount. **The IIF import names what it does not
+take** (#288): a GENERAL JOURNAL, CHECK or other block outside the
+dispatch was skipped without a word; Validate now lists each with its
+number, type, date, document number and name, the import counts them,
+and every parsed block is reported as imported, already here, not
+imported or failed.
+
+**Retry-safe payment recording** (#292). A POST that commits and then
+loses its response was retried and booked twice. An Idempotency-Key
+header on POST /api/payments or /api/bill-payments names the intended
+payment: the same key with the same body answers with the first
+response, the same key with another body is refused (bodies compared by
+their values, so 100 and 100.00 are one amount), a first delivery still
+running is refused until it finishes, and every keyed answer names its
+key in an Idempotency-Key header. The Receive Payment and Pay Bills
+forms send one per submit. One new table, request_keys (migration
+d6f7a8b9c0e1).
+
+**Line replacement is audited per line** (#289). Editing a posted bill's
+or invoice's lines removed the old ones past the audit hooks; every
+replacement now writes a DELETE event for each old bill line, invoice
+line and journal line, with its account and amounts, in the same
+transaction as the edit — the QuickBooks Online re-import of a changed
+sale and an estimate edit included — and each replaced row leaves the
+session as it goes.
+
+**Two things said plainly.** The invoice form says that creating an
+invoice posts it to the books, Draft meaning not yet marked sent, and the
+Create button names that note for a screen reader (#293).
+The AI guide on the site, the README and the docs say what stays on your
+machine — the company file and the API — and what a cloud-backed CLI's
+model sees (#294).
+
+No new API operations: 565. Two migrations (request_keys; line quantities to four places).
+
+### v2.22.3 — The ledger behind the dashboard
+
+Two gaps from a user bookkeeping a bank-fed, journal-entry-heavy company
+(#281, @sgwyther-gif).
+
+**Analytics and the AI brief read the ledger.** Expenses by category
+summed bill lines on paid bills, and the revenue trend paid invoices, so a
+company that reconciles through a bank feed and records the rest as
+journal entries saw an empty doughnut and an AI Insights brief with nothing
+in it — silently wrong, not merely incomplete. Both now read the ledger:
+everything posted to expense and cost-of-goods accounts, and to income
+accounts, in the period — bills when dated (paid or not), expenses,
+register entries, card charges, payroll and journal entries — as the Profit
+& Loss counts them; a voided posting and its reversal net to zero. The AI
+tool behind "expenses by category" questions uses the same query. Revenue
+by customer stays what it was, invoices and sales receipts dated in the
+period and paid in full, because ledger lines carry no customer; the
+screen, the PDF and the KPI labels say which basis is which.
+
+**One basis for the headline figures.** The four KPI cards, the PDF's and
+the AI brief's revenue, net income and margin are the ledger's for the
+period — the Profit & Loss's figures — so the margin is net income over
+revenue (the gate found it dividing paid-invoice revenue into ledger
+expenses: a company with journal-entry income and no invoices read "Margin
+0.0%" and a loss in a profitable month). The margin shows a dash when there
+is no revenue. The dashboard payload carries `totals` (`revenue`,
+`expenses`, `net_income`, `margin_pct`, `basis`), the CSV export too.
+Expense categories carry the account's name, "6100 - Auto & Truck Expense",
+on the page, the PDF, the CSV, in the brief and in the AI tool (it was the
+number alone). The AI dropdown's **Expenses by category** says its figures
+are the ledger's and sits under Financial Reports (it said "vendor bill
+expenses"). The PDF heads the revenue trend "Revenue (ledger)". A chart's
+figure is drawn on a slice or segment only where ink or white reaches
+4.5:1; where neither does, the table has it (the doughnut's red, blue and
+purple drew figures at 4.2–4.4:1).
+
+Also from the gate: revenue by customer counts invoices and sales receipts
+before sales tax, in home currency — what the ledger booked to income for
+each (it included the tax, so it could exceed the ledger's revenue);
+DSO is a dash, "n/a" in the brief, when no invoice or sales receipt dated
+in the last 30 days has been paid in full — the card's hover and the
+brief say exactly that, since a payment received today on an older
+invoice is not in the figure (0.0 read as instant collection beside open
+invoices); an expense
+account that nets to a credit for the period (a refund larger than the
+spending) keeps its row and its place in the totals but gets no slice,
+which Chart.js would have sized by the absolute value; the revenue trend's
+card has a month-by-month table, and a point on the chart's edge or top
+keeps its figure, sliding in from the edge or going below the point — and
+never on its own line: a figure its line would run through moves to a
+corner on its own side, beside the point, or to the other side, and one
+with no such place is left off, the table having it.
+
+**A source run's server stops when the launcher is quit** (#283,
+@jacilynh). Quitting the desktop app run from source (`python
+desktop_launcher.py`) with Command-Q left its server running: the fix for
+#52 gave the installed apps' server a watch on the window that started
+it, but a source run started its server another way, without that watch,
+and the next launch was refused as "already running" until the leftover
+process was ended by hand. A source run now starts its server the same way
+the installed apps do. And on Windows the server watches its launcher too
+(the gate's W-7): a launcher ended from Task Manager, or crashed, left the
+server on its port, since the watcher ran on macOS and Linux only and the
+window-close cleanup never saw it go; the server now holds a handle on
+its launcher and leaves with it, installed or from source.
+
+**Four findings from a static review of the source** (#284–#287,
+@johncarterlives), each reproduced in a test before it was fixed. A bill
+payment that names no bank now resolves Checking (1000) before anything
+is written — a chart without it gets a 409 naming the account, with no
+payment, allocations or bill balances left behind (the default lookup
+answered None and the payment committed without a journal). A/P aging as
+of a date leaves out bills dated after it, as A/R aging always did; a bill
+paid since that date is not rebuilt as owed on it — the report is the
+current ledger aged, not a reconstruction. A manual journal takes cents:
+the API refuses a sub-cent amount, and the posting service rounds every
+line to cents before it checks the balance, so a journal that balanced on
+paper and not in the ledger's two decimals is refused rather than stored
+a cent out. The 1099 summary and the 1099-NEC / 1096 totals leave voided
+bill payments out, as the A/P aging already did.
+
+**A receipt attaches to a journal entry.** `/api/attachments` whitelisted
+eight record types and not `journal_entry`, though a journal entry is
+sometimes the only right record of a real transaction — an owner paying a
+business expense personally, credited to equity, which an Expense cannot be
+(it is paid from an asset or liability). The journal entry's view carries
+the same Attachments block as an expense's.
+
+No schema change. 565 API operations.
+
+### v2.22.2 — Thirteen quick wins
+
+Thirteen enhancements from Grok's feature exploration of 2.22.1 on
+2026-10-11 — read-only, against the code and a sandbox company — filed
+as #254–#266 and built one branch and PR each. A patch, not a minor: each
+is a small turn on something already there.
+
+**AI Insights lists each provider's models from the provider** (#254). The
+app no longer carries a list of models to keep current: with a key
+entered, the picker asks the provider (Anthropic, OpenAI, Groq, Gemini,
+xAI, Cloudflare, a worker or a custom endpoint) and offers what it
+answers, chat models only; Refresh models asks again, and a model is
+kept with the key it was chosen for. A request with no model chosen says
+so rather than guessing one.
+
+**Write off small balances** (#255). On the A/R Aging report, "Write off
+balances under…" lists the open invoices whose balance is under an amount
+as of the report's date; one click writes them all off, each to its own
+credit memo, and says which were skipped and why (void, already paid, the
+balance changed since it was listed). Write Off on an invoice — in its
+row and its view — no longer needs a setting.
+
+**The credit limit holds through the API** (#256). An invoice, or an
+estimate converted to one, that would take a customer past the limit is
+refused with a 409 naming the limit and what would be owed, as the screen
+already did; the same request sent again with `allow_over_credit_limit`
+goes through, and the forms do that after asking. A sales receipt is paid
+on the spot and never refused. An edit is checked only when it raises
+what is owed or changes the customer.
+
+**W-9 on file** (#257). A vendor says whether its W-9 is on file; the
+vendor's page shows it, the 1099 report carries a column and names the
+vendors still missing one.
+
+**Reconcile faster** (#258). Mark all, Mark through a date and Clear all
+tick or untick every line of a reconciliation at once, lines after the
+statement date never among them. **A rule from a statement line**
+(#259): on a line in To review, Rule… opens the bank-rule form with the
+payee as the pattern and the chosen category filled in; saved, the rules
+run over the queue.
+
+**A deposit slip** (#260). Save PDF and Print on a deposit: the account,
+the date, each payment with who it was from and its check number, and
+the total; a void deposit's slip says VOID, and a void deposit's view no
+longer offers one. **Items to reorder** (#261): a filter on the Items page
+showing what is at or under its reorder point, with the reorder point
+and how short.
+
+**Cancel a time-off request** (#262). A pending or approved request can
+be cancelled from the HR page; an approved one puts back exactly what the
+approval took — the hours that were in the bank (an approval can overdraw
+it to zero) and the relief's dollars, through a reversing journal — and
+stays on the list as cancelled. A request whose dates have passed asks
+first. The approval now records what it drew (`hours_drawn`,
+`dollars_relieved`); a request approved by an earlier build has neither,
+and its cancel assumes the request's own hours. On the portal an employee
+withdraws their own request while it is still pending; an approved one is
+the employer's to cancel, and the page says so.
+
+**Form history** (#263). Tax Forms gains a history of every W-2, W-3, 940
+and 941 generated — what, when, by whom, its hash. Check re-figures the
+form from today's books through the same hash the form wrote and answers
+in a sentence: still matches, or no longer matches because the pay runs
+behind it changed; a voided pay run in its period is said. A W-2 whose
+employee is gone stays listed and says so. The hash printed in a form's
+footer can be looked up. `document_audits` records who generated a form
+from here on; `/api/document-audits` is admin-only, like the rest of
+payroll.
+
+**Alt+B for a bill, Alt+E for an expense** (#264), under the rules the
+other shortcuts follow — by the key's place, so Option-B works on a Mac
+though it types "∫"; never while typing in a field or over a form being
+filled in. The toolbar button each entry shortcut stands for announces
+it: "Enter Bill (Alt+B)" on hover, "(⌥B)" on a Mac, and
+`aria-keyshortcuts` for a screen reader.
+
+**The figure on the bar** (#265). Every bar, slice and point on the
+dashboard's and Analytics' charts carries its figure as text on or beside
+the mark — past a bar's end, in a slice, above a line's point — so the
+colour is not the only way from a mark to its amount; a label that would
+land on another is left off, and the table under each chart has every
+figure. The dashboard's own aging bar and monthly revenue bars say theirs
+too.
+
+**Landmarks and skip links** (#266). The invoice, bill and journal-entry
+forms are form landmarks named by the dialog's title, each opening with
+"Skip to the line items" as its first stop, which lands the keyboard on
+the first line with the focus ring showing; a dialog still opens on its
+first field, never on Void or Delete. The chart of accounts is a
+navigation landmark with "Skip to the account filter" first. The
+accessibility statement's open list is down to one item.
+
+Two schema migrations: `b4d6f8a0c2e4` (the PTO request's `cancelled`
+status and the draw columns) and `c5e7a9b1d3f5` (`document_audits.username`).
+The Windows CI skip budget counts the deposit slip's real-PDF test (116).
 
 ### v2.22.1 — Claude's current models
 

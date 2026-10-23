@@ -179,6 +179,9 @@ class PayStubResponse(BaseModel):
     id: int
     employee_id: int
     employee_name: Optional[str] = None
+    # True when the employee has an active direct-deposit account, so the
+    # run's ACH file pays this stub; False means pay it by check.
+    direct_deposit: bool = False
     hours: float = 0
     regular_hours: float = 0
     overtime_hours: float = 0

@@ -9,6 +9,7 @@
 
 from typing import Optional
 
+from datetime import timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 from app.schemas.common import StrictModel
@@ -18,6 +19,19 @@ from app.database import get_db
 from app.models.api_tokens import ApiToken
 from app.models.users import ROLE_ADMIN, VALID_ROLES
 from app.services.api_token_service import generate_token, hash_token
+
+
+def _utc_iso(stamp):
+    """A stored timestamp as ISO text with its zone: SQLite's are naive UTC,
+    and a browser reads a naive stamp as local, which put "Last login" and
+    "Last used" on tomorrow's date from 7 pm Central (2.23.2 gate, NEW-110).
+    The backups list sends "+00:00" and is right; so do these now."""
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.isoformat()
+
 
 router = APIRouter(prefix="/api/tokens", tags=["api_tokens"])
 
@@ -35,8 +49,8 @@ def _out(t: ApiToken) -> dict:
         "role": t.role,
         "is_active": t.is_active,
         "created_by": t.created_by,
-        "created_at": t.created_at.isoformat() if t.created_at else None,
-        "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
+        "created_at": _utc_iso(t.created_at),
+        "last_used_at": _utc_iso(t.last_used_at),
     }
 
 

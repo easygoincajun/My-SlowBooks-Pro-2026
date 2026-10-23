@@ -1,7 +1,7 @@
 // The pages with the administrator's controls, drawn for each role and passed
 // through app.js the way a page is (App.setRole, then its observer): Settings
-// with its lists filled in and the template editor open, QuickBooks Online
-// connected and not, Companies, and Migrate Data by its address. For each:
+// with its lists filled in and the template editor open, Companies, and
+// Migrate Data by its address. For each:
 // which controls each sign-in is shown and offered, which fields are locked,
 // and the sentences shown. Also the order of a first page, drawn before
 // /api/auth/status names the role. A page is a small tree built from its own
@@ -227,8 +227,9 @@ const ANSWERS = {
   '/invoices?is_sales_receipt=false&limit=50': [{ id: 7, invoice_number: '1001', customer_name: 'Maple Street Cafe' }],
   '/analytics/ai-config': {
     provider: 'anthropic', model: 'claude-sonnet', has_api_key: true, api_key_provider: 'anthropic',
-    providers: [{ key: 'anthropic', label: 'Anthropic Claude', model_choices: ['claude-sonnet'], default_model: 'claude-sonnet' }],
+    providers: [{ key: 'anthropic', label: 'Anthropic Claude' }],
   },
+  '/analytics/ai-models': { provider: 'anthropic', provider_label: 'Anthropic Claude', models: [{ id: 'claude-sonnet', label: 'Claude Sonnet' }] },
   '/classes?include_archived=true': [{ id: 1, name: 'Retail', is_archived: false, is_system_default: false }],
   '/cost-codes?include_inactive=true': [{ id: 1, code: '03', name: 'Concrete', cost_type: 'material', is_active: true, depth: 0, label: '03 Concrete' }],
   '/cost-types?include_inactive=true': [{ id: 1, code: 'labor', name: 'Labor', is_labor: true, burden_pct: 10, burden_method: 'flat', is_active: true }],
@@ -241,7 +242,7 @@ const ANSWERS = {
   '/companies': [{ name: 'Harbor Light Bakery', database_name: 'harbor_light', is_current: true }],
   '/migration/sources': [{ key: 'xero', label: 'Xero' }],
 };
-const PAGES = ['app', 'settings', 'qbo', 'companies', 'migration'];
+const PAGES = ['app', 'settings', 'companies', 'migration'];
 
 // ---- a fresh window with the app's scripts in it -------------------------
 function newWindow(role, answers = {}) {
@@ -320,7 +321,8 @@ function newWindow(role, answers = {}) {
     copyToClipboard() {},
     API: {
       get: async (path) => reply(path),
-      post: async () => ({}), put: async () => ({}), del: async () => ({}),
+      // POST /analytics/ai-models answers like its GET (the page lists with what it holds, NEW-56)
+      post: async (path) => (path === '/analytics/ai-models' ? reply(path) : {}), put: async () => ({}), del: async () => ({}),
     },
     // initSystemInfo asks with fetch, before any page
     fetch: async (url) => ({
@@ -418,7 +420,7 @@ async function settings(role, late) {
   return state;
 }
 
-// ---- a page drawn once the role is known: QBO, Companies ------------------
+// ---- a page drawn once the role is known: Companies -----------------------
 async function drawn(role, draw, answers) {
   const w = newWindow(role, answers);
   w.App.setRole(role);
@@ -448,16 +450,12 @@ async function migrate(role, late) {
 }
 
 (async () => {
-  const out = { settings: {}, qbo: {}, qbo_connected: {}, companies: {}, migrate: {} };
+  const out = { settings: {}, companies: {}, migrate: {} };
   out.settings.admin = await settings('admin', false);
   out.settings.bookkeeper = await settings('bookkeeper', false);
   out.settings.bookkeeper_first_page = await settings('bookkeeper', true);
   out.settings.readonly = await settings('readonly', false);
-  const connected = { '/qbo/status?include_company_name=false': { connected: true, company_name: 'Harbor Light', realm_id: '4620816365' } };
-  const notConnected = { '/qbo/status?include_company_name=false': { connected: false, company_name: '', realm_id: '' } };
   for (const role of ['admin', 'bookkeeper', 'readonly']) {
-    out.qbo[role] = await drawn(role, c => c.QBOPage.render(), notConnected);
-    out.qbo_connected[role] = await drawn(role, c => c.QBOPage.render(), connected);
     out.companies[role] = await drawn(role, c => c.CompaniesPage.render());
     out.migrate[role] = await migrate(role, false);
   }

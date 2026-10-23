@@ -3,6 +3,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import nullslast
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -10,7 +11,7 @@ from app.models.accounts import Account
 from app.services import control_accounts
 from app.models.transactions import TransactionLine
 from app.schemas.accounts import AccountCreate, AccountUpdate, AccountResponse
-from app.routes._helpers import get_or_404
+from app.routes._helpers import get_or_404, reject_null_updates
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -41,19 +42,16 @@ def _reject_duplicate_number(db: Session, number, exclude_id=None):
 # " - Name" in every picker (2.17.3 exploratory test, W-L4). Charts brought
 # in by an importer keep whatever numbers they carry; this is the rule for
 # numbers typed on the form or sent to the API.
-_ACCOUNT_NUMBER_RE = re.compile(r"^\d+(?:[.-]\d+)*$")
+_ACCOUNT_NUMBER_RE = re.compile(r"\d+(?:[.-]\d+)*")
 
 
 def _check_account_number(number) -> None:
+    """A number is optional (#332: many companies don't number their
+    accounts; the books never needed one). Given, it is digits, like 6150,
+    or 6150.1 / 6150-01 for a sub-account."""
     if not number:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Give the account a number, like 6150. A sub-account can use "
-                "6150.1 or 6150-01."
-            ),
-        )
-    if len(number) > 20 or not _ACCOUNT_NUMBER_RE.match(number):
+        return
+    if len(number) > 20 or not _ACCOUNT_NUMBER_RE.fullmatch(number):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -97,7 +95,109 @@ def list_accounts(
         q = q.filter(Account.account_type == account_type)
     if bank:
         q = q.filter(Account.bank_kind.isnot(None))
-    return _in_company_words(db, q.order_by(Account.account_number).all())
+    # By number, and accounts without one (a chart imported from QuickBooks
+    # Online, whose accounts carry none) by name, so a sub-account named
+    # Parent:Child sits with its parent.
+    return _in_company_words(
+        db, q.order_by(nullslast(Account.account_number), Account.name).all()
+    )
+
+
+# The seeded accounts a pay run, a PTO accrual or a benefits posting finds
+# by number, with nothing posted to them until the first run (2.23.5 round
+# 2, W-16 / NEW-139: the cleanup took them, and the next pay run either
+# failed with a 500 or posted wages to Advertising). They stay.
+_FOUND_BY_NUMBER = {
+    "6110": "payroll posts wages to it",
+    "6140": "payroll posts reimbursements to it",
+    "6160": "PTO accruals post to it",
+    "6950": "payroll's fallback for reimbursements",
+    "2300": "payroll liabilities post to it",
+    "2310": "payroll posts federal withholding to it",
+    "2320": "payroll posts state withholding to it",
+    "2330": "payroll posts Social Security to it",
+    "2340": "payroll posts Medicare to it",
+    "2350": "payroll posts FUTA to it",
+    "2360": "payroll posts SUTA to it",
+    "2370": "payroll posts other withholdings to it",
+    "2380": "benefits post to it",
+    "2390": "PTO accruals post to it",
+}
+
+
+def _seeded_unused(db: Session) -> tuple[list[dict], list[dict]]:
+    """The seeded accounts nobody uses, and the seeded ones that stay and
+    why (#332): a control account, postings, sub-accounts, or a row that
+    names it (a register, an item, a setting)."""
+    removable, kept = [], []
+    seeded = (
+        db.query(Account)
+        .filter(Account.is_system.is_(True))
+        .order_by(nullslast(Account.account_number), Account.name)
+        .all()
+    )
+    children = {
+        pid
+        for (pid,) in db.query(Account.parent_id).filter(Account.parent_id.isnot(None))
+    }
+    posted = {aid for (aid,) in db.query(TransactionLine.account_id).distinct()}
+    for a in seeded:
+        row = {"id": a.id, "account_number": a.account_number or "", "name": a.name}
+        if control_accounts.is_control_number(a.account_number):
+            kept.append({**row, "reason": "a control account"})
+        elif a.account_number in _FOUND_BY_NUMBER:
+            kept.append({**row, "reason": _FOUND_BY_NUMBER[a.account_number]})
+        elif a.id in posted:
+            kept.append({**row, "reason": "has postings"})
+        elif a.id in children:
+            kept.append({**row, "reason": "has sub-accounts"})
+        else:
+            others = [
+                (t, n)
+                for t, n in _referencing_rows(db, a.id)
+                if t != "transaction lines"
+            ]
+            if others:
+                kept.append(
+                    {
+                        **row,
+                        "reason": "in use: "
+                        + ", ".join(f"{n} in {t}" for t, n in others),
+                    }
+                )
+            else:
+                removable.append(row)
+    return removable, kept
+
+
+@router.get("/unused-seeded")
+def unused_seeded(db: Session = Depends(get_db)):
+    """A dry run: the seeded accounts that can go, and the ones that stay."""
+    removable, kept = _seeded_unused(db)
+    return {"removable": removable, "kept": kept}
+
+
+@router.post("/unused-seeded/remove")
+def remove_unused_seeded(db: Session = Depends(get_db)):
+    """Remove every seeded account nobody uses, in one step; the result
+    names what went and what stayed (#332)."""
+    removable, kept = _seeded_unused(db)
+    removed = []
+    for row in removable:
+        acct = db.get(Account, row["id"])
+        if acct is None:
+            continue
+        sp = db.begin_nested()
+        try:
+            db.delete(acct)
+            db.flush()
+            sp.commit()
+            removed.append(row)
+        except IntegrityError:
+            sp.rollback()
+            kept.append({**row, "reason": "still referenced"})
+    db.commit()
+    return {"removed": removed, "kept": kept}
 
 
 @router.get("/{account_id}", response_model=AccountResponse)
@@ -142,7 +242,7 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db)):
 @router.put("/{account_id}", response_model=AccountResponse)
 def update_account(account_id: int, data: AccountUpdate, db: Session = Depends(get_db)):
     account = get_or_404(db, Account, account_id)
-    fields = data.model_dump(exclude_unset=True)
+    fields = reject_null_updates(Account, data.model_dump(exclude_unset=True))
 
     # Issue #119: the posting code resolves these accounts BY NUMBER, so
     # renumbering one makes every later document skip its journal entry —

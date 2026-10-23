@@ -32,13 +32,108 @@ def _in_class(db, class_id):
     return cls, class_attribution(uncat_id) == class_id
 
 
-def _totals_by_account(db, acct_type, date_start=None, date_end=None, in_class=None):
+ACCOUNT_ORDERS = ("number", "name")
+_SORT_QUERY = Query(
+    default="number",
+    pattern="^(number|name)$",
+    description=(
+        "The accounts' order: by number, then name, as the Trial Balance "
+        "lists them, or by name; a sub-account right after its parent either "
+        "way (#326)"
+    ),
+)
+
+
+def _chart_index(db) -> dict:
+    """Every account's number, name and parent, by id."""
+    return {
+        a.id: (a.account_number or "", a.name or "", a.parent_id)
+        for a in db.query(
+            Account.id, Account.account_number, Account.name, Account.parent_id
+        )
+    }
+
+
+def _chain(chart: dict, account_id) -> list:
+    """The account's ids from the root down, the account itself last."""
+    path = []
+    while account_id in chart and len(path) < 32:
+        path.append(account_id)
+        account_id = chart[account_id][2]
+    return list(reversed(path))
+
+
+def _account_order(db, sort="number", chart: dict | None = None):
+    """A sort key for a report's account rows: by number then name (an
+    account with no number after the numbered ones, by name), or by name;
+    a sub-account right after its parent either way. The P&L and Balance
+    Sheet listed accounts in the order they were created (#326,
+    @TigerCoder27): the query had no ORDER BY, so a chart added to after
+    seeding read 6000, 6200, 6600, 6900, 6250, 6410. The Trial Balance and
+    General Ledger take the same key: ORDER BY account_number put the
+    accounts with no number first, in creation order (2.23.4 gate, W-7)."""
+    chart = chart if chart is not None else _chart_index(db)
+
+    def level(account_id):
+        number, name, _ = chart[account_id]
+        name = name.lower()
+        if sort == "name":
+            return (0, name, number)
+        return (0, number, name) if number else (1, "", name)
+
+    def key(row):
+        path = tuple(level(a) for a in _chain(chart, row["account_id"]))
+        return path or ((2, "", ""),)
+
+    return key
+
+
+def _account_words(chart: dict, account_id) -> tuple[str, str]:
+    """(path, label) for a report row: the path names a sub-account under
+    its parents ("Automobile: Insurance"), the label puts the number
+    first ("6310 - Automobile: Insurance"). A statement row read as the
+    bare leaf, so two "Insurance" rows and a "Fuel" with no Automobile
+    above it could not be told apart (2.23.4 gate, W-8)."""
+    chain = _chain(chart, account_id)
+    if not chain:
+        return "", ""
+    path = ": ".join(chart[a][1] for a in chain)
+    number = chart[account_id][0]
+    return path, (f"{number} - {path}" if number else path)
+
+
+_EXCLUDE_ADJUSTING = Query(
+    default=False,
+    description="Leave the adjusting entries out (#341): the figures before "
+    "the accountant's corrections",
+)
+
+
+def _flag(value) -> bool:
+    """A query flag as a bool: other routes call these report functions
+    directly, and then the parameter holds its Query() default, not False
+    (the statements pack read every statement without its adjusting
+    entries until this was caught by the package test, #343)."""
+    return value is True
+
+
+def _totals_by_account(
+    db,
+    acct_type,
+    date_start=None,
+    date_end=None,
+    in_class=None,
+    sort="number",
+    exclude_adjusting=False,
+):
     """Return a list of {account_id, account_name, account_number, amount}
     rows where amount is signed by the account type's natural balance
-    (always positive for a normal-balance ledger).
+    (always positive for a normal-balance ledger), in the chart's order
+    (`sort`: number or name, see _account_order).
 
     `account_id` is included so the SPA can drill into /account-transactions
-    for any line — Phase 11 drill-down support.
+    for any line — Phase 11 drill-down support. `exclude_adjusting` leaves
+    the adjusting entries (#341) out, for the figures before them.
     """
     q = (
         db.query(
@@ -58,19 +153,26 @@ def _totals_by_account(db, acct_type, date_start=None, date_end=None, in_class=N
         q = q.filter(Transaction.date <= date_end)
     if in_class is not None:
         q = q.filter(in_class)
+    if exclude_adjusting:
+        q = q.filter(Transaction.is_adjusting == False)  # noqa: E712
     q = q.group_by(Account.id, Account.name, Account.account_number)
 
     rows = []
+    chart = _chart_index(db)
     for acct_id, name, number, dr, cr in q.all():
         amount = (dr - cr) if acct_type in _DEBIT_NORMAL else (cr - dr)
+        path, label = _account_words(chart, acct_id)
         rows.append(
             {
                 "account_id": acct_id,
                 "account_name": name,
                 "account_number": number,
+                "account_path": path or name,
+                "account_label": label or name,
                 "amount": float(amount),
             }
         )
+    rows.sort(key=_account_order(db, sort, chart))
     return rows
 
 
@@ -84,17 +186,48 @@ def profit_loss(
     class_id: Annotated[
         Optional[int], Query(description="Only this class's lines (#213); omit for all")
     ] = None,
+    sort: str = _SORT_QUERY,
+    exclude_adjusting: bool = _EXCLUDE_ADJUSTING,
+    compare: Annotated[
+        Optional[str],
+        Query(description="prior_year adds the same period one year earlier"),
+    ] = None,
 ):
+    _check_compare(compare)
+    exclude_adjusting = _flag(exclude_adjusting)
+    sort = sort if isinstance(sort, str) else "number"
     if not start_date:
         start_date = date(date.today().year, 1, 1)
     if not end_date:
         end_date = date.today()
+    if compare == "prior_year":
+        current = profit_loss(
+            start_date,
+            end_date,
+            db,
+            class_id=class_id,
+            sort=sort,
+            exclude_adjusting=exclude_adjusting,
+        )
+        prior = profit_loss(
+            _year_earlier(start_date),
+            _year_earlier(end_date),
+            db,
+            class_id=class_id,
+            sort=sort,
+            exclude_adjusting=exclude_adjusting,
+        )
+        return _pl_with_prior(db, current, prior, sort)
     cls, in_class = _in_class(db, class_id) if class_id is not None else (None, None)
 
-    income = _totals_by_account(db, AccountType.INCOME, start_date, end_date, in_class)
-    cogs = _totals_by_account(db, AccountType.COGS, start_date, end_date, in_class)
+    income = _totals_by_account(
+        db, AccountType.INCOME, start_date, end_date, in_class, sort, exclude_adjusting
+    )
+    cogs = _totals_by_account(
+        db, AccountType.COGS, start_date, end_date, in_class, sort, exclude_adjusting
+    )
     expenses = _totals_by_account(
-        db, AccountType.EXPENSE, start_date, end_date, in_class
+        db, AccountType.EXPENSE, start_date, end_date, in_class, sort, exclude_adjusting
     )
 
     total_income = sum(i["amount"] for i in income)
@@ -106,6 +239,8 @@ def profit_loss(
         "end_date": end_date.isoformat(),
         "class_id": cls.id if cls else None,
         "class_name": cls.name if cls else None,
+        "sort": sort,
+        "exclude_adjusting": bool(exclude_adjusting),
         "income": income,
         "cogs": cogs,
         "expenses": expenses,
@@ -117,17 +252,162 @@ def profit_loss(
     }
 
 
+def _year_earlier(d: date) -> date:
+    """The same day one year earlier. A month's last day maps to that
+    month's last day a year earlier (Feb 28 2025 -> Feb 29 2024, Feb 29
+    2024 -> Feb 28 2023), so a full month or quarter compares to the full
+    month or quarter."""
+    import calendar
+
+    year = d.year - 1
+    last_then = calendar.monthrange(year, d.month)[1]
+    if d.day == calendar.monthrange(d.year, d.month)[1]:
+        return date(year, d.month, last_then)
+    return date(year, d.month, min(d.day, last_then))
+
+
+_PL_TOTALS = (
+    "total_income",
+    "total_cogs",
+    "gross_profit",
+    "total_expenses",
+    "net_income",
+)
+_BS_TOTALS = ("total_assets", "total_liabilities", "total_equity")
+
+
+def _line_key(item: dict):
+    """What lines up an account's two years: its id, or for a computed line
+    with no account (the Balance Sheet's net income line) its name."""
+    return item.get("account_id") or ("name", item.get("account_name"))
+
+
+def _with_prior(
+    db,
+    current: dict,
+    prior: dict,
+    sections: tuple,
+    totals: tuple,
+    dates: tuple,
+    sort: str = "number",
+) -> dict:
+    """The current report with the prior year's figures beside it: every
+    account line gets `prior_amount` (an account with activity in only one
+    of the two years shows 0 in the other), the lines keep the chart's
+    order (`sort`, see _account_order) with a computed line last, and
+    `prior` carries the prior year's dates and totals."""
+    order = _account_order(db, sort)
+    out = dict(current)
+    for key in sections:
+        prior_by = {_line_key(i): i for i in prior[key]}
+        lines = [
+            dict(i, prior_amount=prior_by.pop(_line_key(i), {}).get("amount", 0.0))
+            for i in current[key]
+        ]
+        lines += [
+            dict(p, amount=0.0, prior_amount=p["amount"]) for p in prior_by.values()
+        ]
+        lines.sort(key=lambda i: (i.get("account_id") is None, order(i)))
+        out[key] = lines
+    out["compare"] = "prior_year"
+    out["prior"] = {
+        **{k: prior[k] for k in dates},
+        **{k: prior[k] for k in totals},
+    }
+    return out
+
+
+def _pl_with_prior(db, current: dict, prior: dict, sort: str = "number") -> dict:
+    return _with_prior(
+        db,
+        current,
+        prior,
+        ("income", "cogs", "expenses"),
+        _PL_TOTALS,
+        ("start_date", "end_date"),
+        sort,
+    )
+
+
+def _bs_with_prior(db, current: dict, prior: dict, sort: str = "number") -> dict:
+    return _with_prior(
+        db,
+        current,
+        prior,
+        ("assets", "liabilities", "equity"),
+        _BS_TOTALS,
+        ("as_of_date",),
+        sort,
+    )
+
+
+def _check_compare(compare):
+    if compare not in (None, "", "prior_year"):
+        raise HTTPException(
+            status_code=422, detail="compare must be prior_year or left out"
+        )
+
+
+def _compare_figures(cur, before, prior, show_changes: bool) -> list:
+    """A line's money cells for a report PDF: Amount alone, or Current |
+    Prior Year, plus $ Change | % Change unless they are turned off."""
+    if not prior:
+        return [_money(cur)]
+    cells = [_money(cur), _money(before)]
+    if show_changes:
+        pct = pct_change(cur, before)
+        cells += [
+            _money(float(cur or 0) - float(before or 0)),
+            "—" if pct is None else f"{pct:,.1f}%",
+        ]
+    return cells
+
+
+def _compare_columns(prior, show_changes: bool) -> list:
+    if not prior:
+        return ["", "Amount"]
+    return ["", "Current", "Prior Year"] + (
+        ["$ Change", "% Change"] if show_changes else []
+    )
+
+
+def pct_change(current, prior) -> Optional[float]:
+    """Change from prior to current as a percent of the prior figure's
+    size; None when the prior figure is zero (no meaningful percent)."""
+    current, prior = float(current or 0), float(prior or 0)
+    if abs(prior) < 0.005:
+        return None
+    return round((current - prior) / abs(prior) * 100, 1)
+
+
 @router.get("/balance-sheet")
 def balance_sheet(
-    as_of_date: date = Query(default=None), db: Session = Depends(get_db)
+    as_of_date: date = Query(default=None),
+    db: Session = Depends(get_db),
+    sort: str = _SORT_QUERY,
+    compare: Annotated[
+        Optional[str],
+        Query(description="prior_year adds the same date one year earlier"),
+    ] = None,
 ):
+    _check_compare(compare)
+    sort = sort if isinstance(sort, str) else "number"
     t = terms_from_db(db)
     if not as_of_date:
         as_of_date = date.today()
+    if compare == "prior_year":
+        return _bs_with_prior(
+            db,
+            balance_sheet(as_of_date, db, sort=sort),
+            balance_sheet(_year_earlier(as_of_date), db, sort=sort),
+            sort,
+        )
 
-    assets = _totals_by_account(db, AccountType.ASSET, date_end=as_of_date)
-    liabilities = _totals_by_account(db, AccountType.LIABILITY, date_end=as_of_date)
-    equity = _totals_by_account(db, AccountType.EQUITY, date_end=as_of_date)
+    assets = _totals_by_account(db, AccountType.ASSET, date_end=as_of_date, sort=sort)
+    liabilities = _totals_by_account(
+        db, AccountType.LIABILITY, date_end=as_of_date, sort=sort
+    )
+    equity = _totals_by_account(db, AccountType.EQUITY, date_end=as_of_date, sort=sort)
 
     total_assets = sum(a["amount"] for a in assets)
     total_liabilities = sum(liab["amount"] for liab in liabilities)
@@ -153,6 +433,8 @@ def balance_sheet(
                 "account_id": None,
                 "account_name": f"{t('Net Income')} (current period)",
                 "account_number": None,
+                "account_path": f"{t('Net Income')} (current period)",
+                "account_label": f"{t('Net Income')} (current period)",
                 "amount": float(net_income),
             }
         ]
@@ -160,6 +442,7 @@ def balance_sheet(
 
     return {
         "as_of_date": as_of_date.isoformat(),
+        "sort": sort,
         "assets": assets,
         "liabilities": liabilities,
         "equity": equity,
@@ -248,13 +531,17 @@ def general_ledger(
     )
 
     entries_by_account = {}
+    chart = _chart_index(db)
     for tl, txn, acct in results:
         key = acct.id
         if key not in entries_by_account:
+            path, label = _account_words(chart, acct.id)
             entries_by_account[key] = {
                 "account_id": acct.id,
                 "account_number": acct.account_number,
                 "account_name": acct.name,
+                "account_path": path or acct.name,
+                "account_label": label or acct.name,
                 "account_type": acct.account_type.value,
                 "normal_balance": "debit" if _sign(acct) > 0 else "credit",
                 "opening_balance": _sign(acct) * opening.get(acct.id, Decimal(0)),
@@ -282,6 +569,10 @@ def general_ledger(
         a["total_credit"] += tl.credit
 
     accounts_list = list(entries_by_account.values())
+    # the statements' order: by number then name, the unnumbered last, a
+    # sub-account after its parent (ORDER BY account_number put the
+    # unnumbered first: 2.23.4 gate, W-7)
+    accounts_list.sort(key=_account_order(db, chart=chart))
     for a in accounts_list:
         a["closing_balance"] = float(a.pop("_running"))
         a["opening_balance"] = float(a["opening_balance"])
@@ -365,14 +656,16 @@ def trial_balance(
     start_date: date = Query(default=None),
     end_date: date = Query(default=None),
     db: Session = Depends(get_db),
+    exclude_adjusting: bool = _EXCLUDE_ADJUSTING,
 ):
     """Trial Balance: sum all debits/credits per account for a date range."""
+    exclude_adjusting = _flag(exclude_adjusting)
     if not start_date:
         start_date = date(date.today().year, 1, 1)
     if not end_date:
         end_date = date.today()
 
-    results = (
+    q = (
         db.query(
             Account.id,
             Account.account_number,
@@ -384,34 +677,43 @@ def trial_balance(
         .join(TransactionLine, TransactionLine.account_id == Account.id)
         .join(Transaction, TransactionLine.transaction_id == Transaction.id)
         .filter(Transaction.date >= start_date, Transaction.date <= end_date)
-        .group_by(
-            Account.id, Account.account_number, Account.name, Account.account_type
-        )
-        .order_by(Account.account_number)
-        .all()
     )
+    if exclude_adjusting:
+        q = q.filter(Transaction.is_adjusting == False)  # noqa: E712
+    results = q.group_by(
+        Account.id, Account.account_number, Account.name, Account.account_type
+    ).all()
 
     items = []
     total_debit = Decimal(0)
     total_credit = Decimal(0)
+    chart = _chart_index(db)
     for acct_id, acct_num, acct_name, acct_type, debit, credit in results:
         total_debit += debit
         total_credit += credit
+        path, label = _account_words(chart, acct_id)
         items.append(
             {
                 "account_id": acct_id,
                 "account_number": acct_num or "",
                 "account_name": acct_name,
+                "account_path": path or acct_name,
+                "account_label": label or acct_name,
                 "account_type": acct_type.value,
                 "total_debit": float(debit),
                 "total_credit": float(credit),
                 "net_balance": float(debit - credit),
             }
         )
+    # by number then name, the unnumbered last, a sub-account after its
+    # parent (ORDER BY account_number put the unnumbered first: W-7); each
+    # row named by its path and number, as the statements' are (W-12)
+    items.sort(key=_account_order(db, chart=chart))
 
     return {
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
+        "exclude_adjusting": bool(exclude_adjusting),
         "items": items,
         "total_debit": float(total_debit),
         "total_credit": float(total_credit),
@@ -933,46 +1235,72 @@ def _money(value) -> str:
     return f"{sign}${abs(amount):,.2f}"
 
 
-def _pl_section(data: dict, t=None) -> dict:
+def _period_words(data: dict) -> str:
+    """The section's period line; a statement run without the adjusting
+    entries (#341) says so, so the page is not mistaken for the books as
+    they stand."""
+    period = f"{data['start_date']} — {data['end_date']}"
+    if data.get("exclude_adjusting"):
+        period += " (adjusting entries left out)"
+    return period
+
+
+def _row_words(item: dict) -> str:
+    """A statement row's words on the PDF: its number and path (W-8)."""
+    return item.get("account_label") or item["account_name"]
+
+
+def _pl_section(data: dict, t=None, show_changes: bool = True) -> dict:
     """P&L rows for the PDF; t (Terms) picks the company's words —
     "Statement of Activities" / "Revenue & Support" for a nonprofit. One
     class's P&L (class_id on the data, #232) is titled with the class and
-    says it is that class only."""
+    says it is that class only. With a prior-year comparison (`prior` on
+    the data) the columns are Current | Prior Year, and $ Change | % Change
+    unless show_changes is off."""
     t = t or Terms()
+    prior = data.get("prior")
+    columns = _compare_columns(prior, show_changes)
+    blank = [""] * (len(columns) - 1)
+
+    def line(item):
+        return {
+            "cells": [f"  {_row_words(item)}"]
+            + _compare_figures(
+                item["amount"], item.get("prior_amount", 0), prior, show_changes
+            )
+        }
+
+    def total(label, key, style="subtotal"):
+        return {
+            "cells": [label]
+            + _compare_figures(
+                data[key], (prior or {}).get(key, 0), prior, show_changes
+            ),
+            "style": style,
+        }
+
     rows = []
     for label, key, total_key in (
         (t("Income"), "income", "total_income"),
         ("Cost of Goods Sold", "cogs", "total_cogs"),
     ):
-        rows.append({"cells": [label, ""], "style": "subtotal"})
-        for item in data[key]:
-            rows.append(
-                {"cells": [f"  {item['account_name']}", _money(item["amount"])]}
-            )
-        rows.append(
-            {"cells": [f"Total {label}", _money(data[total_key])], "style": "subtotal"}
-        )
-    rows.append(
-        {"cells": ["Gross Profit", _money(data["gross_profit"])], "style": "subtotal"}
-    )
-    rows.append({"cells": ["Expenses", ""], "style": "subtotal"})
-    for item in data["expenses"]:
-        rows.append({"cells": [f"  {item['account_name']}", _money(item["amount"])]})
-    rows.append(
-        {
-            "cells": ["Total Expenses", _money(data["total_expenses"])],
-            "style": "subtotal",
-        }
-    )
-    rows.append(
-        {"cells": [t("Net Income"), _money(data["net_income"])], "style": "grand-total"}
-    )
+        rows.append({"cells": [label] + blank, "style": "subtotal"})
+        rows.extend(line(item) for item in data[key])
+        rows.append(total(f"Total {label}", total_key))
+    rows.append(total("Gross Profit", "gross_profit"))
+    rows.append({"cells": ["Expenses"] + blank, "style": "subtotal"})
+    rows.extend(line(item) for item in data["expenses"])
+    rows.append(total("Total Expenses", "total_expenses"))
+    rows.append(total(t("Net Income"), "net_income", "grand-total"))
     cls = data.get("class_name")
+    period = _period_words(data)
+    if prior:
+        period += f" · compared with {prior['start_date']} — {prior['end_date']}"
     return {
         "title": t("Profit & Loss") + (f" — {cls}" if cls else ""),
-        "period": f"{data['start_date']} — {data['end_date']}"
+        "period": period
         + (f" · {t('Class')}: {cls} only, not the company total" if cls else ""),
-        "columns": ["", "Amount"],
+        "columns": columns,
         "rows": rows,
     }
 
@@ -1071,35 +1399,57 @@ def _grid_sections(data: dict, title: str, columns: list, t=None) -> list[dict]:
     return sections
 
 
-def _bs_section(data: dict, t=None) -> dict:
+def _bs_section(data: dict, t=None, show_changes: bool = True) -> dict:
+    """Balance Sheet rows for the PDF. With a prior-year comparison
+    (`prior` on the data) the columns are Current | Prior Year, and
+    $ Change | % Change unless show_changes is off."""
     t = t or Terms()
+    prior = data.get("prior")
+    columns = _compare_columns(prior, show_changes)
+    blank = [""] * (len(columns) - 1)
+    p = prior or {}
+
+    def figures(cur, before):
+        return _compare_figures(cur, before, prior, show_changes)
+
     rows = []
     for label, key, total_key in (
         ("Assets", "assets", "total_assets"),
         ("Liabilities", "liabilities", "total_liabilities"),
         (t("Equity"), "equity", "total_equity"),
     ):
-        rows.append({"cells": [label, ""], "style": "subtotal"})
+        rows.append({"cells": [label] + blank, "style": "subtotal"})
         for item in data[key]:
             rows.append(
-                {"cells": [f"  {item['account_name']}", _money(item["amount"])]}
+                {
+                    "cells": [f"  {_row_words(item)}"]
+                    + figures(item["amount"], item.get("prior_amount", 0))
+                }
             )
         rows.append(
-            {"cells": [f"Total {label}", _money(data[total_key])], "style": "subtotal"}
+            {
+                "cells": [f"Total {label}"]
+                + figures(data[total_key], p.get(total_key, 0)),
+                "style": "subtotal",
+            }
         )
     rows.append(
         {
-            "cells": [
-                t("Liabilities + Equity"),
-                _money(data["total_liabilities"] + data["total_equity"]),
-            ],
+            "cells": [t("Liabilities + Equity")]
+            + figures(
+                data["total_liabilities"] + data["total_equity"],
+                p.get("total_liabilities", 0) + p.get("total_equity", 0),
+            ),
             "style": "grand-total",
         }
     )
+    period = f"As of {data['as_of_date']}"
+    if prior:
+        period += f" · compared with {prior['as_of_date']}"
     return {
         "title": t("Balance Sheet"),
-        "period": f"As of {data['as_of_date']}",
-        "columns": ["", "Amount"],
+        "period": period,
+        "columns": columns,
         "rows": rows,
     }
 
@@ -1108,7 +1458,7 @@ def _tb_section(data: dict) -> dict:
     rows = [
         {
             "cells": [
-                f"{item['account_number']} {item['account_name']}".strip(),
+                _row_words(item),  # the number and path, as the statements (W-12)
                 _money(item["total_debit"]),
                 _money(item["total_credit"]),
             ]
@@ -1127,7 +1477,7 @@ def _tb_section(data: dict) -> dict:
     )
     return {
         "title": "Trial Balance",
-        "period": f"{data['start_date']} — {data['end_date']}",
+        "period": _period_words(data),
         "columns": ["Account", "Debit", "Credit"],
         "rows": rows,
     }
@@ -1136,7 +1486,7 @@ def _tb_section(data: dict) -> dict:
 def _gl_section(data: dict) -> dict:
     rows = []
     for a in data["accounts"]:
-        head = f"{a['account_number'] or ''} {a['account_name']}".strip()
+        head = _row_words(a)  # the number and path, as the statements (W-12)
         rows.append({"cells": [head, "", "", "", "", ""], "style": "subtotal"})
         rows.append(
             {
@@ -1229,11 +1579,27 @@ def profit_loss_pdf(
     end_date: date = Query(default=None),
     class_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
+    sort: str = _SORT_QUERY,
+    exclude_adjusting: bool = _EXCLUDE_ADJUSTING,
+    compare: Optional[str] = Query(default=None),
+    hide_changes: bool = Query(default=False),
 ):
     # class_id is a keyword: profit_loss takes db before it
-    data = profit_loss(start_date, end_date, db, class_id=class_id)
+    data = profit_loss(
+        start_date,
+        end_date,
+        db,
+        class_id=class_id,
+        sort=sort,
+        exclude_adjusting=exclude_adjusting,
+        compare=compare,
+    )
     t = terms_from_db(db)
-    return _pdf_response([_pl_section(data, t)], db, _pl_filename(data, t, "pdf"))
+    return _pdf_response(
+        [_pl_section(data, t, show_changes=not hide_changes)],
+        db,
+        _pl_filename(data, t, "pdf"),
+    )
 
 
 @router.get("/profit-loss-by-class/pdf")
@@ -1304,8 +1670,9 @@ def trial_balance_pdf(
     start_date: date = Query(default=None),
     end_date: date = Query(default=None),
     db: Session = Depends(get_db),
+    exclude_adjusting: bool = _EXCLUDE_ADJUSTING,
 ):
-    data = trial_balance(start_date, end_date, db)
+    data = trial_balance(start_date, end_date, db, exclude_adjusting=exclude_adjusting)
     return _pdf_response(
         [_tb_section(data)],
         db,
@@ -1319,10 +1686,11 @@ def trial_balance_csv_route(
     start_date: date = Query(default=None),
     end_date: date = Query(default=None),
     db: Session = Depends(get_db),
+    exclude_adjusting: bool = _EXCLUDE_ADJUSTING,
 ):
     from app.services.ledger_exports import trial_balance_csv
 
-    data = trial_balance(start_date, end_date, db)
+    data = trial_balance(start_date, end_date, db, exclude_adjusting=exclude_adjusting)
     return _csv_download(
         trial_balance_csv(data, _company_name(db)),
         f"trial-balance_{data['start_date']}_{data['end_date']}.csv",
@@ -1365,6 +1733,118 @@ def general_ledger_csv_route(
     )
 
 
+def _account_transactions_section(data: dict, t) -> dict:
+    """The drill-down's rows for the PDF (#333)."""
+    acct = data.get("account") or {}
+    head = f"{acct.get('number') or ''} {acct.get('name') or ''}".strip()
+    rows = [
+        {
+            "cells": [
+                "",
+                "",
+                "Balance brought forward",
+                "",
+                "",
+                _money(data.get("opening_balance", 0)),
+            ],
+            "style": "subtotal",
+        }
+    ]
+    for e in data.get("entries", []):
+        rows.append(
+            {
+                "cells": [
+                    e.get("date", ""),
+                    (e.get("payee") or "")[:40],
+                    (
+                        (e.get("description") or "")
+                        + (" (void)" if e.get("voided") else "")
+                    )[:60],
+                    _money(e["debit"]) if e.get("debit") else "",
+                    _money(e["credit"]) if e.get("credit") else "",
+                    _money(e.get("running_balance", 0)),
+                ]
+            }
+        )
+    entries = data.get("entries", [])
+    closing = (
+        entries[-1]["running_balance"] if entries else data.get("opening_balance", 0)
+    )
+    rows.append(
+        {
+            "cells": [
+                "",
+                "",
+                "Period total",
+                _money(data.get("period_debit", 0)),
+                _money(data.get("period_credit", 0)),
+                _money(closing),
+            ],
+            "style": "subtotal",
+        }
+    )
+    period = f"{data['start_date']} — {data['end_date']}"
+    if data.get("class_name"):
+        period += f" · {t('Class')}: {data['class_name']} only"
+    if data.get("job_name"):
+        period += f" · {t('Job')}: {data['job_name']}"
+    return {
+        "title": f"Account detail — {head}",
+        "period": period,
+        "columns": ["Date", "Payee", "Description", "Debit", "Credit", "Running"],
+        "rows": rows,
+    }
+
+
+@router.get("/account-transactions/csv")
+def account_transactions_csv_route(
+    request: Request,
+    account_id: int = Query(...),
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    class_id: Optional[int] = Query(default=None),
+    job_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """The drill-down as a CSV, the figures on the screen (#333)."""
+    from app.services.ledger_exports import account_transactions_csv
+
+    data = account_transactions(
+        account_id, start_date, end_date, db, class_id=class_id, job_id=job_id
+    )
+    t = terms_from_db(db)
+    acct = data.get("account") or {}
+    slug = t.slug(f"{acct.get('number') or ''} {acct.get('name') or 'account'}".strip())
+    return _csv_download(
+        account_transactions_csv(data, _company_name(db), t),
+        f"AccountDetail_{slug}_{data['start_date']}_{data['end_date']}.csv",
+        request,
+    )
+
+
+@router.get("/account-transactions/pdf")
+def account_transactions_pdf_route(
+    account_id: int = Query(...),
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    class_id: Optional[int] = Query(default=None),
+    job_id: Optional[int] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """The drill-down as a PDF (#333)."""
+    data = account_transactions(
+        account_id, start_date, end_date, db, class_id=class_id, job_id=job_id
+    )
+    t = terms_from_db(db)
+    acct = data.get("account") or {}
+    slug = t.slug(f"{acct.get('number') or ''} {acct.get('name') or 'account'}".strip())
+    return _pdf_response(
+        [_account_transactions_section(data, t)],
+        db,
+        f"AccountDetail_{slug}_{data['start_date']}_{data['end_date']}.pdf",
+    )
+
+
 @router.get("/profit-loss/csv")
 def profit_loss_csv_route(
     request: Request,
@@ -1372,13 +1852,25 @@ def profit_loss_csv_route(
     end_date: date = Query(default=None),
     class_id: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
+    sort: str = _SORT_QUERY,
+    exclude_adjusting: bool = _EXCLUDE_ADJUSTING,
+    compare: Optional[str] = Query(default=None),
+    hide_changes: bool = Query(default=False),
 ):
     from app.services.ledger_exports import profit_loss_csv
 
-    data = profit_loss(start_date, end_date, db, class_id=class_id)
+    data = profit_loss(
+        start_date,
+        end_date,
+        db,
+        class_id=class_id,
+        sort=sort,
+        exclude_adjusting=exclude_adjusting,
+        compare=compare,
+    )
     t = terms_from_db(db)
     return _csv_download(
-        profit_loss_csv(data, _company_name(db), t),
+        profit_loss_csv(data, _company_name(db), t, show_changes=not hide_changes),
         _pl_filename(data, t, "csv"),
         request,
     )
@@ -1389,13 +1881,16 @@ def balance_sheet_csv_route(
     request: Request,
     as_of_date: date = Query(default=None),
     db: Session = Depends(get_db),
+    sort: str = _SORT_QUERY,
+    compare: Optional[str] = Query(default=None),
+    hide_changes: bool = Query(default=False),
 ):
     from app.services.ledger_exports import balance_sheet_csv
 
-    data = balance_sheet(as_of_date, db)
+    data = balance_sheet(as_of_date, db, sort=sort, compare=compare)
     t = terms_from_db(db)
     return _csv_download(
-        balance_sheet_csv(data, _company_name(db), t),
+        balance_sheet_csv(data, _company_name(db), t, show_changes=not hide_changes),
         f"{t.slug('Balance Sheet')}_{data['as_of_date']}.csv",
         request,
     )
@@ -1403,12 +1898,16 @@ def balance_sheet_csv_route(
 
 @router.get("/balance-sheet/pdf")
 def balance_sheet_pdf(
-    as_of_date: date = Query(default=None), db: Session = Depends(get_db)
+    as_of_date: date = Query(default=None),
+    db: Session = Depends(get_db),
+    sort: str = _SORT_QUERY,
+    compare: Optional[str] = Query(default=None),
+    hide_changes: bool = Query(default=False),
 ):
-    data = balance_sheet(as_of_date, db)
+    data = balance_sheet(as_of_date, db, sort=sort, compare=compare)
     t = terms_from_db(db)
     return _pdf_response(
-        [_bs_section(data, t)],
+        [_bs_section(data, t, show_changes=not hide_changes)],
         db,
         f"{t.slug('Balance Sheet')}_{data['as_of_date']}.pdf",
     )
@@ -1438,4 +1937,219 @@ def financial_statements_pdf(
         sections = [_pl_section(pl, t), _bs_section(bs, t), _tb_section(tb)]
     return _pdf_response(
         sections, db, f"financial-statements_{pl['start_date']}_{pl['end_date']}.pdf"
+    )
+
+
+# ── Adjusting Journal Entries (#341) ─────────────────────────────────────
+# The accountant's corrections for a period, each with its lines and who
+# posted it; the totals tie to the General Ledger's adjusting lines. The
+# report QuickBooks accountants ask for by this name.
+
+
+def _range_or_year(start_date, end_date):
+    if not start_date:
+        start_date = date(date.today().year, 1, 1)
+    if not end_date:
+        end_date = date.today()
+    return start_date, end_date
+
+
+@router.get("/adjusting-entries")
+def adjusting_entries(
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Every journal entry marked adjusting in the period (#341), oldest
+    first: its lines, who posted it, whether it was voided (a voided one
+    and its reversal both list, each marked), and the period's totals."""
+    from app.routes.journal import _line_dict
+    from app.services.qbo_documents import REVERSALS
+
+    start_date, end_date = _range_or_year(start_date, end_date)
+    txns = (
+        db.query(Transaction)
+        .filter(
+            Transaction.is_adjusting == True,  # noqa: E712
+            Transaction.date >= start_date,
+            Transaction.date <= end_date,
+        )
+        .order_by(Transaction.date, Transaction.id)
+        .all()
+    )
+    accounts = {a.id: a for a in db.query(Account).all()}
+    voided = {
+        source_id
+        for (source_id,) in db.query(Transaction.source_id).filter(
+            Transaction.source_type.in_(REVERSALS), Transaction.source_id.isnot(None)
+        )
+    }
+    entries = []
+    total_debit = total_credit = Decimal("0")
+    for txn in txns:
+        debit = sum((line.debit for line in txn.lines), Decimal("0"))
+        credit = sum((line.credit for line in txn.lines), Decimal("0"))
+        total_debit += debit
+        total_credit += credit
+        entries.append(
+            {
+                "id": txn.id,
+                "date": txn.date.isoformat(),
+                "reference": txn.reference or "",
+                "description": txn.description or "",
+                "posted_by": txn.posted_by or "",
+                "source_type": txn.source_type or "",
+                "voided": txn.id in voided,
+                "is_reversal": bool(
+                    txn.source_type and txn.source_type.endswith("_void")
+                ),
+                "lines": [
+                    _line_dict(line, accounts.get(line.account_id))
+                    for line in txn.lines
+                ],
+                "total_debit": float(debit),
+                "total_credit": float(credit),
+            }
+        )
+    return {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "entries": entries,
+        "count": len(entries),
+        "total_debit": float(total_debit),
+        "total_credit": float(total_credit),
+    }
+
+
+def _adjusting_section(data: dict) -> dict:
+    rows = []
+    for e in data["entries"]:
+        head = f"#{e['id']}  {e['date']}  {e['description']}"
+        if e["reference"]:
+            head += f"  ({e['reference']})"
+        if e["posted_by"]:
+            head += f"  posted by {e['posted_by']}"
+        if e["voided"]:
+            head += "  VOIDED"
+        rows.append({"cells": [head, "", ""], "style": "subtotal"})
+        for ln in e["lines"]:
+            name = ln["account_name"]
+            if ln["account_number"]:
+                name = f"{ln['account_number']} {name}"
+            if ln["description"]:
+                name += f" — {ln['description']}"
+            rows.append(
+                {
+                    "cells": [
+                        "    " + name,
+                        _money(ln["debit"]) if ln["debit"] else "",
+                        _money(ln["credit"]) if ln["credit"] else "",
+                    ]
+                }
+            )
+    rows.append(
+        {
+            "cells": [
+                f"Total ({data['count']} entries)",
+                _money(data["total_debit"]),
+                _money(data["total_credit"]),
+            ],
+            "style": "grand-total",
+        }
+    )
+    return {
+        "title": "Adjusting Journal Entries",
+        "period": f"{data['start_date']} — {data['end_date']}",
+        "columns": ["Entry", "Debit", "Credit"],
+        "rows": rows,
+    }
+
+
+@router.get("/adjusting-entries/csv")
+def adjusting_entries_csv_route(
+    request: Request,
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    from app.services.ledger_exports import adjusting_entries_csv
+
+    data = adjusting_entries(start_date, end_date, db)
+    return _csv_download(
+        adjusting_entries_csv(data, _company_name(db)),
+        f"adjusting-entries_{data['start_date']}_{data['end_date']}.csv",
+        request,
+    )
+
+
+@router.get("/adjusting-entries/pdf")
+def adjusting_entries_pdf_route(
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    data = adjusting_entries(start_date, end_date, db)
+    return _pdf_response(
+        [_adjusting_section(data)],
+        db,
+        f"adjusting-entries_{data['start_date']}_{data['end_date']}.pdf",
+    )
+
+
+# ── Closing Date Exceptions (#342) ───────────────────────────────────────
+
+
+@router.get("/closing-date-exceptions")
+def closing_date_exceptions_route(
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    tz_offset: int = Query(default=0, ge=-900, le=900),
+    db: Session = Depends(get_db),
+):
+    """Every change made into a closed period with the closing-date
+    password, in the period the changes were made: when, who, the closing
+    date in force, and each row it touched with its fields before and
+    after. Ordinary posting after the closing date is not here.
+    ``tz_offset`` is the page's clock offset from UTC in minutes (what
+    JavaScript's getTimezoneOffset gives): the period's days and every
+    time shown are the person's own."""
+    from app.services.closing_date_exceptions import closing_date_exceptions
+
+    start_date, end_date = _range_or_year(start_date, end_date)
+    return closing_date_exceptions(db, start_date, end_date, tz_offset)
+
+
+@router.get("/closing-date-exceptions/csv")
+def closing_date_exceptions_csv_route(
+    request: Request,
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    tz_offset: int = Query(default=0, ge=-900, le=900),
+    db: Session = Depends(get_db),
+):
+    from app.services.closing_date_exceptions import exceptions_csv
+
+    data = closing_date_exceptions_route(start_date, end_date, tz_offset, db)
+    return _csv_download(
+        exceptions_csv(data, _company_name(db)),
+        f"closing-date-exceptions_{data['start_date']}_{data['end_date']}.csv",
+        request,
+    )
+
+
+@router.get("/closing-date-exceptions/pdf")
+def closing_date_exceptions_pdf_route(
+    start_date: date = Query(default=None),
+    end_date: date = Query(default=None),
+    tz_offset: int = Query(default=0, ge=-900, le=900),
+    db: Session = Depends(get_db),
+):
+    from app.services.closing_date_exceptions import exceptions_section
+
+    data = closing_date_exceptions_route(start_date, end_date, tz_offset, db)
+    return _pdf_response(
+        [exceptions_section(data)],
+        db,
+        f"closing-date-exceptions_{data['start_date']}_{data['end_date']}.pdf",
+        landscape=True,
     )

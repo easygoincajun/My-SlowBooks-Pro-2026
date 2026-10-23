@@ -122,6 +122,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from app.models import (  # noqa: F401,E402
     accounts,
     attachments,
+    request_keys,
     audit,
     auth as auth_model,
     backups,

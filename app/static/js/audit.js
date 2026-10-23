@@ -27,6 +27,7 @@ const AuditPage = {
                     <option value="INSERT">INSERT</option>
                     <option value="UPDATE">UPDATE</option>
                     <option value="DELETE">DELETE</option>
+                    <option value="EXPORT">EXPORT</option>
                 </select>
                 <label style="font-size:10px;font-weight:700;color:var(--text-secondary);">From:</label>
                 <input type="date" id="audit-start" onchange="AuditPage.load()">
@@ -82,6 +83,13 @@ const AuditPage = {
                 if (Object.keys(log.new_values).length > 3) changes += '<br>...';
             } else if (log.action === 'DELETE' && log.old_values) {
                 changes = '<em style="color:var(--qb-red);">Record deleted</em>';
+            } else if (log.new_values) {
+                // Events logged by hand (EXPORT of a direct-deposit file,
+                // RESTORE of a backup) say what happened in new_values.
+                changes = Object.keys(log.new_values)
+                    .filter(k => log.new_values[k] != null)
+                    .map(k => `<strong>${escapeHtml(k)}</strong>: ${escapeHtml(String(log.new_values[k]))}`)
+                    .join('<br>');
             }
 
             html += `<tr>

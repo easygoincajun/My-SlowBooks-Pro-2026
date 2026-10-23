@@ -39,3 +39,6 @@ class DocumentAudit(Base):
     # Full 64-char hex SHA-256 of the canonical content payload.
     content_hash = Column(String(64), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    # Who generated it: the signed-in user's name (the audit log's actor),
+    # "system" when nobody was. NULL on rows from before 2.22.2.
+    username = Column(String(100), nullable=True)

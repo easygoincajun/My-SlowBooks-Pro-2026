@@ -25,11 +25,37 @@ def _money(v) -> Decimal:
     return Decimal(str(v or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+class _Percent:
+    """A % Change cell. Not a str, so the safe writer leaves it alone: a fall
+    is written -12.3% like a rise is 62.8%, and a spreadsheet reads both as
+    numbers. As text it got the formula guard's apostrophe ('-12.3%), which
+    Excel shows as text (2.26.0 gate, W-29 / NEW-171). A number with a
+    percent sign is never a formula."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: float):
+        self.value = value
+
+    def __str__(self) -> str:
+        return f"{self.value:.1f}%"
+
+
 def _preamble(writer, company: str, report: str, period: str) -> None:
     writer.writerow(["Company", company])
     writer.writerow(["Report", report])
     writer.writerow(["Period", period])
     writer.writerow([])
+
+
+def _range(data: dict) -> str:
+    """ "2026-01-01 to 2026-12-31", and when the statement was run without
+    the adjusting entries (#341) it says so, so the file is not mistaken for
+    the books as they stand."""
+    period = f"{data['start_date']} to {data['end_date']}"
+    if data.get("exclude_adjusting"):
+        period += " (adjusting entries left out)"
+    return period
 
 
 def trial_balance_csv(data: dict, company: str) -> str:
@@ -38,15 +64,13 @@ def trial_balance_csv(data: dict, company: str) -> str:
     Net is debit minus credit, as the screen shows it."""
     out = io.StringIO()
     w = _SafeWriter(out)
-    _preamble(
-        w, company, "Trial Balance", f"{data['start_date']} to {data['end_date']}"
-    )
+    _preamble(w, company, "Trial Balance", _range(data))
     w.writerow(["Account number", "Account name", "Type", "Debit", "Credit", "Net"])
     for i in data["items"]:
         w.writerow(
             [
                 i["account_number"],
-                i["account_name"],
+                i.get("account_path") or i["account_name"],  # W-12
                 i["account_type"],
                 _money(i["total_debit"]),
                 _money(i["total_credit"]),
@@ -104,7 +128,8 @@ def general_ledger_csv(data: dict, company: str, words=None) -> str:
         ]
     )
     for a in data["accounts"]:
-        num, name = a["account_number"] or "", a["account_name"]
+        num = a["account_number"] or ""
+        name = a.get("account_path") or a["account_name"]  # W-12
         w.writerow(
             [
                 data["start_date"],
@@ -151,16 +176,128 @@ def general_ledger_csv(data: dict, company: str, words=None) -> str:
     return out.getvalue()
 
 
-def profit_loss_csv(data: dict, company: str, words) -> str:
+def account_transactions_csv(data: dict, company: str, words) -> str:
+    """The drill-down (one account's lines for a date range, the balance
+    brought forward and the running balance) as the screen shows it
+    (#333): a bookkeeper hands a client what was spent on one account."""
     out = io.StringIO()
     w = _SafeWriter(out)
-    _preamble(
-        w,
-        company,
-        profit_loss_csv_class_line(data, words),
-        f"{data['start_date']} to {data['end_date']}",
+    acct = data.get("account") or {}
+    head = f"{acct.get('number') or ''} {acct.get('name') or ''}".strip()
+    period = f"{data['start_date']} to {data['end_date']}"
+    if data.get("class_name"):
+        period += f" ({words('Class')}: {data['class_name']} only)"
+    if data.get("job_name"):
+        period += f" ({words('Job')}: {data['job_name']})"
+    _preamble(w, company, f"Account detail — {head}", period)
+    w.writerow(
+        [
+            "Date",
+            "Payee",
+            "Reference",
+            "Description",
+            "Source",
+            "Debit",
+            "Credit",
+            "Running balance",
+            "Cleared",
+        ]
     )
-    w.writerow(["Section", "Account number", "Account name", "Amount"])
+    w.writerow(
+        [
+            data["start_date"],
+            "",
+            "",
+            "Balance brought forward",
+            "",
+            "",
+            "",
+            _money(data.get("opening_balance", 0)),
+            "",
+        ]
+    )
+    for e in data.get("entries", []):
+        w.writerow(
+            [
+                e.get("date", ""),
+                e.get("payee") or "",
+                e.get("reference") or "",
+                (e.get("description") or "") + (" (void)" if e.get("voided") else ""),
+                e.get("source_type") or "",
+                _money(e["debit"]) if e.get("debit") else "",
+                _money(e["credit"]) if e.get("credit") else "",
+                _money(e.get("running_balance", 0)),
+                (
+                    "R"
+                    if e.get("reconciliation_id")
+                    else ("cleared" if e.get("cleared") else "")
+                ),
+            ]
+        )
+    entries = data.get("entries", [])
+    closing = (
+        entries[-1]["running_balance"] if entries else data.get("opening_balance", 0)
+    )
+    w.writerow(
+        [
+            "",
+            "",
+            "",
+            "Period total",
+            "",
+            _money(data.get("period_debit", 0)),
+            _money(data.get("period_credit", 0)),
+            _money(closing),
+            "",
+        ]
+    )
+    return out.getvalue()
+
+
+def _cmp_header(prior, show_changes: bool) -> list:
+    if not prior:
+        return ["Amount"]
+    return ["Current", "Prior year"] + (
+        ["$ Change", "% Change"] if show_changes else []
+    )
+
+
+def _cmp_cells(cur, before, prior, show_changes: bool) -> list:
+    """A row's money cells: Amount alone, or Current | Prior year, plus
+    $ Change | % Change unless they are turned off."""
+    from app.routes.reports.financial import pct_change
+
+    if not prior:
+        return [_money(cur)]
+    cells = [_money(cur), _money(before)]
+    if show_changes:
+        pct = pct_change(cur, before)
+        cells += [
+            _money(float(cur or 0) - float(before or 0)),
+            "" if pct is None else _Percent(pct),
+        ]
+    return cells
+
+
+def profit_loss_csv(data: dict, company: str, words, show_changes: bool = True) -> str:
+    """The P&L as a spreadsheet. With a prior-year comparison (`prior` on
+    the data) each row also carries Prior year, and $ Change and % Change
+    unless show_changes is off."""
+    prior = data.get("prior")
+    p_tot = prior or {}
+    out = io.StringIO()
+    w = _SafeWriter(out)
+    period = _range(data)
+    if prior:
+        period += f" compared with {prior['start_date']} to {prior['end_date']}"
+    _preamble(w, company, profit_loss_csv_class_line(data, words), period)
+
+    def figures(cur, before):
+        return _cmp_cells(cur, before, prior, show_changes)
+
+    w.writerow(
+        ["Section", "Account number", "Account name"] + _cmp_header(prior, show_changes)
+    )
     for label, key, total_key in (
         (words("Income"), "income", "total_income"),
         ("Cost of Goods Sold", "cogs", "total_cogs"),
@@ -171,13 +308,22 @@ def profit_loss_csv(data: dict, company: str, words) -> str:
                 [
                     label,
                     i.get("account_number") or "",
-                    i["account_name"],
-                    _money(i["amount"]),
+                    i.get("account_path") or i["account_name"],  # W-8
                 ]
+                + figures(i["amount"], i.get("prior_amount", 0))
             )
-        w.writerow([label, "", f"Total {label}", _money(data[total_key])])
-    w.writerow(["", "", "Gross Profit", _money(data["gross_profit"])])
-    w.writerow(["", "", words("Net Income"), _money(data["net_income"])])
+        w.writerow(
+            [label, "", f"Total {label}"]
+            + figures(data[total_key], p_tot.get(total_key, 0))
+        )
+    w.writerow(
+        ["", "", "Gross Profit"]
+        + figures(data["gross_profit"], p_tot.get("gross_profit", 0))
+    )
+    w.writerow(
+        ["", "", words("Net Income")]
+        + figures(data["net_income"], p_tot.get("net_income", 0))
+    )
     return out.getvalue()
 
 
@@ -294,11 +440,27 @@ def filtered_phrase(data: dict, columns: list) -> str:
     return text + "; totals are for the columns shown, not the company"
 
 
-def balance_sheet_csv(data: dict, company: str, words) -> str:
+def balance_sheet_csv(
+    data: dict, company: str, words, show_changes: bool = True
+) -> str:
+    """The Balance Sheet as a spreadsheet. With a prior-year comparison
+    (`prior` on the data) each row also carries Prior year, and $ Change
+    and % Change unless show_changes is off."""
+    prior = data.get("prior")
+    p_tot = prior or {}
     out = io.StringIO()
     w = _SafeWriter(out)
-    _preamble(w, company, words("Balance Sheet"), f"As of {data['as_of_date']}")
-    w.writerow(["Section", "Account number", "Account name", "Amount"])
+    period = f"As of {data['as_of_date']}"
+    if prior:
+        period += f" compared with {prior['as_of_date']}"
+    _preamble(w, company, words("Balance Sheet"), period)
+
+    def figures(cur, before):
+        return _cmp_cells(cur, before, prior, show_changes)
+
+    w.writerow(
+        ["Section", "Account number", "Account name"] + _cmp_header(prior, show_changes)
+    )
     for label, key, total_key in (
         ("Assets", "assets", "total_assets"),
         ("Liabilities", "liabilities", "total_liabilities"),
@@ -309,18 +471,20 @@ def balance_sheet_csv(data: dict, company: str, words) -> str:
                 [
                     label,
                     i.get("account_number") or "",
-                    i["account_name"],
-                    _money(i["amount"]),
+                    i.get("account_path") or i["account_name"],  # W-8
                 ]
+                + figures(i["amount"], i.get("prior_amount", 0))
             )
-        w.writerow([label, "", f"Total {label}", _money(data[total_key])])
+        w.writerow(
+            [label, "", f"Total {label}"]
+            + figures(data[total_key], p_tot.get(total_key, 0))
+        )
     w.writerow(
-        [
-            "",
-            "",
-            words("Liabilities + Equity"),
-            _money(data["total_liabilities"] + data["total_equity"]),
-        ]
+        ["", "", words("Liabilities + Equity")]
+        + figures(
+            data["total_liabilities"] + data["total_equity"],
+            p_tot.get("total_liabilities", 0) + p_tot.get("total_equity", 0),
+        )
     )
     return out.getvalue()
 
@@ -329,3 +493,66 @@ def rows_of(text: str) -> list[list[str]]:
     """The table rows of an export, preamble skipped — for tests and for any
     reader that wants the data (group reporting, #180)."""
     return list(csv.reader(io.StringIO(text)))[4:]
+
+
+def adjusting_entries_csv(data: dict, company: str) -> str:
+    """The Adjusting Journal Entries report (#341): one row per line of each
+    adjusting entry, the entry's own words on every row (so a spreadsheet
+    sorts and filters by entry, date or poster), then the period's totals,
+    which tie to the General Ledger's adjusting lines."""
+    out = io.StringIO()
+    w = _SafeWriter(out)
+    _preamble(
+        w,
+        company,
+        "Adjusting Journal Entries",
+        f"{data['start_date']} to {data['end_date']}",
+    )
+    w.writerow(
+        [
+            "Entry",
+            "Date",
+            "Reference",
+            "Description",
+            "Posted by",
+            "Voided",
+            "Account number",
+            "Account name",
+            "Line memo",
+            "Debit",
+            "Credit",
+        ]
+    )
+    for e in data["entries"]:
+        for ln in e["lines"]:
+            w.writerow(
+                [
+                    e["id"],
+                    e["date"],
+                    e["reference"],
+                    e["description"],
+                    e["posted_by"],
+                    "yes" if e["voided"] else "",
+                    ln["account_number"],
+                    ln["account_name"],
+                    ln["description"],
+                    _money(ln["debit"]),
+                    _money(ln["credit"]),
+                ]
+            )
+    w.writerow(
+        [
+            "",
+            "",
+            "",
+            f"Total ({data['count']} entries)",
+            "",
+            "",
+            "",
+            "",
+            "",
+            _money(data["total_debit"]),
+            _money(data["total_credit"]),
+        ]
+    )
+    return out.getvalue()

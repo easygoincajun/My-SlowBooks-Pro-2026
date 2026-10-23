@@ -194,6 +194,7 @@ const PayrollPage = {
                 <td class="amount">${formatCurrency((s.pretax_deductions || 0) + (s.posttax_deductions || 0))}</td>
                 ${anyReimb ? `<td class="amount">${formatCurrency(s.reimbursements || 0)}</td>` : ''}
                 <td class="amount" style="font-weight:700;">${formatCurrency(s.net_pay)}</td>
+                <td>${s.direct_deposit ? 'Direct deposit' : 'Check'}</td>
                 <td class="actions"><button class="btn btn-sm btn-secondary" aria-label="${escapeHtml(`Stub PDF — ${who(s)}`)}" title="Printable pay stub (PDF)" onclick="window.open('/api/payroll/${run.id}/paystub/${s.id}','_blank')">Stub PDF — ${escapeHtml(who(s))}</button></td>
             </tr>`).join('');
 
@@ -201,7 +202,7 @@ const PayrollPage = {
             <div class="table-container table-container--scroll"><table class="pay-run-table">
                 <thead><tr><th scope="col">Employee</th><th scope="col" class="amount">Hours</th><th scope="col" class="amount">Gross</th>
                 <th scope="col" class="amount">Fed</th><th scope="col" class="amount">State</th><th scope="col" class="amount">SS</th>
-                <th scope="col" class="amount">Med</th><th scope="col" class="amount">Other</th><th scope="col">Benefits (EE, +ER)</th><th scope="col" class="amount">Deductions</th>${anyReimb ? '<th scope="col" class="amount">+ Reimb.</th>' : ''}<th scope="col" class="amount">Net</th><th scope="col">Stub</th></tr></thead>
+                <th scope="col" class="amount">Med</th><th scope="col" class="amount">Other</th><th scope="col">Benefits (EE, +ER)</th><th scope="col" class="amount">Deductions</th>${anyReimb ? '<th scope="col" class="amount">+ Reimb.</th>' : ''}<th scope="col" class="amount">Net</th><th scope="col">Paid by</th><th scope="col">Stub</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table></div>
             <p style="font-size:11px;color:var(--gray-500);margin:4px 0 8px;">Other: state taxes withheld besides income tax (disability, family leave, transit) and garnishments. Gross − Fed − State − SS − Med − Other − Deductions${anyReimb ? ' + Reimb.' : ''} = Net.</p>
@@ -213,9 +214,46 @@ const PayrollPage = {
                 <div class="total-row grand-total"><span class="label">Total Net</span><span class="value">${formatCurrency(run.total_net)}</span></div>
                 ${run.burden_job_cost_id ? `<div class="total-row"><span class="label">Labor burden distributed</span><span class="value"><a href="#/job-costs">Job cost entry #${run.burden_job_cost_id}</a></span></div>` : ''}
             </div>
+            ${PayrollPage._directDepositNote(run)}
             <div class="form-actions">
+                ${run.status === 'processed' && run.stubs.some(s => s.direct_deposit) ? `<button class="btn btn-primary" onclick="PayrollPage.downloadDirectDeposit(${run.id})" title="The ACH file to upload to the bank">Direct deposit file</button>` : ''}
                 <button class="btn btn-secondary" onclick="closeModal()">Close</button>
             </div>`, { wide: true });
+    },
+
+    // Who the ACH file pays and who it does not (discussion #211): the next
+    // step after Process was a question nobody could answer from the page.
+    _directDepositNote(run) {
+        const dd = run.stubs.filter(s => s.direct_deposit).length;
+        const checks = run.stubs.length - dd;
+        if (run.status !== 'processed') {
+            return dd ? `<p style="font-size:11px;color:var(--gray-500);margin:4px 0 8px;">Once processed, the run has a direct deposit file for the ${dd === 1 ? 'employee' : `${dd} employees`} paid by direct deposit.</p>` : '';
+        }
+        if (!dd) return `<p style="font-size:11px;color:var(--gray-500);margin:4px 0 8px;">No one on this run has a direct-deposit account; pay each stub by check. Accounts are entered on the employee.</p>`;
+        return `<p style="font-size:11px;color:var(--gray-500);margin:4px 0 8px;">Direct deposit file: ${dd === 1 ? '1 employee' : `${dd} employees`}${checks ? `; ${checks === 1 ? '1 is' : `${checks} are`} paid by check` : ''}. Upload the file to the bank; the bank's details are under Settings → Direct Deposit (ACH).</p>`;
+    },
+
+    // Saves the run's ACH file. A refusal (the bank's details not set up,
+    // nobody on the run with an account) is a sentence to read, so this
+    // fetches rather than opening the address in a window.
+    async downloadDirectDeposit(id) {
+        try {
+            const res = await fetch(`/api/payroll/${id}/nacha`, { headers: { 'X-Slowbooks-Desktop': '1' } });
+            if (!res.ok) throw new Error(await API.responseError(res, 'Direct deposit file failed'));
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const match = disposition.match(/filename="?([^";]+)"?/);
+            const filename = match ? match[1] : `Direct-Deposit_${id}.ach`;
+            const blob = await res.blob();
+            const desktop = window.SlowbooksDesktop;
+            if (!(desktop && await desktop.saveFile(blob, filename))) {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = filename;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+                toast(`Saved ${filename}`);
+            }
+        } catch (err) { toast(err.message, 'error'); }
     },
 
     async process(id) {

@@ -25,12 +25,14 @@ def _stub_launch(monkeypatch, tmp_path):
     monkeypatch.setattr(
         dl,
         "migrate",
-        lambda url, output=None: calls.__setitem__("migrate", calls["migrate"] + 1),
+        lambda url, output=None, key=None: calls.__setitem__(
+            "migrate", calls["migrate"] + 1
+        ),
     )
     monkeypatch.setattr(
         dl,
         "start_server",
-        lambda url, port, output=None, bind_host="127.0.0.1": (
+        lambda url, port, output=None, bind_host="127.0.0.1", key=None: (
             calls["start"].append((url, bind_host)),
             _Proc(),
         )[1],

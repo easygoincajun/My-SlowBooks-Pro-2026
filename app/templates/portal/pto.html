@@ -8,6 +8,12 @@
 {% if saved %}
 <div class="banner banner-success">Your time-off request has been submitted.</div>
 {% endif %}
+{% if withdrawn %}
+<div class="banner banner-success">Your request has been withdrawn.</div>
+{% endif %}
+{% if error %}
+<div class="banner banner-error">{{ error }}</div>
+{% endif %}
 
 <h3>Balances</h3>
 {% if accruals %}
@@ -47,6 +53,7 @@
             <th class="num">Hours</th>
             <th>Status</th>
             <th>Notes</th>
+            <th><span class="visually-hidden">Actions</span></th>
         </tr>
     </thead>
     <tbody>
@@ -57,6 +64,13 @@
             <td class="num">{{ "%.2f"|format(req.hours|float) }}</td>
             <td><span class="pill pill-{{ req.status.value }}">{{ req.status.value }}</span></td>
             <td>{{ req.notes or '—' }}</td>
+            <td>
+                {% if req.status.value == 'pending' %}
+                <form method="post" action="/portal/pto/{{ req.id }}/withdraw" class="inline-form">
+                    <button type="submit" class="btn btn-small" aria-label="Withdraw the request for {{ req.start_date }}">Withdraw</button>
+                </form>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </tbody>

@@ -195,13 +195,40 @@ def test_the_page_asks_and_sends_again_with_the_flag():
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout)
     # yes: the question asked is the server's, then the same request with the flag
+    # (the helper hands `send` the flags the server asked for: none first,
+    # then the one named — the same shape carries a credit-limit say-so, #256)
     assert got["yes"] == {
         "asked": ["This invoice adds up to $0.00. Duplicate it anyway?"],
-        "sent": [False, True],
+        "sent": [{}, {"allow_zero_total": True}],
         "result": "INV-2",
     }
     # no: nothing sent again, and the caller hears null
-    assert got["no"] == {"sent": [False], "result": None}
+    assert got["no"] == {"sent": [{}], "result": None}
+    # the credit limit (#256): the server's question, then the flag it named
+    assert got["creditLimit"] == {
+        "asked": [
+            "Salt & Pine's credit limit is $500.00. With this invoice they would owe $550.00. Save it anyway?"
+        ],
+        "sent": [{}, {"allow_over_credit_limit": True}],
+        "result": "INV-3",
+    }
+    # both questions in one save: each asked once, both flags granted
+    assert got["both"]["asked"] == [
+        "This invoice adds up to $0.00. Save it anyway?",
+        "Salt & Pine's credit limit is $500.00. With this invoice they would owe $550.00. Save it anyway?",
+    ]
+    assert got["both"]["sent"] == [
+        {},
+        {"allow_zero_total": True},
+        {"allow_zero_total": True, "allow_over_credit_limit": True},
+    ]
+    assert got["both"]["result"] == "INV-4"
+    # a flag already granted that the server still refuses is passed on, not asked again
+    assert got["stubborn"] == {
+        "asked": [],
+        "sent": [{"allow_over_credit_limit": True}],
+        "error": "credit_limit",
+    }
     # any other refusal is not a question
     assert got["other"] == {"asked": [], "error": "Customer not found"}
     # Duplicate on the invoice view
@@ -213,8 +240,8 @@ def test_every_zero_total_form_sends_through_the_question():
     inv = (JS / "invoices.js").read_text(encoding="utf-8")
     save = inv[inv.index("    async save(e, id) {") :]
     save = save[: save.index("    async creditLimitOk(")]
-    assert "SalesLines.sendAllowingZero(allow =>" in save
-    assert "{ ...data, allow_zero_total: true }" in save
+    assert "SalesLines.sendAllowingZero(flags =>" in save
+    assert "const body = { ...data, ...flags };" in save
     assert "API.put(`/invoices/${id}`, body)" in save
     assert "API.post('/invoices', body)" in save
     assert "if (!saved) return;" in save
@@ -222,17 +249,14 @@ def test_every_zero_total_form_sends_through_the_question():
     cm = (JS / "credit_memos.js").read_text(encoding="utf-8")
     save = cm[cm.index("    async save(e) {") :]
     save = save[: save.index("    async showApply(")]
-    assert "SalesLines.sendAllowingZero(allow =>" in save
-    assert (
-        "API.post('/credit-memos', allow ? { ...data, allow_zero_total: true } : data)"
-        in save
-    )
+    assert "SalesLines.sendAllowingZero(flags =>" in save
+    assert "API.post('/credit-memos', { ...data, ...flags })" in save
 
     est = (JS / "estimates.js").read_text(encoding="utf-8")
     convert = est[est.index("    async convert(id) {") :]
     convert = convert[: convert.index("    lineCount:")]
-    assert "SalesLines.sendAllowingZero(allow =>" in convert
+    assert "SalesLines.sendAllowingZero(flags =>" in convert
     assert (
-        "API.post(`/estimates/${id}/convert`, allow ? { allow_zero_total: true } : undefined)"
+        "API.post(`/estimates/${id}/convert`, Object.keys(flags).length ? flags : undefined)"
         in convert
     )

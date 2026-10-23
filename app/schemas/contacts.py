@@ -148,6 +148,9 @@ class VendorCreate(StrictModel):
     default_expense_account_id: Optional[int] = None
     is_1099_vendor: bool = False
     vendor_1099_type: Optional[str] = Field(None, max_length=10)
+    # The W-9 the 1099-NEC prints "on file: Yes/No" for; nothing could set
+    # it until 2.22.2 (#257), so every form said No.
+    w9_on_file: bool = False
     notes: Optional[str] = None
 
 
@@ -170,6 +173,7 @@ class VendorUpdate(StrictModel):
     default_expense_account_id: Optional[int] = None
     is_1099_vendor: Optional[bool] = None
     vendor_1099_type: Optional[str] = Field(None, max_length=10)
+    w9_on_file: Optional[bool] = None
     notes: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -194,6 +198,7 @@ class VendorResponse(BaseModel):
     default_expense_account_id: Optional[int] = None
     is_1099_vendor: bool = False
     vendor_1099_type: Optional[str] = None
+    w9_on_file: bool = False
     notes: Optional[str]
     is_active: bool
     balance: Decimal

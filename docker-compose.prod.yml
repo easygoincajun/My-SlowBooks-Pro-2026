@@ -69,14 +69,29 @@ services:
       HSTS_MAX_AGE: "${HSTS_MAX_AGE:-63072000}"
       SESSION_IDLE_TIMEOUT_SECONDS: "${SESSION_IDLE_TIMEOUT_SECONDS:-14400}"
       RATE_LIMIT_ENABLED: "1"
-      # Behind your own TLS proxy the client address and scheme arrive in
-      # X-Forwarded-* headers; default off, because trusting them on a
-      # directly reachable app lets a client forge its address.
-      TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
+      # Client-IP trust at the uvicorn layer. This file puts the app behind a
+      # TLS-terminating proxy, so uvicorn sees the PROXY's socket address and
+      # trusts X-Forwarded-For only from the addresses listed here (default
+      # 127.0.0.1 — which the proxy container is not). Leave it unset and every
+      # request keys to the proxy: the login rate limiter buckets all users
+      # together and login_attempts / portal_accesses record the proxy address.
+      # Set to the proxy's address or CIDR (e.g. the compose network 172.18.0.0/16,
+      # or your ingress subnet). Never 0.0.0.0/0 or *, which lets any client forge
+      # its own source IP. Left blank, the app starts as before and logs a
+      # warning at startup, so an upgrade does not stop a running deployment.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-}"
+
+      # Shared rate-limit counters. APP_WORKERS below defaults to 4 and
+      # in-process counters are per-worker, so leaving this unset makes every
+      # configured limit 4x looser than it reads (more across replicas). Point
+      # at shared storage for any multi-worker/multi-replica deploy; unset keeps
+      # the in-memory default, which is only correct for a single worker.
+      RATE_LIMIT_STORAGE_URI: "${RATE_LIMIT_STORAGE_URI:-}"
 
       # Required secrets. ?:err makes compose refuse to start with them empty.
-      PAYROLL_ENCRYPTION_SECRET: ${PAYROLL_ENCRYPTION_SECRET:?missing PAYROLL_ENCRYPTION_SECRET — run: openssl rand -base64 32}
-      SESSION_SECRET_KEY: ${SESSION_SECRET_KEY:?missing SESSION_SECRET_KEY — run: openssl rand -hex 32}
+      # Quoted: a ": " inside a plain scalar reads as a mapping to Compose 2.40 (#307)
+      PAYROLL_ENCRYPTION_SECRET: "${PAYROLL_ENCRYPTION_SECRET:?missing PAYROLL_ENCRYPTION_SECRET; run openssl rand -base64 32}"
+      SESSION_SECRET_KEY: "${SESSION_SECRET_KEY:?missing SESSION_SECRET_KEY; run openssl rand -hex 32}"
 
       # Optional during key rotation
       PAYROLL_ENCRYPTION_SECRET_PREV: ${PAYROLL_ENCRYPTION_SECRET_PREV:-}

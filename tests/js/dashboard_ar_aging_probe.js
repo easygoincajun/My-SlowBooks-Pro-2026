@@ -7,16 +7,21 @@ const fs = require('fs'), vm = require('vm');
 const ctx = {
   console,
   window: {},
-  document: { addEventListener: () => {} },
+  document: { addEventListener: () => {}, documentElement: { getAttribute: () => 'light' } },
   escapeHtml: (s) => String(s), T: (s) => s, Terms: { text: (s) => s },
   // utils.js's own formatCurrency
   formatCurrency: (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0),
+  // utils.js's compactMoney, cssVar and figureTextOn: the figure a segment
+  // carries (#265), in text that reads on it
+  compactMoney: (n) => '$' + Math.round(n),
+  cssVar: () => '#339966',
+  figureTextOn: () => ({ fill: '#1a1a28', ratio: 4.82 }),
 };
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync('app/static/js/dashboard.js', 'utf8') + '\nthis.D = DashboardPage;', ctx);
 const html = ctx.D.renderers.ar_aging(JSON.parse(process.argv[2]));
 const lines = [];
-for (const m of html.matchAll(/<span><span[^>]*>■<\/span>([^<]*)<\/span>/g)) lines.push(m[1].trim());
+for (const m of html.matchAll(/<span><span aria-hidden="true"[^>]*><\/span>([^<]*)<\/span>/g)) lines.push(m[1].trim());
 for (const m of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)) {
   const cells = [...m[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((c) => stripTags(c[1]).trim());
   lines.push(cells.join(' | '));

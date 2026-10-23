@@ -141,13 +141,22 @@ const SalesLines = {
     // server's question ("This invoice adds up to $0.00. Save it anyway?")
     // and on yes send it once more with allow_zero_total. `send(allow)`
     // makes the request; resolves to its answer, or null for no.
-    async sendAllowingZero(send) {
+    // A refused save that needs only the user's say-so is asked and sent
+    // again with the flag the server named: a $0.00 document (409
+    // "zero_total") and, since 2.22.2, a customer past their credit limit
+    // (409 "credit_limit", #256). `send(flags)` makes the request; flags is
+    // {} first, then what the server asked for, so both can be granted in
+    // one save. Returns null when the user said no.
+    async sendAllowingZero(send, flags = {}) {
         try {
-            return await send(false);
+            return await send(flags);
         } catch (err) {
-            if (!(err && err.status === 409 && err.detail && err.detail.code === 'zero_total')) throw err;
+            const code = err && err.status === 409 && err.detail && err.detail.code;
+            const flag = code === 'zero_total' ? 'allow_zero_total'
+                : code === 'credit_limit' ? 'allow_over_credit_limit' : null;
+            if (!flag || flags[flag]) throw err;
             if (!confirm(err.detail.question || err.message)) return null;
-            return send(true);
+            return SalesLines.sendAllowingZero(send, { ...flags, [flag]: true });
         }
     },
 };
@@ -174,7 +183,7 @@ const InvoicesPage = {
         const invoices = all ? rows : rows.slice(0, 500);
         return renderListPage({
             title: T('Invoices'),
-            headerHtml: `<button class="btn btn-primary" onclick="InvoicesPage.showForm()">+ ${T('New Invoice')}</button>`
+            headerHtml: `<button class="btn btn-primary" ${App.shortcutAttrs('N', T('New Invoice'))} onclick="InvoicesPage.showForm()">+ ${T('New Invoice')}</button>`
                 + (all ? '' : listCapNote(rows, 500, 'InvoicesPage.showAll()', Terms.text('invoices'))),
             filter: {
                 id: 'inv-status-filter',
@@ -198,21 +207,23 @@ const InvoicesPage = {
                         <button class="btn btn-sm btn-secondary" onclick="InvoicesPage.view(${inv.id})">View</button>
                         <button class="btn btn-sm btn-secondary" onclick="InvoicesPage.showForm(${inv.id})">Edit</button>
                         ${inv.status === 'draft' ? `<button class="btn btn-sm btn-primary" onclick="InvoicesPage.markSent(${inv.id})">Mark Sent</button>` : ''}
-                        ${Terms.isNonprofit() && inv.status !== 'void' && parseFloat(inv.balance_due) > 0 ? `<button class="btn btn-sm btn-secondary" onclick="InvoicesPage.showWriteOff(${inv.id}, ${parseFloat(inv.balance_due)})">Write Off</button>` : ''}
+                        ${inv.status !== 'void' && parseFloat(inv.balance_due) > 0 ? `<button class="btn btn-sm btn-secondary" onclick="InvoicesPage.showWriteOff(${inv.id}, ${parseFloat(inv.balance_due)})">Write Off</button>` : ''}
                     </td>
                 </tr>`,
         });
     },
 
-    // Nonprofit: forgive an open balance (a pledge that will never be paid)
-    // — a write-off credit memo to Bad Debt Expense, applied at once.
+    // Forgive an open balance (a pledge that will never be paid, a balance
+    // too small to collect): a write-off credit memo to Bad Debt Expense,
+    // applied at once. Any company, since 2.22.2 (#255); it was drawn for
+    // a nonprofit only, though the route never minded.
     showWriteOff(id, balance) {
         openModal('Write Off Balance', `
             <form onsubmit="InvoicesPage.saveWriteOff(event, ${id})">
                 <div class="form-grid">
                     <div class="form-group"><label>Date *</label><input name="date" type="date" required value="${todayISO()}"></div>
                     <div class="form-group"><label>Amount *</label><input name="amount" type="number" step="0.01" min="0.01" max="${balance}" required value="${balance.toFixed(2)}"></div>
-                    <div class="form-group full-width"><label>Memo</label><input name="memo" placeholder="e.g. pledge withdrawn"></div>
+                    <div class="form-group full-width"><label>Memo</label><input name="memo" placeholder="${Terms.isNonprofit() ? 'e.g. pledge withdrawn' : 'e.g. too small to collect'}"></div>
                 </div>
                 <div style="font-size:11px;color:var(--gray-500);margin-top:6px">Posts a credit memo to Bad Debt Expense and applies it to this ${T('invoice')}. Void the credit memo to undo.</div>
                 <div class="form-actions">
@@ -282,9 +293,12 @@ const InvoicesPage = {
                 <button class="btn btn-secondary" onclick="InvoicesPage.copyPaymentLink(${inv.id})">Copy Payment Link</button>
                 ${inv.checkout_provider && inv.status !== 'paid' && inv.status !== 'void' ? `<button class="btn btn-secondary" onclick="InvoicesPage.checkPaymentStatus(${inv.id}, '${inv.checkout_provider}')">Check Payment Status</button>` : ''}
                 ${inv.status === 'draft' ? `<button class="btn btn-primary" onclick="InvoicesPage.markSent(${inv.id})">Mark Sent</button>` : ''}
+                ${inv.status !== 'void' && parseFloat(inv.balance_due) > 0 ? `<button class="btn btn-secondary" onclick="InvoicesPage.showWriteOff(${inv.id}, ${parseFloat(inv.balance_due)})">Write Off</button>` : ''}
                 ${inv.status !== 'void' ? `<button data-destructive class="btn btn-danger" onclick="InvoicesPage.void(${inv.id})">Void ${T('Invoice')}</button>` : ''}
                 <button class="btn btn-secondary" onclick="closeModal()">Close</button>
             </div>`);
+        // the document's own address, so Back returns to the list and the Open group lists it (NEW-164)
+        if (App.documentAddress) App.documentAddress(`#/invoices/${Number(id)}`);
         InvoicesPage.loadAttachments('invoice', inv.id);
         InvoicesPage.loadCreditNote(inv);
     },
@@ -465,8 +479,8 @@ const InvoicesPage = {
 
     async duplicate(id) {
         try {
-            const inv = await SalesLines.sendAllowingZero(allow =>
-                API.post(`/invoices/${id}/duplicate`, allow ? { allow_zero_total: true } : undefined));
+            const inv = await SalesLines.sendAllowingZero(flags =>
+                API.post(`/invoices/${id}/duplicate`, Object.keys(flags).length ? flags : undefined));
             if (!inv) return;
             toast(`Duplicated as ${T('Invoice')} #${inv.invoice_number}`);
             // another customer's job stored on the original was left off
@@ -621,7 +635,7 @@ const InvoicesPage = {
         const custOpts = customers.map(c => `<option value="${c.id}" ${inv.customer_id==c.id?'selected':''}>${escapeHtml(c.name)}</option>`).join('');
 
         openModal(Terms.text(id ? 'Edit Invoice' : 'New Invoice'), `
-            <form id="invoice-form" onsubmit="InvoicesPage.save(event, ${id})">
+            <form id="invoice-form" aria-labelledby="modal-title" data-skip-to="#inv-lines" data-skip-text="Skip to the line items" onsubmit="InvoicesPage.save(event, ${id})">
                 ${InvoicesPage.logoOptionHtml(settings)}
                 <div class="form-grid">
                     <div class="form-group"><label>${T('Customer')} *</label>
@@ -676,9 +690,10 @@ const InvoicesPage = {
                 </div>
                 <div class="form-group" style="margin-top:12px;"><label>Notes</label>
                     <textarea name="notes">${escapeHtml(inv.notes || '')}</textarea></div>
+                ${id ? '' : `<div class="hint" id="inv-create-note">Creating this ${T('invoice')} posts it to the books now; Draft means not yet marked sent. Items tracked in inventory come out of stock when it is created.</div>`}
                 <div class="form-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-                    <button type="submit" class="btn btn-primary" data-invoice-logo-action>${id ? 'Update' : 'Create'} ${T('Invoice')}</button>
+                    <button type="submit" class="btn btn-primary" data-invoice-logo-action${id ? '' : ' aria-describedby="inv-create-note"'}>${id ? 'Update' : 'Create'} ${T('Invoice')}</button>
                 </div>
             </form>`);
         if (!id && inv.customer_id) InvoicesPage.customerSelected(inv.customer_id);
@@ -760,7 +775,7 @@ const InvoicesPage = {
                 <option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${itemOpts}</select></td>
             <td><input class="line-desc" value="${escapeHtml(line.description || '')}"></td>
             ${InvoicesPage.lineClasses() ? Nonprofit.classCellHtml('line-class', line.class_id) : ''}
-            <td><input class="line-qty" type="number" step="0.01" value="${line.quantity || 1}" oninput="InvoicesPage.recalc()"></td>
+            <td><input class="line-qty" type="number" step="0.0001" value="${line.quantity || 1}" oninput="InvoicesPage.recalc()"></td>
             <td><input class="line-rate" type="number" step="0.0001" ${Number(line.rate) < 0 || items.some(i => i.is_discount && i.id == line.item_id) ? '' : 'min="0" '}value="${Number(line.rate) || 0}" oninput="InvoicesPage.recalc()"></td>
             <td style="text-align:center"><input type="checkbox" class="line-taxable" title="Sales tax applies to this line" ${line.is_taxable === false ? '' : 'checked'} onchange="InvoicesPage.recalc()"></td>
             <td class="col-amount line-amount">${formatCurrency((line.quantity||1) * (line.rate||0))}</td>
@@ -881,10 +896,10 @@ const InvoicesPage = {
         }
 
         try {
-            const saved = await SalesLines.sendAllowingZero(allow => {
-                const body = allow ? { ...data, allow_zero_total: true } : data;
+            const saved = await SalesLines.sendAllowingZero(flags => {
+                const body = { ...data, ...flags };
                 return id ? API.put(`/invoices/${id}`, body) : API.post('/invoices', body);
-            });
+            }, InvoicesPage._overLimitOk ? { allow_over_credit_limit: true } : {});
             if (!saved) return; // $0.00 and the user said no: the form stays open
             toast(Terms.text(id ? 'Invoice updated' : 'Invoice created'));
             App.refresh();
@@ -898,6 +913,10 @@ const InvoicesPage = {
     // invoice being edited left out (its new amount is `owed`). Returns true
     // to go ahead; a failure to look is not a reason to stop.
     async creditLimitOk(customer, owed, editingId = null) {
+        // set when the user said "save anyway", so the save carries
+        // allow_over_credit_limit and the server (which asks too, #256)
+        // doesn't ask twice
+        InvoicesPage._overLimitOk = false;
         const limit = parseFloat(customer && customer.credit_limit);
         if (!customer || !(limit > 0)) return true;
         let open = 0;
@@ -910,8 +929,9 @@ const InvoicesPage = {
         } catch (e) { return true; }
         const after = SalesLines.cents(open + (Number(owed) || 0));
         if (after <= limit) return true;
-        return confirm(`${customer.name}'s credit limit is ${formatCurrency(limit)}. `
+        InvoicesPage._overLimitOk = confirm(`${customer.name}'s credit limit is ${formatCurrency(limit)}. `
             + `With this ${T('invoice')} they would owe ${formatCurrency(after)}. Save it anyway?`);
+        return InvoicesPage._overLimitOk;
     },
 
     async loadAttachments(entityType, entityId) {

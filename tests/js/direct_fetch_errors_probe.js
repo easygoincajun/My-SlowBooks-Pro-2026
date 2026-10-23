@@ -117,6 +117,26 @@ const scenarios = {
     await p.get('ExpensesPage').uploadAttachment(1);
     return last(p.toasts);
   },
+  async 'journal.js attachment'() {
+    const p = page(['app/static/js/journal.js']);
+    await p.get('JournalPage').uploadAttachment(1);
+    return last(p.toasts);
+  },
+  // the Accountant's Copy (#346): the copy opened, the changes file previewed
+  async 'companies.js open accountant\'s copy'() {
+    const p = page(['app/static/js/companies.js']);
+    await p.get('CompaniesPage').openCopy({
+      preventDefault() {},
+      target: { file: { files: [{ name: 'books.sbacopy' }] }, passphrase: { value: 'passphrase' } },
+    });
+    return last(p.toasts);
+  },
+  async 'companies.js accountant\'s changes'() {
+    const p = page(['app/static/js/companies.js']);
+    p.ctx.document.querySelector = () => ({ file: { files: [{ name: 'changes.sbchanges' }] } });
+    await p.get('CompaniesPage').previewChanges({ preventDefault() {} });
+    return last(p.toasts);
+  },
   async 'employees.js dropped document'() {
     const p = page(['app/static/js/employees.js']);
     await p.get('EmployeesPage')._uploadDroppedFile(1, { name: 'w4.pdf' });
@@ -135,6 +155,11 @@ const scenarios = {
   async 'iif.js export'() {
     const p = page(['app/static/js/iif.js']);
     await p.get('IIFPage')._download('/api/iif/export/all', 'slowbooks_export.iif');
+    return last(p.toasts);
+  },
+  async 'payroll.js direct deposit file'() {
+    const p = page(['app/static/js/payroll.js']);
+    await p.get('PayrollPage').downloadDirectDeposit(1);
     return last(p.toasts);
   },
   async 'iif.js validate'() {
@@ -183,26 +208,6 @@ const scenarios = {
     const p = page(['app/static/js/ocr.js']);
     await p.get('ScanHelper').scan({ name: 'receipt.jpg' }, () => {});
     return p.els['#scan-status'].textContent;
-  },
-  async 'qbo.js import'() {
-    // The import runs on the server (#192): the page posts one start and
-    // says why it was refused in the import log's status line.
-    const p = page(['app/static/js/qbo.js']);
-    const Q = p.get('QBOPage');
-    Object.assign(Q, { _mounted: true, _monitorReady: true, _status: { connected: true } });
-    Q._getChecked = () => ['customers'];
-    Q._pollLog = async () => {};
-    await Q.importSelected();
-    return Q._startError ? p.els['#qbo-run-detail'].textContent : '(nothing shown)';
-  },
-  async 'qbo.js export'() {
-    const p = page(['app/static/js/qbo.js']);
-    const Q = p.get('QBOPage');
-    let shown = '(nothing shown)';
-    Q._getChecked = () => ['customers'];
-    Q._showResult = (_id, result) => { shown = result.errors.map(e => e.message).join(' | '); };
-    await Q.exportSelected();
-    return shown;
   },
   async 'desktop_shim.js document window'() {
     // The shell's window.open: fetches the document itself and says why

@@ -13,7 +13,7 @@ class BudgetCreate(StrictModel):
     amount: Decimal = Decimal("0")
 
 
-class BudgetUpdate(BaseModel):
+class BudgetUpdate(StrictModel):
     amount: Optional[Decimal] = None
 
 

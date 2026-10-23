@@ -17,7 +17,7 @@ const BillsPage = {
         return renderListPage({
             title: 'Bills (Accounts Payable)',
             headerHtml: `<div class="btn-group">
-                    <button class="btn btn-primary" onclick="BillsPage.showForm()">+ Enter Bill</button>
+                    <button class="btn btn-primary" ${App.shortcutAttrs('B', 'Enter Bill')} onclick="BillsPage.showForm()">+ Enter Bill</button>
                     <button class="btn btn-secondary" onclick="BillsPage.showPayForm()">Pay Bills</button>
                 </div>` + (all ? '' : listCapNote(rows, 500, 'BillsPage.showAll()', 'bills')),
             filter: {
@@ -100,6 +100,8 @@ const BillsPage = {
                 <button class="btn btn-secondary" onclick="window.open('/api/bills/${bill.id}/print-preview','_blank')">Print</button>
                 <button class="btn btn-secondary" onclick="closeModal()">Close</button>
             </div>`);
+        // the document's own address, so Back returns to the list and the Open group lists it (NEW-164)
+        if (App.documentAddress) App.documentAddress(`#/bills/${Number(id)}`);
         BillsPage.loadAttachments(bill.id);
     },
 
@@ -243,7 +245,7 @@ const BillsPage = {
         if (!termChoices.includes(terms)) termChoices.push(terms);
 
         openModal(bill ? `Edit Bill ${bill.bill_number}` : 'Enter Bill', `
-            <form id="bill-form" onsubmit="BillsPage.save(event, ${bill ? bill.id : 'null'})">
+            <form id="bill-form" aria-labelledby="modal-title" data-skip-to="#bill-lines" data-skip-text="Skip to the line items" onsubmit="BillsPage.save(event, ${bill ? bill.id : 'null'})">
                 ${bill ? '' : ScanHelper.scanRowHtml()}
                 <div class="form-grid">
                     <div class="form-group"><label>Vendor *</label>
@@ -261,10 +263,10 @@ const BillsPage = {
                     ${currencyFormGroupsHtml(bill ? bill.currency : undefined, bill ? bill.exchange_rate : undefined)}
                 </div>
                 <h3 style="margin:12px 0 8px;font-size:14px;">Line Items</h3>
-                <table class="line-items-table">
+                <div class="table-container table-container--scroll"><table class="line-items-table bill-lines-table">
                     <thead><tr><th scope="col">Item</th><th scope="col" title="Where the line is recorded">Account</th><th scope="col">Description</th>${CostCodes.headHtml()}${Nonprofit.headHtml()}<th scope="col" title="Billable to the job's customer">Bill?</th><th scope="col" class="col-qty">Qty</th><th scope="col" class="col-rate">Rate</th><th scope="col" class="col-amount">Amount</th></tr></thead>
                     <tbody id="bill-lines">${bill ? '' : BillsPage.lineHtml(0)}</tbody>
-                </table>
+                </table></div>
                 <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px;" onclick="BillsPage.addLine()">+ Add Line</button>
                 <div class="invoice-totals">
                     ${BillsPage._taxRate ? `<div class="total-row"><span class="label">Subtotal</span><span class="value" id="bill-subtotal">$0.00</span></div>
@@ -277,7 +279,7 @@ const BillsPage = {
                     <button type="button" class="btn btn-secondary" onclick="ScanHelper.discard(); closeModal()">Cancel</button>
                     <button type="submit" class="btn btn-primary">${bill ? 'Save Changes' : 'Save Bill'}</button>
                 </div>
-            </form>`);
+            </form>`, { wide: true });
         if (bill) {
             const vendorSel = document.getElementById('bill-vendor');
             if (vendorSel) vendorSel.value = bill.vendor_id;
@@ -312,7 +314,7 @@ const BillsPage = {
                 <td><input class="line-desc" value="${escapeHtml(l.description || '')}"></td>
                 ${CostCodes.cellHtml('line-cost-code', l.cost_code_id)}${Nonprofit.cellHtml('line-function', l.function, l.class_id)}
                 <td style="text-align:center;"><input type="checkbox" class="line-billable" title="Billable"${l.is_billable ? ' checked' : ''}></td>
-                <td><input class="line-qty" type="number" step="0.01" value="${line ? Number(l.quantity) : 1}" oninput="BillsPage.recalc()"></td>
+                <td><input class="line-qty" type="number" step="0.0001" value="${line ? Number(l.quantity) : 1}" oninput="BillsPage.recalc()"></td>
                 <td><input class="line-rate" type="number" step="0.0001" value="${line ? Number(l.rate) : 0}" oninput="BillsPage.recalc()"></td>
                 <td class="col-amount line-amount">$0.00</td>
             </tr>`;
@@ -554,6 +556,7 @@ const BillsPage = {
     // `vendorId`: only that vendor's open bills, from the vendor's own page
     // (#223, NEW-21); the list says so and offers every vendor's.
     async showPayForm(vendorId = null) {
+        BillsPage._payKey = null; // a new form, a new key (#292)
         const [vendors, bills, accounts] = await Promise.all([
             API.get('/vendors?active_only=true'),
             fetchAllPages('/bills?open_only=true'),
@@ -646,6 +649,14 @@ const BillsPage = {
         if (!(await Overdraft.confirm(fromId, outgoing, '1000'))) return;
 
         const paid = [];
+        // One key per form and vendor: a second Pay while one is in flight is
+        // ignored, and a Pay sent again after a lost response answers with
+        // the payment already recorded instead of a second one (#292)
+        if (BillsPage._paying) return;
+        BillsPage._paying = true;
+        const payButton = form.querySelector ? form.querySelector('button[type="submit"]') : null;
+        if (payButton) payButton.disabled = true;
+        if (!BillsPage._payKey) BillsPage._payKey = App.requestKey ? App.requestKey() : 'k-' + Date.now();
         try {
             for (const [vendorId, v] of byVendor) {
                 await API.post('/bill-payments', {
@@ -656,9 +667,10 @@ const BillsPage = {
                     check_number: checkNumber,
                     pay_from_account_id: fromId,
                     allocations: v.allocations,
-                });
+                }, null, { 'Idempotency-Key': `${BillsPage._payKey}:${vendorId}` });
                 paid.push(v.name);
             }
+            BillsPage._payKey = null;
             toast(byVendor.size > 1 ? `Bills paid: ${byVendor.size} payments, one per vendor` : 'Bills paid');
             closeModal();
             App.navigate('#/bills');
@@ -671,6 +683,9 @@ const BillsPage = {
             } else {
                 toast(err.message, 'error');
             }
+        } finally {
+            BillsPage._paying = false;
+            if (payButton) payButton.disabled = false;
         }
     },
 

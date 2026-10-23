@@ -140,7 +140,7 @@ def test_a_green_amount_passes_AA_on_every_row_it_sits_on():
     and the hovered row."""
     import re
 
-    green = _token(STYLE, "--qb-green")
+    green = _token(STYLE, "--sb-green")
     striped = _hex(
         re.search(
             r"tbody tr:nth-child\(even\) \{ background: (#[0-9a-f]{6})", STYLE
@@ -166,7 +166,7 @@ def test_a_green_amount_passes_AA_on_every_row_it_sits_on():
         ("a hovered totals row", under_tint(hovered)),
     ):
         ratio = _ratio(green, bg)
-        assert ratio >= 4.5, f"--qb-green on {name} is {ratio:.2f}:1, below AA's 4.5"
+        assert ratio >= 4.5, f"--sb-green on {name} is {ratio:.2f}:1, below AA's 4.5"
 
 
 def test_the_dark_sidebar_footer_is_readable():
@@ -189,3 +189,95 @@ def test_no_inline_style_uses_the_low_contrast_blue_for_a_link():
     for f in (ROOT / "app/static/js").glob("*.js"):
         js += f.read_text(encoding="utf-8")
     assert 'style="color:var(--qb-blue)' not in js.replace(" ", "")
+
+
+def test_dark_green_and_red_amounts_keep_their_colour_and_read_at_aa():
+    """[data-theme="dark"] .amount loaded after .amount.green / .amount.red
+    at the same specificity, so Analytics' cash-flow and expense figures
+    read as plain text in the dark theme (2.23.1 gate, W-2 / NEW-101)."""
+
+    plain = DARK.index('[data-theme="dark"] .amount { color: var(--text-primary); }')
+    green = DARK.index('[data-theme="dark"] .amount.green { color: var(--sb-green); }')
+    red = DARK.index('[data-theme="dark"] .amount.red   { color: var(--qb-red); }')
+    assert plain < green and plain < red  # the coloured rules win by order
+    panel = _token(DARK, "--panel-bg")
+    for name in ("--sb-green", "--qb-red"):
+        assert _ratio(_token(DARK, name), panel) >= 4.5, name
+
+
+def test_the_dark_success_toast_is_the_leaf_green():
+    """It kept 2.23.0's #2b8055 (4.86:1 under white) after the light theme
+    moved to #257321 (2.23.1 gate, W-3 / NEW-98)."""
+    import re
+
+    m = re.search(
+        r'\[data-theme="dark"\] \.toast-success \{ background: (#[0-9a-f]{6});', DARK
+    )
+    assert m and _hex(m.group(1)) == _token(STYLE, "--sb-green"), (
+        m.group(1) if m else None
+    )
+    assert _ratio((255, 255, 255), _hex(m.group(1))) >= 4.5
+
+
+def test_the_line_class_box_is_wide_enough_for_a_name():
+    """The bill form's cell squeezed the shared class box to 73 px, so
+    "North LLC" read "North LL" (2.23.1 gate, NEW-99)."""
+    assert 'td > select[class$="-fund"] { min-width: 124px; }' in STYLE
+
+
+def test_dark_bold_and_amber_amounts_keep_their_colour_too():
+    """[data-theme="dark"] td strong coloured the bold figure itself, so the
+    aging totals and the cash forecast's net read plain; amber amounts had
+    no dark rule (2.23.1 gate, W-4 / NEW-102)."""
+    bold = DARK.index('[data-theme="dark"] td strong { color: #e0e4ec; }')
+    inherit = DARK.index('[data-theme="dark"] .amount.amber strong { color: inherit; }')
+    assert bold < inherit
+    assert '[data-theme="dark"] .amount.green strong,' in DARK
+    assert '[data-theme="dark"] .amount.red strong,' in DARK
+    assert '[data-theme="dark"] .amount.amber { color: var(--qb-orange); }' in DARK
+    panel = _token(DARK, "--panel-bg")
+    assert _ratio(_token(DARK, "--qb-orange"), panel) >= 4.5
+
+
+def test_the_bill_forms_line_table_scrolls_sideways_with_room_for_every_box():
+    """The 124 px Class box took its room from the bill form's Account and
+    Item boxes on a company with cost codes, so an account read "600…"
+    (2.23.1 gate, NEW-103). The table scrolls in its container, as the job
+    cost entry's does, and the boxes keep widths that show their names."""
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "app/static/js/bills.js").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        '<div class="table-container table-container--scroll"><table class="line-items-table bill-lines-table">'
+        in js
+    )
+    assert "</table></div>\n" in js
+    for rule in (
+        ".bill-lines-table .cbx--line-item { min-width: 110px; }",
+        ".bill-lines-table .cbx--line-account { min-width: 200px; }",
+        ".bill-lines-table .cbx--line-cost-code { min-width: 110px; }",
+        ".bill-lines-table .line-desc { min-width: 140px; }",
+        ".bill-lines-table .line-qty { min-width: 64px; }",
+        ".bill-lines-table .line-rate { min-width: 84px; }",
+    ):
+        assert rule in STYLE, rule
+    # the widths reach the visible picker because combobox.js mirrors the
+    # select's classes onto it (a rule on the 1px select did nothing)
+    cbx = (Path(__file__).resolve().parents[1] / "app/static/js/combobox.js").read_text(
+        encoding="utf-8"
+    )
+    assert "wrap.classList.add(`cbx--${c}`)" in cbx
+    # with those widths the table outgrew the 700px dialog on every company
+    # (NEW-105): the bill form opens wide, as the estimate's and the job
+    # cost entry's do, so the table fits whole where the window has room
+    assert (
+        "Save Bill'}</button>\n                </div>\n            </form>`, { wide: true });"
+        in js
+    )
+    # and under a scrolling table there is a classic bar's room, so
+    # "+ Add Line" clears a bar an engine draws below the box (WebKit, NEW-104)
+    scroll = STYLE[STYLE.index(".table-container--scroll {") :]
+    scroll = scroll[: scroll.index("}")]
+    assert "margin-bottom: 12px;" in scroll, scroll

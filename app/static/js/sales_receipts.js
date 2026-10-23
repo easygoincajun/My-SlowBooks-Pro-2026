@@ -348,7 +348,7 @@ const SalesReceiptsPage = {
             <td><select class="line-item" onchange="SalesReceiptsPage.itemSelected(${idx})">
                 <option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${itemOpts}</select></td>
             <td><input class="line-desc" value="${escapeHtml(line.description || '')}"></td>
-            <td><input class="line-qty" type="number" step="0.01" value="${line.quantity || 1}" oninput="SalesReceiptsPage.recalc()"></td>
+            <td><input class="line-qty" type="number" step="0.0001" value="${line.quantity || 1}" oninput="SalesReceiptsPage.recalc()"></td>
             <td><input class="line-rate" type="number" step="0.0001" min="0" value="${Number(line.rate) || 0}" oninput="SalesReceiptsPage.recalc()"></td>
             <td style="text-align:center"><input type="checkbox" class="line-taxable" title="Sales tax applies to this line" ${line.is_taxable === false ? '' : 'checked'} onchange="SalesReceiptsPage.recalc()"></td>
             <td class="col-amount line-amount">${formatCurrency((line.quantity||1) * (line.rate||0))}</td>

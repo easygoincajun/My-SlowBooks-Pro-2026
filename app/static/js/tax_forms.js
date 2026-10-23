@@ -15,6 +15,11 @@ const TaxFormsPage = {
     async render() {
         const currentYear = new Date().getFullYear();
 
+        // Form history (#263): every W-2 / W-3 / 940 / 941 generated from these
+        // books, newest first, with who generated it; Check re-figures one.
+        let history = [];
+        try { history = await API.get('/document-audits?limit=100'); } catch (_) { history = null; }
+
         // Fetch employee list for the W-2 dropdown
         let empOptions = '<option value="">— Select Employee —</option>';
         try {
@@ -103,9 +108,113 @@ const TaxFormsPage = {
                 </div>
             </div>
 
+            <div class="card" style="margin-bottom:16px;padding:16px">
+                <h3 id="taxforms-h-form-history">Form history</h3>
+                <p style="font-size:12px;color:var(--gray-500);margin:0 0 8px;">Every W-2, W-3, 940 and 941 generated from these books, newest first. Check re-figures a form from today's books and says whether it still matches the one that was generated; the hash is the one printed in the form's footer.</p>
+                <div class="form-grid" role="group" aria-labelledby="taxforms-h-form-history">
+                    <div class="form-group" style="grid-column:1 / -1">
+                        <label for="audit-hash">Find a form by its footer: the hash's 16 characters (or the full 64), or the audit ID</label>
+                        <input id="audit-hash" placeholder="e.g. 054c0c8ea8389ab8, or #42" spellcheck="false" style="font-family:var(--font-mono);width:100%;max-width:560px">
+                    </div>
+                </div>
+                <div class="form-actions" style="margin-top:8px">
+                    <button class="btn btn-secondary" onclick="TaxFormsPage.findByHash()">Find</button>
+                </div>
+                <p id="audit-hash-result" role="status" style="font-size:12px;margin:8px 0 0"></p>
+                <div class="table-container" style="margin-top:8px">
+                    <table>
+                        <thead><tr>
+                            <th scope="col">Form</th><th scope="col">For</th><th scope="col">Generated</th><th scope="col">By</th><th scope="col">Hash</th><th scope="col">Status</th><th scope="col" style="position:relative"><span class="visually-hidden">Check</span></th>
+                        </tr></thead>
+                        <tbody id="audit-rows">${TaxFormsPage._historyRows(history)}</tbody>
+                    </table>
+                </div>
+            </div>
+
             <div class="card note--caution" style="padding:16px">
                 <p style="margin:0"><strong>Note:</strong> Tax forms are for reference. Verify calculations with a licensed tax professional before filing.</p>
             </div>`;
+    },
+
+    _historyRows(history) {
+        if (history === null) return '<tr><td colspan="7"><em>Could not load the form history</em></td></tr>';
+        if (!history.length) return '<tr><td colspan="7"><em>No forms generated yet</em></td></tr>';
+        return history.map(a => `<tr data-audit="${a.id}">
+            <td>${escapeHtml(a.form || a.doc_type)}</td>
+            <td>${escapeHtml(a.subject || a.doc_key)}</td>
+            <td>${escapeHtml(TaxFormsPage._when(a.created_at))}</td>
+            <td>${escapeHtml(a.username || '—')}</td>
+            <td><code title="${escapeHtml(a.content_hash)}" style="font-size:11px">${escapeHtml(String(a.content_hash || '').slice(0, 16))}…</code></td>
+            <td id="audit-status-${a.id}" role="status" aria-atomic="true" style="font-size:12px;max-width:420px">Not checked</td>
+            <td class="actions"><button class="btn btn-sm btn-secondary" onclick="TaxFormsPage.checkForm(${a.id})" aria-label="Check the ${escapeHtml(a.form || a.doc_type)} for ${escapeHtml(a.subject || a.doc_key)}">Check</button></td>
+        </tr>`).join('');
+    },
+
+    _when(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return String(iso);
+        return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    },
+
+    // Re-figure one form from today's books; the answer is a sentence in
+    // the row's Status cell (a live region, so a screen reader hears it).
+    // Re-figure one form from today's books; the answer is a sentence in
+    // the row's Status cell (a live region, so a screen reader hears it),
+    // with a mark in the success or danger colour and the time it was
+    // checked, so a second Check is seen to have happened (NEW-67).
+    async checkForm(id) {
+        const cell = document.getElementById(`audit-status-${id}`);
+        if (cell) { cell.className = ''; cell.textContent = 'Checking…'; }
+        // with seconds: two Checks within a minute read differently, so the
+        // second is seen and announced (gate round 3, W-8 / NEW-71)
+        const at = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+        try {
+            const r = await API.get(`/document-audits/${id}/check`);
+            if (!cell) return;
+            const kind = r.matches === true ? 'ok' : r.matches === false ? 'changed' : 'unknown';
+            const mark = { ok: '✓', changed: '✗', unknown: '?' }[kind];
+            cell.className = `audit-status audit-status--${kind}`;
+            cell.innerHTML = `<span class="audit-mark" aria-hidden="true">${mark}</span> ${escapeHtml(r.message)} <span class="audit-checked-at">(checked at ${escapeHtml(at)})</span>`;
+        } catch (err) {
+            if (cell) { cell.className = 'audit-status audit-status--unknown'; cell.textContent = `Could not check: ${err.message}`; }
+        }
+    },
+
+    // The hash printed in a form's footer, looked up: known to these books
+    // (which form, when, by whom) or not.
+    async findByHash() {
+        const input = document.getElementById('audit-hash');
+        const out = document.getElementById('audit-hash-result');
+        const typed = (input ? input.value : '').trim().toLowerCase().replace(/^hash\s+/, '');
+        const byId = /^#?(\d{1,9})$/.exec(typed);
+        const hash = typed.replace(/^#/, '');
+        // the last match's highlight goes before any answer (NEW-64)
+        document.querySelectorAll('#audit-rows tr[data-found]').forEach(tr => tr.removeAttribute('data-found'));
+        if (!byId && !/^[0-9a-f]{16,64}$/.test(hash)) {
+            if (out) out.textContent = 'Type the 16 characters after "Hash" in the footer (or the full 64), or the audit ID after "Audit ID".';
+            return;
+        }
+        try {
+            let rows;
+            if (byId) {
+                try { rows = [await API.get(`/document-audits/${byId[1]}`)]; } catch (e) { rows = []; }
+            } else {
+                rows = await API.get(`/document-audits/verify/${hash}`);
+            }
+            if (!rows.length) {
+                if (out) out.textContent = byId ? `Not known to these books: no generated form has audit ID ${byId[1]}.` : 'Not known to these books: no generated form carries that hash.';
+                return;
+            }
+            const said = rows.map(a => `${a.form || a.doc_type} for ${a.subject || a.doc_key}, generated ${TaxFormsPage._when(a.created_at)}${a.username ? ` by ${a.username}` : ''} (audit #${a.id})`);
+            if (out) out.textContent = `Known to these books: ${said.join('; ')}.`;
+            for (const a of rows) {
+                const tr = document.querySelector(`#audit-rows tr[data-audit="${a.id}"]`);
+                if (tr) tr.setAttribute('data-found', '1');
+            }
+        } catch (err) {
+            if (out) out.textContent = `Could not look it up: ${err.message}`;
+        }
     },
 
     // The 1099-NEC vendors for a year, with what each was paid.

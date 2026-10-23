@@ -59,14 +59,14 @@ USER slowbooks
 
 EXPOSE 3001
 
-# Liveness probe — hits the unauthenticated /health endpoint. Uses
-# urllib from the stdlib so we don't need to install curl just for this.
-# Marks the container unhealthy after 3 consecutive failures (90s),
-# which is short enough for orchestrators to restart promptly and long
-# enough to ride out a single GC pause or migration replay.
+# Liveness probe — hits the unauthenticated /health endpoint via a stdlib
+# urllib script (no curl in the image). The script does NOT follow redirects:
+# with FORCE_HTTPS=true /health answers http with a 307 to https, and chasing
+# that to a non-TLS port would flap the container unhealthy while the worker
+# is fine — so a 2xx or 3xx both count as alive. Marks unhealthy after
+# 3 consecutive failures (90s): short enough for orchestrators to restart
+# promptly, long enough to ride out a single GC pause or migration replay.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,sys; \
-        sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:3001/health', timeout=3).status == 200 else sys.exit(1)" \
-        || exit 1
+    CMD ["python", "scripts/docker_healthcheck.py"]
 
 ENTRYPOINT ["./docker-entrypoint.sh"]

@@ -3,8 +3,8 @@
 Maintainer: **@ContractorKeith**. Owner review is required for merges to
 `main`.
 
-The first supported native build is Apple Silicon (`arm64`) on macOS 14 or
-newer. Intel support needs a separate build and installed-app acceptance pass.
+The first supported native build is Apple Silicon (`arm64`) on macOS 15 or
+newer (macOS 14 through 2.25.x). Intel support needs a separate build and installed-app acceptance pass.
 
 ## Release model
 

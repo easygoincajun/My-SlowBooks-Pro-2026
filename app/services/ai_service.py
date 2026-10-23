@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Cloudflare account IDs are exactly 32 lowercase hex chars.
 # Validate before interpolating into URLs to prevent SSRF.
-CLOUDFLARE_ACCOUNT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+CLOUDFLARE_ACCOUNT_ID_RE = re.compile(r"[a-f0-9]{32}")
 
 # Hosts that must never be accepted as a user-supplied Worker URL.
 _BLOCKED_WORKER_HOSTS = {
@@ -149,7 +149,7 @@ def validate_worker_url(url: str) -> str:
             )
     else:
         # DNS hostname — basic character sanity check.
-        if not re.match(r"^[a-z0-9._-]+$", host):
+        if not re.fullmatch(r"[a-z0-9._-]+", host):
             raise ValueError(f"worker_url host '{host}' contains invalid characters")
         if ".." in host or host.startswith(".") or host.endswith("."):
             raise ValueError(f"worker_url host '{host}' is malformed")
@@ -283,14 +283,16 @@ class ProviderSpec:
 
     key: str  # machine id used in settings + UI
     label: str  # human-readable name for the UI
-    default_model: str  # recommended default as of April 2026
     wire_format: str  # "openai" | "anthropic" | "gemini"
     docs_url: str  # where users go to get a key
     free_tier_hint: str  # 1-line description for the UI
-    # Curated known-good model IDs, shown as a dropdown in the UI. The user
-    # can always pick "Custom…" and type a new one when vendors ship things
-    # we haven't catalogued yet — these lists rot fast.
-    model_choices: tuple = ()
+    # No built-in model list and no built-in default (#254, 2.22.2): the
+    # Settings page lists what the provider offers today, from the
+    # provider's own models endpoint (list_models below), once a key is
+    # entered, and a company chooses from that. The lists shipped here
+    # before went stale between releases (xAI retired every model the Grok
+    # picker offered on 2026-05-15; the Claude picker offered a legacy
+    # Haiku in a release named "Claude's current models").
     needs_account_id: bool = False  # Cloudflare direct REST
     needs_worker_url: bool = False  # Self-hosted CF Worker gateway
     needs_endpoint_url: bool = False  # generic OpenAI-compatible endpoint (custom)
@@ -303,71 +305,37 @@ PROVIDERS: Dict[str, ProviderSpec] = {
     "anthropic": ProviderSpec(
         key="anthropic",
         label="Anthropic Claude",
-        # Claude 5: a new company starts here, so on a current model. A
-        # model saved before (Sonnet 4.6, say) is kept, shown as Custom.
-        default_model="claude-sonnet-5-5",
         wire_format="anthropic",
         docs_url="https://console.anthropic.com/",
         free_tier_hint="Paid only (no free tier)",
-        # Anthropic's current lineup (models overview, October 2026). Haiku
-        # 4.5 is legacy there: it was offered here in its place until the
-        # 2.22.1 gate (NEW-49); a saved Haiku 4.5 is kept, shown as Custom.
-        model_choices=(
-            "claude-fable-5-1",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-haiku-5-5",
-        ),
     ),
     "grok": ProviderSpec(
         key="grok",
         label="xAI Grok",
-        default_model="grok-4-fast",
         wire_format="openai",
         docs_url="https://console.x.ai/",
         free_tier_hint="$25 promotional credit on signup",
-        # xAI renames models often — verify against
-        # https://docs.x.ai/docs/models. Use Custom… for anything newer.
-        model_choices=(
-            "grok-4-fast",
-            "grok-3",
-        ),
     ),
     "groq": ProviderSpec(
         key="groq",
         label="Groq (LPU Cloud)",
-        default_model="llama-3.3-70b-versatile",
         wire_format="openai",
         docs_url="https://console.groq.com/keys",
         free_tier_hint="Free tier with generous rate limits — no credit card",
         # Conservative list — verify against
-        # https://console.groq.com/docs/models. Use Custom… for newer ones.
-        model_choices=(
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-        ),
     ),
     "cloudflare": ProviderSpec(
         key="cloudflare",
         label="Cloudflare Workers AI (direct)",
-        default_model="@cf/meta/llama-3.3-70b-instruct-fp8-fast",
         wire_format="openai",
         docs_url="https://dash.cloudflare.com/profile/api-tokens",
         free_tier_hint="10,000 neurons/day free — requires CF API token",
         needs_account_id=True,
         # Subset of CF's catalogue — full list at
-        # https://developers.cloudflare.com/workers-ai/models/
-        model_choices=(
-            "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "@cf/meta/llama-3.1-8b-instruct",
-            "@cf/mistral/mistral-7b-instruct-v0.1",
-        ),
     ),
     "cloudflare_worker": ProviderSpec(
         key="cloudflare_worker",
         label="Cloudflare Worker Gateway (self-hosted)",
-        default_model="@cf/meta/llama-3.3-70b-instruct-fp8-fast",
         wire_format="openai",
         docs_url="https://github.com/pnwimport/slowbooks-pro-2026/tree/main/cloudflare",
         free_tier_hint=(
@@ -376,41 +344,24 @@ PROVIDERS: Dict[str, ProviderSpec] = {
             "holds a shared secret"
         ),
         needs_worker_url=True,
-        model_choices=(
-            "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "@cf/meta/llama-3.1-8b-instruct",
-            "@cf/mistral/mistral-7b-instruct-v0.1",
-        ),
     ),
     "openai": ProviderSpec(
         key="openai",
         label="OpenAI",
-        default_model="gpt-5.4-mini",
         wire_format="openai",
         docs_url="https://platform.openai.com/api-keys",
         free_tier_hint="Paid only (no free tier)",
-        # OpenAI naming changes per release — verify against
-        # https://platform.openai.com/docs/models. Use Custom… for new ones.
-        model_choices=("gpt-5.4-mini",),
     ),
     "gemini": ProviderSpec(
         key="gemini",
         label="Google Gemini",
-        default_model="gemini-2.5-flash",
         wire_format="gemini",
         docs_url="https://aistudio.google.com/app/apikey",
         free_tier_hint="Free tier for Flash models via AI Studio",
-        model_choices=(
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-        ),
     ),
     "custom": ProviderSpec(
         key="custom",
         label="Custom (OpenAI-compatible)",
-        default_model="",  # user supplies the model ID
         wire_format="openai",
         docs_url="",
         free_tier_hint=(
@@ -421,7 +372,6 @@ PROVIDERS: Dict[str, ProviderSpec] = {
             "so a model running on this machine needs a public HTTPS front."
         ),
         needs_endpoint_url=True,
-        model_choices=(),
     ),
 }
 
@@ -432,8 +382,6 @@ def provider_list() -> list:
         {
             "key": p.key,
             "label": p.label,
-            "default_model": p.default_model,
-            "model_choices": list(p.model_choices),
             "docs_url": p.docs_url,
             "free_tier_hint": p.free_tier_hint,
             "needs_account_id": p.needs_account_id,
@@ -477,16 +425,23 @@ def build_insights_prompt(dashboard: Dict[str, Any], company_name: str = "") -> 
     ar_aging = dashboard.get("ar_aging", {}) or {}
     ap_aging = dashboard.get("ap_aging", {}) or {}
     cash_forecast = dashboard.get("cash_forecast", []) or []
-    dso = dashboard.get("dso", 0) or 0
+    dso = dashboard.get("dso")  # None: nothing paid in the last 30 days (NEW-80)
 
-    total_revenue = sum(float(v or 0) for v in revenue_by_customer.values())
-    total_expenses = sum(float(v or 0) for v in expenses_by_category.values())
-    margin_pct = (
-        ((total_revenue - total_expenses) / total_revenue) * 100
-        if total_revenue > 0
-        else 0
+    # One basis for the headline figures — the ledger's, as the Profit &
+    # Loss counts them (2.22.3 gate, NEW-73 / W-2: revenue was the paid
+    # invoices and expenses the ledger, so a company with journal-entry
+    # income and no invoices read "Net income $-468" in a month its P&L
+    # had at $2,032). Revenue by customer stays a paid-basis section.
+    totals = dashboard.get("totals", {}) or {}
+    total_revenue = float(totals.get("revenue") or 0)
+    total_expenses = float(totals.get("expenses") or 0)
+    net_income = float(totals.get("net_income") or 0)
+    margin_pct = totals.get("margin_pct")
+    margin_line = (
+        f"Margin:      {float(margin_pct):.1f}%"
+        if margin_pct is not None
+        else "Margin:      n/a (no revenue in the period)"
     )
-    net_income = total_revenue - total_expenses
 
     # Top revenue customers
     top_customers = sorted(
@@ -531,20 +486,24 @@ def build_insights_prompt(dashboard: Dict[str, Any], company_name: str = "") -> 
     lines = [
         f"Financial snapshot for {company} — {period_label}",
         "",
-        "=== KEY METRICS ===",
+        "=== KEY METRICS (the ledger, as the Profit & Loss counts them) ===",
         f"Revenue:     ${total_revenue:,.0f}",
         f"Expenses:    ${total_expenses:,.0f}",
         f"Net income:  ${net_income:,.0f}",
-        f"Margin:      {margin_pct:.1f}%",
-        f"DSO:         {float(dso):.1f} days",
+        margin_line,
+        (
+            f"DSO:         {float(dso):.1f} days"
+            if dso is not None
+            else "DSO:         n/a (no invoice or sales receipt dated in the last 30 days is paid in full)"
+        ),
         "",
-        "=== TOP REVENUE CUSTOMERS ===",
+        "=== TOP REVENUE CUSTOMERS (invoices and sales receipts paid in full) ===",
     ]
     lines += [f"  {name}: ${float(amt or 0):,.0f}" for name, amt in top_customers] or [
         "  (none)"
     ]
 
-    lines += ["", "=== TOP EXPENSE CATEGORIES ==="]
+    lines += ["", "=== TOP EXPENSE CATEGORIES (the ledger, by account) ==="]
     lines += [f"  {cat}: ${float(amt or 0):,.0f}" for cat, amt in top_expenses] or [
         "  (none)"
     ]
@@ -567,6 +526,8 @@ def build_insights_prompt(dashboard: Dict[str, Any], company_name: str = "") -> 
 
     lines += [
         "",
+        "Revenue by customer is a paid basis and can total less than Revenue; "
+        "the difference is unpaid or uninvoiced income, not a loss.",
         "Produce the analyst brief now. Use only the numbers above.",
     ]
     return "\n".join(lines)
@@ -684,8 +645,8 @@ def build_request(
     """
     if provider_key not in PROVIDERS:
         raise ValueError(f"Unknown AI provider: {provider_key}")
-    spec = PROVIDERS[provider_key]
-    model = model or spec.default_model
+    if not model:
+        raise ValueError(f"{provider_key}: no model given")
 
     if provider_key == "grok":
         return _openai_style_request(
@@ -718,7 +679,7 @@ def build_request(
     if provider_key == "cloudflare":
         if not account_id:
             raise ValueError("Cloudflare Workers AI requires an account_id")
-        if not CLOUDFLARE_ACCOUNT_ID_RE.match(account_id):
+        if not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch(account_id):
             raise ValueError(
                 "cloudflare_account_id must be exactly 32 lowercase hex characters"
             )
@@ -986,9 +947,207 @@ def generate_insights(
         "insights": text,
         "provider": provider_key,
         "provider_label": PROVIDERS[provider_key].label,
-        "model": model or PROVIDERS[provider_key].default_model,
+        "model": model,
         "generated_at": date.today().isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# The provider's own model list (#254)
+# ---------------------------------------------------------------------------
+
+# Families on an OpenAI-shaped list that don't do chat: embeddings, speech,
+# images, moderation, the old completion models. The list endpoints of
+# OpenAI, Groq and OpenAI-compatible gateways return every model with no
+# field that says what it does, so these are left out by name. xAI,
+# Anthropic, Gemini and Cloudflare each say which models generate text, and
+# are filtered by that instead.
+_NOT_CHAT = re.compile(
+    r"embed|tts|whisper|transcri|audio|speech|realtime|image|dall-e|sora|"
+    r"moderation|guard|davinci|babbage|curie|ada-|computer-use|search-",
+    re.I,
+)
+
+
+def build_models_request(
+    provider_key: str,
+    api_key: str,
+    account_id: Optional[str] = None,
+    worker_url: Optional[str] = None,
+    endpoint_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The GET that lists the provider's models, in the same shape as
+    build_request. Each provider's own endpoint; the key goes in a header,
+    never in the URL (Gemini's chat request carries it in the URL; its
+    list takes `x-goog-api-key`)."""
+    if provider_key not in PROVIDERS:
+        raise ValueError(f"Unknown AI provider: {provider_key}")
+    bearer = {"Authorization": f"Bearer {api_key}"}
+    if provider_key == "anthropic":
+        return {
+            "method": "GET",
+            "url": "https://api.anthropic.com/v1/models?limit=1000",
+            "headers": {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        }
+    if provider_key == "grok":
+        # xAI's own list of its language models (/v1/models has the image
+        # models in it too)
+        return {
+            "method": "GET",
+            "url": "https://api.x.ai/v1/language-models",
+            "headers": bearer,
+        }
+    if provider_key == "groq":
+        return {
+            "method": "GET",
+            "url": "https://api.groq.com/openai/v1/models",
+            "headers": bearer,
+        }
+    if provider_key == "openai":
+        return {
+            "method": "GET",
+            "url": "https://api.openai.com/v1/models",
+            "headers": bearer,
+        }
+    if provider_key == "gemini":
+        return {
+            "method": "GET",
+            "url": "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+            "headers": {"x-goog-api-key": api_key},
+        }
+    if provider_key == "cloudflare":
+        if not account_id or not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch(account_id):
+            raise ValueError("cloudflare: a valid account id is required")
+        return {
+            "method": "GET",
+            "url": (
+                f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+                "/ai/models/search?per_page=100&task=Text%20Generation"
+            ),
+            "headers": bearer,
+        }
+    if provider_key in ("cloudflare_worker", "custom"):
+        # An OpenAI-compatible endpoint usually has /models beside
+        # /chat/completions; a gateway without it answers with an error,
+        # and the page keeps the typed model ID.
+        base = worker_url if provider_key == "cloudflare_worker" else endpoint_url
+        if not base:
+            raise ValueError(f"{provider_key}: no endpoint URL")
+        safe = validate_worker_url(base).rstrip("/")
+        if safe.endswith("/chat/completions"):
+            safe = safe[: -len("/chat/completions")]
+        return {"method": "GET", "url": safe + "/models", "headers": bearer}
+    raise ValueError(f"Unknown AI provider: {provider_key}")
+
+
+def _created(m: Dict[str, Any]) -> float:
+    try:
+        return float(m.get("created") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def parse_models(provider_key: str, body: Any) -> list:
+    """The models a company can choose from, as [{id, label}], from the
+    provider's list response: the text-generating ones, newest first where
+    the provider says when each was released."""
+    if not isinstance(body, dict):
+        return []
+    out: list = []
+    if provider_key == "anthropic":
+        for m in body.get("data") or []:
+            if not isinstance(m, dict) or not m.get("id"):
+                continue
+            # a deprecated model is closed to new adopters; a company
+            # already on one keeps it, shown as Custom
+            if m.get("lifecycle", "active") != "active":
+                continue
+            out.append({"id": m["id"], "label": m.get("display_name") or m["id"]})
+        return out
+    if provider_key == "grok":
+        for m in body.get("models") or []:
+            if not isinstance(m, dict) or not m.get("id"):
+                continue
+            outputs = m.get("output_modalities")
+            if isinstance(outputs, list) and "text" not in outputs:
+                continue
+            out.append({"id": m["id"], "label": m["id"]})
+        return out
+    if provider_key == "gemini":
+        for m in body.get("models") or []:
+            if not isinstance(m, dict) or not m.get("name"):
+                continue
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            mid = str(m["name"]).removeprefix("models/")
+            out.append({"id": mid, "label": m.get("displayName") or mid})
+        return out
+    if provider_key == "cloudflare":
+        for m in body.get("result") or []:
+            if not isinstance(m, dict) or not m.get("name"):
+                continue
+            task = m.get("task") or {}
+            if isinstance(task, dict) and task.get("name") not in (
+                None,
+                "Text Generation",
+            ):
+                continue
+            out.append({"id": m["name"], "label": m["name"]})
+        return out
+    # OpenAI, Groq, and OpenAI-compatible gateways
+    rows = [
+        m
+        for m in (body.get("data") or [])
+        if isinstance(m, dict)
+        and m.get("id")
+        and not _NOT_CHAT.search(str(m["id"]))
+        and m.get("active", True) is not False
+    ]
+    rows.sort(key=_created, reverse=True)
+    return [{"id": m["id"], "label": m["id"]} for m in rows]
+
+
+def list_models(
+    provider_key: str,
+    api_key: str,
+    account_id: Optional[str] = None,
+    worker_url: Optional[str] = None,
+    endpoint_url: Optional[str] = None,
+    client: Optional[httpx.Client] = None,
+) -> list:
+    """Ask the provider which models it offers. The same hardened client and
+    outbound allowlist as every other call; the key is never in a URL or an
+    error message."""
+    try:
+        req = build_models_request(
+            provider_key, api_key, account_id, worker_url, endpoint_url
+        )
+    except ValueError as e:
+        raise AIProviderError(f"{provider_key}: {e}") from e
+    safe_url = _check_outbound_url(provider_key, req["url"])
+    try:
+        if client is None:
+            with _hardened_client(DEFAULT_TIMEOUT) as c:
+                resp = c.request(req["method"], safe_url, headers=req["headers"])
+        else:
+            resp = client.request(req["method"], safe_url, headers=req["headers"])
+    except httpx.HTTPError as e:
+        raise AIProviderError(f"{provider_key}: network error") from e
+    if resp.status_code >= 400:
+        text = resp.text
+        if api_key and api_key in text:
+            text = text.replace(api_key, "***REDACTED***")
+        raise AIProviderError(f"{provider_key}: HTTP {resp.status_code} — {text[:300]}")
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise AIProviderError(f"{provider_key}: the model list was not JSON") from e
+    models = parse_models(provider_key, body)
+    if not models:
+        raise AIProviderError(
+            f"{provider_key}: the provider listed no text models for this key"
+        )
+    return models
 
 
 # ---------------------------------------------------------------------------

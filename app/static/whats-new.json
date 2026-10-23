@@ -1,4 +1,133 @@
 {
+  "2.26.0": {
+    "title": "Direct deposit from the page, and last year beside this one",
+    "items": [
+      "A processed pay run makes its direct deposit (ACH) file from the page: Settings → Direct Deposit keeps the bank's numbers, and the run's view has a Direct deposit file button.",
+      "Profit & Loss and Balance Sheet compare to last year: a Prior Year column with $ and % change, on screen and in the PDF and CSV.",
+      "A session ends when its user is deactivated, their role changes or their password changes, and Sign out ends a copied session too.",
+      "An import's whole error list is shown, and saved as a file.",
+      "On Mac, 2.26.0 needs macOS 15 or later."
+    ]
+  },
+  "2.25.0": {
+    "title": "Several companies on one server",
+    "items": [
+      "Server Edition serves every company file in the list: the sign-in screen asks which company, a session works in the company it chose, and two people work in two companies at once.",
+      "A sign-in whose password opens another company switches to it with one click from the topbar, with the role that company gives; the rest ask for their own password.",
+      "Audit log, backups, bank feeds and settings stay per company; a company made under Companies is set up by the administrator who opens it.",
+      "An API token's request names its company with the X-SlowBooks-Company header; --serve-lan brings every listed company up to date first."
+    ]
+  },
+  "2.24.1": {
+    "title": "Checks from the register, and a ledger export caught",
+    "items": [
+      "Print Check for a check written straight into the bank register or entered as an Expense paid from a bank account: the register row and the expense's view print the same 3-per-page voucher as a bill payment's check, each split line on the stub.",
+      "A QuickBooks Transaction Detail by Account export with an added Account column is refused with the export instructions, instead of being read as sales receipts and payments."
+    ]
+  },
+  "2.24.0": {
+    "title": "Working with your accountant",
+    "items": [
+      "An Accountant role: reads everything, posts and voids its own journal entries, nothing else; Settings → Users invites one with a one-time password and an end date.",
+      "Adjusting entries are marked with who posted them; the Adjusting Journal Entries report lists them, and the P&L and Trial Balance can run without them.",
+      "Closing Date Exceptions: every change made into a closed period with the password, before and after.",
+      "The Accountant's Package: statements, ledger, agings, reconciliations, adjustments, exceptions and the audit log in one zip.",
+      "The IIF export carries checks, card charges, transfers, bill payments and journal entries, and the import takes them back; an accountant's journals post as adjusting entries.",
+      "SlowBooks' own Accountant's Copy: Companies → Send to accountant, the accountant works in their own SlowBooks Pro, and Apply accountant's changes brings their entries back once.",
+      "A categorized bank sheet (the Transaction Pro / SaasAnt layout) imports as posted transactions.",
+      "Reclassify Transactions: move many lines to another account, or class, as one audited change.",
+      "Open screens: the pages, registers and reports opened this session are listed at the top of the sidebar.",
+      "Company file encryption on the desktop: a recovery key shown once, unlocked by an administrator's sign-in."
+    ]
+  },
+  "2.23.5": {
+    "title": "A bookkeeper's first hour",
+    "items": [
+      "A SimpleFIN feed that reports every sign the other way round imports right: tick Reverse signs for that feed on Banking's bank-feed list.",
+      "A bank register you can type into: the register reads oldest to newest, and its last row takes the next entry; Enter posts it.",
+      "A register entry can be split across accounts, a loan payment's principal and interest in one entry.",
+      "Reconcile can show only the lines dated through a day you pick, for several statements worked back to back.",
+      "Account numbers are plainly optional, and the seeded chart's unused accounts can go in one step from the Chart of Accounts.",
+      "A report's drill-down saves as CSV and PDF, like the other reports.",
+      "Settings → Sidebar hides the menu items this company doesn't use.",
+      "Vendors: a search box on the list, and paid this year, all time and a payments CSV on a vendor's page."
+    ]
+  },
+  "2.23.4": {
+    "title": "Every QuickBooks Desktop transaction and timesheet",
+    "items": [
+      "QuickBooks Desktop's Transaction Detail by Account imports under Interoperability, Import from Report CSV: every deposit, check, transfer, journal entry and opening balance as a journal entry.",
+      "The whole file is checked first (accounts, balance, QuickBooks' own totals) and refused whole if anything is off; a second upload posts nothing twice.",
+      "QuickBooks Desktop's Time by Name by Job detail report (or Time by Job by Name) imports under Interoperability, Import from Report CSV, saved as CSV or Excel: every row becomes an approved time entry under its employee, with the hours, notes, service item, billing status and the customer or job label.",
+      "A person not on the Employees list is added from the name and named in the result; imported time is marked as QuickBooks' and a pay run never picks it up.",
+      "The whole file is checked against QuickBooks' own totals first and refused whole if it does not add up; a second upload posts nothing twice.",
+      "The Profit & Loss and Balance Sheet list accounts by number then name, as the Trial Balance does, a sub-account right after its parent and named by its path; Sort by on either lists them by name instead, and the choice rides into the PDF, the CSV and a saved report. The Trial Balance puts accounts with no number last too."
+    ]
+  },
+  "2.23.3": {
+    "title": "Voids that always post, and imported invoices paid once",
+    "items": [
+      "Voiding an entry with a long line memo works on every void path; a value the database refuses answers with a sentence, not an error page (@Justin-Rezamp).",
+      "Invoices the old QuickBooks Online import counted as paid twice get their paid amount, balance and status back on the first start.",
+      "The Interoperability page says QuickBooks Desktop, not QuickBooks 2003 Pro."
+    ]
+  },
+  "2.23.2": {
+    "title": "QuickBooks Online without the API, and the company file encrypted",
+    "items": [
+      "Migrate Data takes QuickBooks Online's own Export data zip (the gear, Tools, Export data): the chart from the Balance Sheet and P&L, every Journal transaction as a journal entry, the Customer and Vendor lists. No Intuit developer app, no production keys.",
+      "Upload QuickBooks Online's A/R Aging Detail report beside the zip and the open invoices and unapplied customer payments come across as documents, so the A/R aging is right from day one.",
+      "A zip or an .xlsx works for every migration source; a Trial Balance on the cash basis is set aside with a note, on the accrual basis it verifies the import.",
+      "Built against a real company's export, 24 years and 9,510 transactions, every block balanced to the cent.",
+      "The QuickBooks Online connector is gone: the page, the Intuit app credentials under Settings, the API routes and the SDKs. It never reached a real company, and the Export data route above replaces it. A company connected back then keeps what the import made, and its old credentials are removed.",
+      "Settings has Company File Encryption: with COMPANY_FILE_ENCRYPTION_SECRET set where SlowBooks Pro starts, an administrator turns it on or off in place, the company's name typed; the file on disk is a SQLCipher file, unreadable without the key (the first of @grungenut's pull requests behind #290).",
+      "Backups of an encrypted company are encrypted under the same key, and a restore leaves the books in the state they are in, whichever state the backup was in.",
+      "An encrypted file with no key, or the wrong one, stops with one sentence before anything opens it; a company that does not turn encryption on is untouched."
+    ]
+  },
+  "2.23.1": {
+    "title": "Entities keep their class",
+    "items": [
+      "A QuickBooks file that keeps its entities apart by class arrives with every posting still coded to its entity: the IIF import carries CLASS on every block type, each line under its own class, creating a class the file names on first sight (#308)",
+      "The report CSV import reads the Class column on invoices, sales receipts, deposits and checks, header and lines (#308)",
+      "The IIF export writes each line's own class, with the document's as the fallback, so a document split across two entities leaves intact (#308)"
+    ]
+  },
+  "2.23.0": {
+    "title": "Both ways with QuickBooks",
+    "items": [
+      "Invoices come in from a QuickBooks Desktop Transaction Detail report saved as CSV, with their lines, their jobs and their numbers; add the report's Open Balance column and each lands open, partly paid or paid (#291)",
+      "The IIF export carries an invoice's job, items and quantities the way Intuit's own sample files do, so a round trip keeps them (#199); the IIF import names the transaction types it doesn't take and counts them instead of dropping them silently (#288)",
+      "A payment or bill payment sent with an Idempotency-Key is booked once however many times the request arrives — the app's own forms send one (#292)",
+      "Editing a posted bill's or invoice's lines leaves a DELETE event in the audit log for every old line, with its amounts (#289)",
+      "The invoice form says that creating an invoice posts it to the books, Draft meaning not yet marked sent (#293); the AI guide, the README and the docs say what stays on your machine and what a cloud model sees (#294)",
+      "Line quantities keep four decimal places: an imported 2.125 stays 2.125 instead of reading 2.12 and losing cents on the next edit."
+    ]
+  },
+  "2.22.3": {
+    "title": "The ledger behind the dashboard",
+    "items": [
+      "Analytics reads the ledger: the revenue trend, expenses by category (each account by its name) and the four KPI cards, with the PDF and the AI brief, count every posting dated in the period as the Profit & Loss does — bills when dated, expenses, register entries, card charges, payroll and journal entries — on one basis, so the margin is net income over revenue (it was paid bills and paid invoices, so a company that books through a bank feed and journal entries saw nothing). Revenue by customer stays paid invoices and says so (#281)",
+      "A receipt attaches to a journal entry, as it does to a bill or an expense: the file behind an entry that only a journal entry can record, such as an owner paying a business expense personally (#281)",
+      "Four fixes from a static review of the source (#284–#287): a bill payment that names no bank is refused whole when Checking is missing, instead of posting without a journal; A/P aging as of a date leaves out bills dated after it; a journal entry is refused rather than stored a cent out when its amounts are not in cents; the 1099 summary and the 1099 forms leave voided bill payments out",
+      "Quitting the desktop app run from source stops its server (#283, @jacilynh), and on Windows the server now leaves with its launcher however the launcher went"
+    ]
+  },
+  "2.22.2": {
+    "title": "Thirteen quick wins",
+    "items": [
+      "AI Insights lists each provider's models from the provider itself, so a new model is a Refresh away, not a new build; a chosen model is kept with its key (#254)",
+      "Write off small balances: on the A/R Aging report, list the invoices under an amount and write them all off at one click, each to its own credit memo; Write Off on any open invoice, in its row and its view (#255)",
+      "A customer's credit limit holds through the API as it does on screen: an invoice, or an estimate converted to one, that would pass it is refused with the limit and what would be owed, and can be sent again allowing it; a sales receipt, paid on the spot, never is (#256)",
+      "W-9 on file on the vendor, shown on the vendor's page and in the 1099 report, which names the vendors still missing one (#257)",
+      "Reconcile with Mark all, Mark through a date and Clear all (#258); make a bank rule from a statement line in To review, with the payee and category filled in (#259)",
+      "A deposit slip: Save PDF and Print on a deposit, listing each payment and the total (#260); an Items filter of what is at or under its reorder point, with how short (#261)",
+      "Cancel a pending or approved time-off request from the HR page — an approved one puts the hours it drew back into the bank and reverses its relief journal — and an employee withdraws a pending one from the portal (#262)",
+      "Form history under Tax Forms: every W-2, W-3, 940 and 941 generated, when and by whom, with Check re-figuring one from today's books and saying whether it still matches; a footer hash can be looked up (#263)",
+      "Alt+B enters a bill and Alt+E an expense (⌥B / ⌥E on a Mac), and the toolbar buttons say their shortcut to a screen reader (#264)",
+      "Every bar, slice and point on the dashboard's and Analytics' charts carries its figure as text (#265); the invoice, bill and journal forms and the chart of accounts are landmarks with a skip link to their lines or filter (#266)"
+    ]
+  },
   "2.22.1": {
     "title": "Claude's current models",
     "items": [

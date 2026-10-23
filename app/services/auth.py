@@ -13,8 +13,10 @@
 import logging
 import os
 import secrets
+import string
 import threading
 import weakref
+from datetime import date
 from pathlib import Path
 
 from argon2 import PasswordHasher
@@ -35,6 +37,22 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
 # Minimum password length for setup
 MIN_PASSWORD_LEN = 8
+
+# A password shown once is read off a screen and typed, often at the same
+# computer (the desktop's invitation): letters and digits with no 0/O or
+# 1/l/I among them (2.24.0, NEW-167). The accountant's copy's passphrase
+# draws on the same alphabet.
+LOOKALIKE_CHARS = "0O1lI"
+READABLE_ALPHABET = "".join(
+    c for c in string.ascii_letters + string.digits if c not in LOOKALIKE_CHARS
+)
+
+
+def one_time_password(length: int = 16) -> str:
+    """A password for one sign-in, shown once: 16 characters from the
+    readable alphabet (57 symbols, 93 bits), replaced at that sign-in."""
+    return "".join(secrets.choice(READABLE_ALPHABET) for _ in range(length))
+
 
 # argon2-cffi defaults: time_cost=3, memory_cost=65536 (64MB), parallelism=4
 # → ~100 ms per hash on a modern CPU, expensive enough to kill brute force.
@@ -76,37 +94,69 @@ def get_session_secret() -> str:
         return env_key
 
     key_path = Path(__file__).resolve().parents[2] / ".slowbooks-session.key"
-    if key_path.exists():
-        try:
-            existing = key_path.read_text(encoding="utf-8").strip()
-            if existing:
-                logger.info("session secret loaded from %s", key_path)
-                return existing
-        except OSError as exc:
-            logger.warning("could not read %s: %s", key_path, exc)
+    return _session_secret_from_file(key_path)
+
+
+def _session_secret_from_file(key_path: Path) -> str:
+    """The key in key_path, made there once if it isn't yet.
+
+    Several server processes can start at once (the Docker image runs two
+    uvicorn workers) and none finds the file on a first start. Each used to
+    write its own key and keep it, so a cookie signed by one worker was
+    refused by the other and people were signed out at random until a
+    restart. Now the first process to create the file wins (a hard link of
+    a finished temp file: atomic, and refused if the file exists), and every
+    other process reads that key.
+    """
+    existing = _read_key(key_path)
+    if existing:
+        logger.info("session secret loaded from %s", key_path)
+        return existing
 
     new_key = secrets.token_urlsafe(48)
-    persisted = False
     try:
         import tempfile
 
         fd, tmp = tempfile.mkstemp(dir=str(key_path.parent), prefix=".session-key-")
-        os.write(fd, new_key.encode())
-        os.close(fd)
+        try:
+            os.write(fd, new_key.encode())
+        finally:
+            os.close(fd)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, str(key_path))
-        persisted = True
+        try:
+            os.link(tmp, str(key_path))
+            logger.info("new session secret written to %s", key_path)
+        except FileExistsError:
+            pass  # another process made it first: its key is the key
+        except OSError:
+            # no hard links here (some network or FAT folders): fall back
+            # to an exclusive create, which is as atomic for the winner
+            try:
+                fd2 = os.open(
+                    str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(fd2, "w", encoding="utf-8") as fh:
+                    fh.write(new_key)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     except OSError as exc:
         logger.warning("could not persist session secret to %s: %s", key_path, exc)
-    if key_path.exists():
-        try:
-            existing = key_path.read_text(encoding="utf-8").strip()
-            if existing:
-                if persisted:
-                    logger.info("new session secret written to %s", key_path)
-                return existing
-        except OSError:
-            pass
+
+    # The winner's file is complete when it appears via link; after an
+    # O_EXCL create it may be empty for a moment, so wait briefly for it.
+    import time
+
+    for _ in range(50):
+        existing = _read_key(key_path)
+        if existing:
+            return existing
+        time.sleep(0.02)
     logger.warning(
         "session secret is NOT persisted -- it will be different every "
         "time the server restarts, which logs everyone out without "
@@ -115,6 +165,16 @@ def get_session_secret() -> str:
         key_path,
     )
     return new_key
+
+
+def _read_key(key_path: Path) -> str:
+    try:
+        return key_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        logger.warning("could not read %s: %s", key_path, exc)
+        return ""
 
 
 def password_is_set(db: Session) -> bool:
@@ -246,6 +306,79 @@ def authenticate(db: Session, password: str, username: str | None = None):
     return user
 
 
+# ---------------------------------------------------------------------------
+# Revocable sessions. The signed session cookie is tamper-proof but it
+# is not revocable on its own: it carried the role and lived until the idle
+# timeout, so deactivating a user, changing their role or resetting their
+# password did not end the sessions they already had. Each user row now keeps
+# a session_version; a sign-in records it, every request re-reads the row and
+# signs the session out when the two differ, and the role is taken from the
+# row rather than the cookie. These two keys are what a session stores.
+# ---------------------------------------------------------------------------
+
+SESSION_USER_ID_KEY = "user_id"
+SESSION_VERSION_KEY = "session_version"
+
+
+def check_session_user(session: dict):
+    """Re-check a signed-in session against its user row. Returns
+    (status, role, version):
+      ("ok", role, version)   keep the session; use this role, store version
+      ("revoked", None, None) the user is gone, inactive, past its end date,
+                              or the version was bumped (deactivated / role
+                              changed / password changed) — the caller signs
+                              the session out
+      ("skip", None, None)    the session names no user row (a legacy cookie
+                              from before the users table, or a desktop
+                              password-only session with no row): nothing to
+                              re-check, left as it was
+
+    A read-only point lookup (one row by primary key) on the company this
+    request works in — cheap enough to run on every request.
+    """
+    user_id = session.get(SESSION_USER_ID_KEY)
+    if not user_id:
+        return ("skip", None, None)
+    import app.database as database
+
+    from app.models.users import User
+
+    db = database.SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user is None or not user.is_active:
+            return ("revoked", None, None)
+        # an invited sign-in past its end date (#345): the same day test the
+        # login path refuses it by, so an ended sign-in stops answering now
+        # rather than at the idle timeout
+        expires_on = getattr(user, "expires_on", None)
+        if expires_on is not None and date.today() > expires_on:
+            return ("revoked", None, None)
+        stored = session.get(SESSION_VERSION_KEY)
+        # A session from before this column carries no version: adopt the
+        # row's current one rather than sign everyone out on the upgrade (the
+        # same courtesy signed_in_to_another_company extends to an old cookie
+        # with no company). A password change since the upgrade still bumps
+        # the row, so the adopted session is caught from then on.
+        if stored is not None and stored != user.session_version:
+            return ("revoked", None, None)
+        return ("ok", user.role, user.session_version)
+    finally:
+        db.close()
+
+
+def bump_session_version(user) -> None:
+    """End this user's existing sessions: raise the row's version so
+    the version each live session stored no longer matches and its next
+    request is signed out. Call on deactivation, a role change, a password
+    change/reset, an end date set in the past, and sign-out. The caller
+    commits; a caller that wants to keep
+    the acting session alive re-stores the new value in its own session."""
+    if user is None:
+        return
+    user.session_version = (user.session_version or 0) + 1
+
+
 def require_auth(request: Request) -> None:
     """
     FastAPI dependency that rejects unauthenticated requests with 401.
@@ -341,13 +474,17 @@ _company_ids_lock = threading.Lock()
 
 
 def _company_id() -> str | None:
-    """This company's id, made the first time it is asked for. A server
-    serves one company, so the id is kept for the process, per database
-    (the test harness and the launcher repoint app.database.SessionLocal)."""
+    """This company's id, made the first time it is asked for. The id is
+    kept for the process, per database (the test harness and the launcher
+    repoint app.database.SessionLocal; a Server Edition server serves
+    several companies, each on an engine of its own: #358)."""
     import app.database as database
 
     factory = database.SessionLocal
-    key = getattr(factory, "kw", {}).get("bind") or factory
+    if database.served_company() is not None:
+        key = database.current_engine()
+    else:
+        key = getattr(factory, "kw", {}).get("bind") or factory
     company = _company_ids.get(key)
     if company:
         return company

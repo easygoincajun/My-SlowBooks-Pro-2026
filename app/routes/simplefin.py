@@ -6,6 +6,14 @@
 # session-authenticated (nothing here is webhook/public). Error messages
 # are fixed strings from SimpleFINError — raw exception text never
 # reaches a response.
+#
+# Who may do what: connecting (claim), remapping accounts and disconnecting
+# change the stored access URL/credentials and the books' wiring, so they
+# are an administrator's — the same boundary as the connection settings
+# under /api/settings and the AI provider key (require_admin). Claim also
+# makes the server POST to a URL decoded from the token, so a non-admin
+# must not be able to reach it at all. Syncing and reading status on an
+# already-connected feed is daily books work and stays the bookkeeper's.
 # ============================================================================
 
 import json
@@ -13,13 +21,14 @@ from datetime import date, datetime, timedelta, timezone
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 from app.schemas.common import StrictModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.banking import BankAccount
+from app.routes._roles import require_admin
 from app.services import simplefin_service
 from app.services.settings_service import get_setting_raw, set_setting
 from app.services.simplefin_service import SimpleFINError
@@ -33,6 +42,9 @@ class ClaimRequest(StrictModel):
 
 class MapRequest(StrictModel):
     mapping: dict[str, int]
+    # Feeds whose bank connection reports amounts the other way round
+    # (deposits negative). Omitted leaves the stored choice as it is.
+    reversed: Optional[list[str]] = None
 
 
 class SyncRequest(StrictModel):
@@ -64,13 +76,17 @@ def status(db: Session = Depends(get_db)):
         "account_map": simplefin_service.parse_account_map(
             get_setting_raw(db, "simplefin_account_map") or "{}"
         ),
+        "reversed": simplefin_service.parse_reversed(
+            get_setting_raw(db, "simplefin_reversed") or "[]"
+        ),
         "accounts": cache if isinstance(cache, list) else [],
     }
 
 
 @router.post("/claim")
-def claim(payload: ClaimRequest, db: Session = Depends(get_db)):
+def claim(payload: ClaimRequest, request: Request, db: Session = Depends(get_db)):
     """Exchange a one-time setup token for the permanent access URL."""
+    require_admin(request)  # connects the feed; also triggers an outbound POST
     try:
         access_url = simplefin_service.claim_access_url(payload.setup_token)
         data = simplefin_service.fetch_accounts(access_url)
@@ -80,14 +96,16 @@ def claim(payload: ClaimRequest, db: Session = Depends(get_db)):
     set_setting(db, "simplefin_access_url", access_url)
     set_setting(db, "simplefin_accounts_cache", json.dumps(accounts))
     set_setting(db, "simplefin_account_map", "{}")
+    set_setting(db, "simplefin_reversed", "[]")
     set_setting(db, "simplefin_last_sync", "")
     db.commit()
     return {"connected": True, "accounts": accounts}
 
 
 @router.post("/map")
-def save_mapping(payload: MapRequest, db: Session = Depends(get_db)):
+def save_mapping(payload: MapRequest, request: Request, db: Session = Depends(get_db)):
     """Store which bridge account feeds which SlowBooks bank account."""
+    require_admin(request)  # the feed's wiring is a connection setting
     _connected(db)
     clean: dict[str, int] = {}
     for sf_id, bank_account_id in payload.mapping.items():
@@ -100,8 +118,15 @@ def save_mapping(payload: MapRequest, db: Session = Depends(get_db)):
             )
         clean[str(sf_id)] = int(bank_account_id)
     set_setting(db, "simplefin_account_map", json.dumps(clean))
+    if payload.reversed is not None:
+        reversed_ids = sorted({str(sf_id) for sf_id in payload.reversed})
+        set_setting(db, "simplefin_reversed", json.dumps(reversed_ids))
+    else:
+        reversed_ids = simplefin_service.parse_reversed(
+            get_setting_raw(db, "simplefin_reversed") or "[]"
+        )
     db.commit()
-    return {"account_map": clean}
+    return {"account_map": clean, "reversed": reversed_ids}
 
 
 @router.post("/sync")
@@ -143,7 +168,12 @@ def sync(payload: Optional[SyncRequest] = None, db: Session = Depends(get_db)):
     except SimpleFINError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    result = simplefin_service.sync_accounts(db, data, account_map)
+    reversed_ids = set(
+        simplefin_service.parse_reversed(
+            get_setting_raw(db, "simplefin_reversed") or "[]"
+        )
+    )
+    result = simplefin_service.sync_accounts(db, data, account_map, reversed_ids)
     result["since"] = start.isoformat()
     set_setting(
         db,
@@ -160,10 +190,12 @@ def sync(payload: Optional[SyncRequest] = None, db: Session = Depends(get_db)):
 
 
 @router.post("/disconnect")
-def disconnect(db: Session = Depends(get_db)):
+def disconnect(request: Request, db: Session = Depends(get_db)):
     """Forget the access URL, mapping, and cache. Imported rows stay."""
+    require_admin(request)  # dropping the stored credential is an admin's
     set_setting(db, "simplefin_access_url", "")
     set_setting(db, "simplefin_account_map", "{}")
+    set_setting(db, "simplefin_reversed", "[]")
     set_setting(db, "simplefin_accounts_cache", "[]")
     set_setting(db, "simplefin_last_sync", "")
     db.commit()

@@ -130,6 +130,62 @@ into your SIEM, or just `tail -f` them for small deployments:
 
 ---
 
+## Several companies on a server
+
+A PostgreSQL server serves exactly one database, the one its `DATABASE_URL`
+names. On a desktop install each company is a file and the app's own picker
+switches between them. Server Edition on Windows (company files, `--serve-lan`)
+serves every company in its list, chosen at the sign-in screen: see
+[server-edition.md](server-edition.md), "Several companies on one server". On a
+PostgreSQL server (Docker, or a native install on PostgreSQL) there is
+no picker to switch to, and the sign-in page never lists companies: it names
+the company the server serves.
+
+**Companies → + New Company** on a server install creates the new company as
+its own PostgreSQL database, migrated and seeded, and lists it under Company
+Files. Nothing serves it until a server points at it. Two ways:
+
+1. **A second server, side by side** (the usual answer). In
+   `docker-compose.yml`, add a service beside `slowbooks` with the database
+   name you typed in the New Company dialog, another port, and its own
+   volumes, then `docker compose up -d`:
+
+   ```yaml
+     slowbooks-second:
+       build: .
+       restart: unless-stopped
+       depends_on:
+         postgres:
+           condition: service_healthy
+       environment:
+         DATABASE_URL: postgresql://${POSTGRES_USER:-bookkeeper}:${POSTGRES_PASSWORD:-bookkeeper}@postgres:5432/YOUR_DATABASE_NAME
+         PGHOST: postgres
+         PGPORT: "5432"
+         PGUSER: ${POSTGRES_USER:-bookkeeper}
+         PGPASSWORD: ${POSTGRES_PASSWORD:-bookkeeper}
+         APP_HOST: "0.0.0.0"
+         APP_PORT: "3001"
+         SLOWBOOKS_PRIVATE_NETWORK: "${SLOWBOOKS_PRIVATE_NETWORK:-1}"
+         PAYROLL_ENCRYPTION_SECRET: "${PAYROLL_ENCRYPTION_SECRET}"
+       ports:
+         - "3002:3001"
+       volumes:
+         - slowbooks_uploads_second:/app/app/static/uploads
+         - slowbooks_backups_second:/app/backups
+   ```
+
+   and the two volumes under `volumes:` at the bottom
+   (`slowbooks_uploads_second:` and `slowbooks_backups_second:`). The second
+   company is at port 3002 with its own first-run setup, its own sign-ins and
+   its own backups. Each service's `docker compose logs <service>` is its own.
+
+2. **One server, one company at a time.** Change the one service's
+   `DATABASE_URL` to the other database and `docker compose up -d` again. A
+   restart signs everyone out of the company it was serving.
+
+Backups are per database: `scripts/backup.sh` inside each container backs up
+the company that container serves.
+
 ## Stopping, restarting, log rotation
 
 ### Docker

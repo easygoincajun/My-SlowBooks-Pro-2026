@@ -45,7 +45,7 @@ files under `migrations/versions/`; for model code, see `app/models/`.
 | `employees` | Employee records for payroll |
 | `pay_runs` | Pay run headers with totals |
 | `pay_stubs` | Individual pay stubs with withholding breakdowns |
-| `qbo_mappings` | QBO ID ↔ Slowbooks ID mapping for sync deduplication |
+| `qbo_mappings` | Which local record a QuickBooks Online record became, written by the connector retired in 2.23.2; read so those documents still void and edit right |
 | `attachments` | File attachments linked to invoices, bills, etc. |
 | `bank_rules` | Pattern-matching rules for auto-categorizing bank imports |
 | `budgets` | Budget amounts by account and period |

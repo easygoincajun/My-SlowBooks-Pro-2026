@@ -32,7 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
-from app.services import company_service, storage
+from app.services import company_file, company_service, storage
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +290,12 @@ def _company_file_needs_folder(path: Path) -> bool:
     (another program is writing it) may still need the folder."""
     if not path.is_file():
         return False
+    # An encrypted company file (#290) cannot be read here, and the read
+    # below would only write -wal and -shm files beside it for nothing. It
+    # was encrypted on this version or a later one, so it keeps nothing in
+    # the shared folder.
+    if company_file.is_encrypted_file(path):
+        return False
     # Reading a WAL-mode company read-only made SQLite create empty -wal and
     # -shm files beside it, next to companies nobody had opened (macbase1
     # NEW-17), so their absence no longer meant "never opened". A WAL-mode
@@ -302,7 +308,13 @@ def _company_file_needs_folder(path: Path) -> bool:
         uri = path.resolve().as_uri() + (
             "?mode=ro&immutable=1" if idle_wal else "?mode=ro"
         )
-        with closing(sqlite3.connect(uri, uri=True, timeout=BUSY_SECONDS)) as conn:
+        # the engine's own SQLite library, never a second one on a company
+        # file (NEW-156)
+        from app.services.company_file import sqlite_module
+
+        with closing(
+            sqlite_module().connect(uri, uri=True, timeout=BUSY_SECONDS)
+        ) as conn:
             tables = {
                 row[0]
                 for row in conn.execute(
@@ -315,12 +327,12 @@ def _company_file_needs_folder(path: Path) -> bool:
                     row[0]
                     for row in conn.execute("SELECT version_num FROM alembic_version")
                 ]
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError, sqlite_module().OperationalError):
         logger.warning(
             "Could not read company file %s; keeping the shared folder", path
         )
         return True
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, sqlite_module().DatabaseError):
         return False  # not a database, or damaged beyond opening
     return _needs_folder(tables, revisions)
 

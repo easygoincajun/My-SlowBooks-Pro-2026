@@ -25,9 +25,16 @@ WEBROOT="/var/www/dl.slowbookspro.com"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# The lowest macOS the release's Mac app opens on (its LSMinimumSystemVersion,
+# set by the build runner's Homebrew libraries). Installs from 2.26.0 on skip
+# an update their Mac can't open; older ones go to the install page, which
+# says it.
+MACOS_MINIMUM="${MACOS_MINIMUM:-15.0}"
+
 cat > "$TMP/latest.json" <<JSON
 {
   "version": "$VER",
+  "macos_minimum": "$MACOS_MINIMUM",
   "download_url": "https://www.slowbookspro.com/#install",
   "notes_url": "https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/releases/tag/$TAG"
 }

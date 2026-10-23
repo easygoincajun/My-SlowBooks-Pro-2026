@@ -246,6 +246,20 @@ def export_csv(
     writer.writerow(["period", "start", "", s.isoformat()])
     writer.writerow(["period", "end", "", e.isoformat()])
 
+    # the headline figures, on the ledger basis the page and the PDF show
+    totals = snap.get("totals") or {}
+    for key in ("revenue", "expenses", "net_income"):
+        writer.writerow(["totals", key, "ledger", f"{float(totals.get(key) or 0):.2f}"])
+    margin = totals.get("margin_pct")
+    writer.writerow(
+        [
+            "totals",
+            "margin_pct",
+            "ledger",
+            "" if margin is None else f"{float(margin):.1f}",
+        ]
+    )
+
     for customer, revenue in (snap.get("revenue_by_customer") or {}).items():
         writer.writerow(
             ["revenue_by_customer", _csv_safe(customer), "", f"{revenue:.2f}"]
@@ -267,7 +281,8 @@ def export_csv(
         for vendor, amount in (by_vendor or {}).items():
             writer.writerow(["ap_aging", bucket, _csv_safe(vendor), f"{amount:.2f}"])
 
-    writer.writerow(["dso", "days", "", f"{float(snap.get('dso') or 0):.2f}"])
+    dso = snap.get("dso")
+    writer.writerow(["dso", "days", "", "" if dso is None else f"{float(dso):.2f}"])
 
     for entry in snap.get("cash_forecast") or []:
         writer.writerow(
@@ -481,6 +496,20 @@ def _key_provider(db: Session, settings: dict, api_key: str) -> str:
     return _KEY_OWNER_UNKNOWN
 
 
+def _require_model(cfg: dict) -> None:
+    """A model chosen, or a 400 that says so. There is no built-in default
+    any more (#254): the page lists the provider's models and the company
+    picks one."""
+    if not (cfg.get("model") or "").strip():
+        provider = cfg.get("provider") or ""
+        label = getattr(AI_PROVIDERS.get(provider), "label", provider)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No model chosen for {label}. Pick one in Settings → "
+            "AI Insights (the list comes from the provider), then Test.",
+        )
+
+
 def _require_key(cfg: dict) -> None:
     """A provider chosen and its own key saved, or a 400 that says which
     is missing (gate round 2, W-2: a provider with no key of its own was
@@ -519,7 +548,7 @@ def _ai_error_detail(exc: AIProviderError) -> str:
 
 
 # Tiny in-process cache so the UI can poll without hammering paid APIs.
-# Keyed by (provider, model, period_name) → (expiry_epoch, payload_dict).
+# Keyed by (company, provider, model, period_name) → (expiry_epoch, payload_dict).
 # Cache TTL is 10 minutes. Cleared on config changes.
 _AI_CACHE: dict = {}
 _AI_CACHE_TTL_SECONDS = 600
@@ -639,7 +668,7 @@ def put_ai_config(
     endpoint_url_raw = (payload.endpoint_url or "").strip()
 
     # SSRF guard #1: CF account_id must be exactly 32 hex chars.
-    if account_id and not CLOUDFLARE_ACCOUNT_ID_RE.match(account_id):
+    if account_id and not CLOUDFLARE_ACCOUNT_ID_RE.fullmatch(account_id):
         raise HTTPException(
             status_code=400,
             detail="cloudflare_account_id must be exactly 32 lowercase hex characters",
@@ -713,6 +742,88 @@ def put_ai_config(
     return get_ai_config(db)
 
 
+class AIModelsRequest(StrictModel):
+    """What the Settings page has in its boxes right now, saved or not: the
+    provider picked, a key typed and not yet saved, the provider's extras.
+    Each overrides the saved value; nothing here is stored."""
+
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    cloudflare_account_id: Optional[str] = None
+    worker_url: Optional[str] = None
+    endpoint_url: Optional[str] = None
+
+
+def _list_models_for(db: Session, overrides: dict) -> dict:
+    cfg = _read_ai_config(db)  # its api_key is the saved provider's own (NEW-46)
+    saved_provider = cfg.get("provider") or ""
+    for k, v in overrides.items():
+        if isinstance(v, str) and v.strip():
+            cfg[k] = v.strip()
+    provider = cfg.get("provider") or ""
+    if not provider:
+        raise HTTPException(
+            status_code=400,
+            detail="Pick a provider first, then list its models.",
+        )
+    if provider not in AI_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown AI provider: {provider}")
+    # a typed key is the form's; the saved one counts only for the provider
+    # it was saved with (a provider picked in the form but not saved yet has
+    # no key of its own)
+    typed = (overrides.get("api_key") or "").strip()
+    saved = cfg.get("api_key") if provider == saved_provider else ""
+    key = typed or saved or ""
+    if not key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No API key saved for {AI_PROVIDERS[provider].label}. Enter its "
+                "key, then Refresh models"
+            ),
+        )
+    _require_provider_extras(provider, cfg)
+    from app.services.ai_service import list_models
+
+    try:
+        models = list_models(
+            provider,
+            key,
+            account_id=cfg.get("cloudflare_account_id") or None,
+            worker_url=cfg.get("worker_url") or None,
+            endpoint_url=cfg.get("endpoint_url") or None,
+        )
+    except AIProviderError as e:
+        raise HTTPException(status_code=502, detail=_ai_error_detail(e))
+    return {
+        "provider": provider,
+        "provider_label": AI_PROVIDERS[provider].label,
+        "models": models,
+    }
+
+
+@router.get("/ai-models")
+def get_ai_models(request: Request, db: Session = Depends(get_db)):
+    """The models the configured provider offers, from the provider itself
+    (#254): what the Settings page's model picker lists. Uses the saved key,
+    which is sent only to its own provider; the administrator's, like the
+    key. Returns `{provider, provider_label, models: [{id, label}]}`."""
+    require_admin(request)
+    return _list_models_for(db, {})
+
+
+@router.post("/ai-models")
+def post_ai_models(
+    payload: AIModelsRequest, request: Request, db: Session = Depends(get_db)
+):
+    """The same list for what the Settings page holds now — the provider
+    picked and a key typed but not yet saved (gate round 1, NEW-56 / W-4: a
+    first key could not reach the list, since Save asked for a model and the
+    list asked for a saved key). Nothing in the body is stored."""
+    require_admin(request)
+    return _list_models_for(db, payload.model_dump())
+
+
 @router.post("/ai-config/test")
 @limiter.limit("20/minute")
 def test_ai_config(request: Request, db: Session = Depends(get_db)):
@@ -731,7 +842,8 @@ def test_ai_config(request: Request, db: Session = Depends(get_db)):
     _require_provider_extras(provider, cfg)
 
     spec = AI_PROVIDERS[provider]
-    model = cfg.get("model") or spec.default_model
+    _require_model(cfg)
+    model = cfg["model"]
 
     try:
         # Smallest possible round-trip: ask for a one-word reply.
@@ -784,13 +896,16 @@ def ai_insights(
     _require_key(cfg)
     _require_provider_extras(provider, cfg)
 
-    spec = AI_PROVIDERS[provider]
-    model = cfg.get("model") or spec.default_model
+    _require_model(cfg)
+    model = cfg["model"]
 
     s, e, label = _resolve_period(period, start_date, end_date)
 
     # Cache check
-    cache_key = (provider, model, label, s.isoformat(), e.isoformat())
+    # the company's too: a Server Edition server serves several (#358)
+    from app.database import current_url
+
+    cache_key = (current_url(), provider, model, label, s.isoformat(), e.isoformat())
     now = time.time()
     if not force and cache_key in _AI_CACHE:
         expiry, cached_payload = _AI_CACHE[cache_key]
@@ -890,8 +1005,8 @@ def run_ai_action(
     _require_key(cfg)
     _require_provider_extras(provider, cfg)
 
-    spec = AI_PROVIDERS[provider]
-    model = cfg.get("model") or spec.default_model
+    _require_model(cfg)
+    model = cfg["model"]
 
     # Period is only meaningful for actions that declared uses_period=True;
     # actions that don't use it just ignore the dates. Always resolve so
@@ -948,8 +1063,8 @@ def ai_query(
     _require_key(cfg)
     _require_provider_extras(provider, cfg)
 
-    spec = AI_PROVIDERS[provider]
-    model = cfg.get("model") or spec.default_model
+    _require_model(cfg)
+    model = cfg["model"]
 
     # Build tool executor that captures DB session
     def tool_exec(tool_name: str, **params):

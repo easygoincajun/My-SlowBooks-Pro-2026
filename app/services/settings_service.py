@@ -39,12 +39,39 @@ ENCRYPTED_SETTINGS_KEYS = frozenset(
         "paypal_client_secret",
         "square_access_token",
         "square_webhook_signature_key",
-        "qbo_client_secret",
-        "qbo_access_token",
-        "qbo_refresh_token",
         "simplefin_access_url",
+        # the bank account an ACH file debits (discussion #211)
+        "ach_company_account",
     }
 )
+
+
+# The settings of the QuickBooks Online connector, retired in 2.23.2
+# (services/qbo_common.py says why): an Intuit app's credentials and the
+# tokens of a connection, with no reader left. A company file that holds
+# them is cleaned on the first start after upgrading.
+RETIRED_SETTINGS_KEYS = (
+    "qbo_enabled",
+    "qbo_client_id",
+    "qbo_client_secret",
+    "qbo_redirect_uri",
+    "qbo_environment",
+    "qbo_access_token",
+    "qbo_refresh_token",
+    "qbo_realm_id",
+    "qbo_token_expires_at",
+    "qbo_oauth_state",
+)
+
+
+def remove_retired_settings(db: Session) -> int:
+    """Delete the rows of RETIRED_SETTINGS_KEYS; the number removed."""
+    rows = db.query(Settings).filter(Settings.key.in_(RETIRED_SETTINGS_KEYS)).all()
+    for row in rows:
+        db.delete(row)
+    if rows:
+        db.commit()
+    return len(rows)
 
 
 SECRET_PLACEHOLDER = "********"
@@ -186,6 +213,15 @@ _KEEP_TYPED_DIGITS = {"invoice_next_number", "estimate_next_number"}
 _DATE_SETTINGS = {"closing_date": "Closing date"}
 
 _DIGITS = re.compile(r"[0-9]+")
+# The two identifiers a bank prints on its ACH origination sheet: what the
+# bank assigned, letters or digits, in 10-character fields (nacha_export).
+# The company account number is stored as typed; the file's field takes 17
+# characters of it.
+_ACH_ID_SETTINGS = {
+    "ach_immediate_origin": "Immediate origin",
+    "ach_company_id": "Company identification",
+}
+_ALNUM = re.compile(r"[0-9A-Za-z]+")
 
 
 class SettingValueError(ValueError):
@@ -225,6 +261,27 @@ def clean_setting_value(key: str, value) -> str:
                 wanted = f"a whole number, {low} or more"
             raise SettingValueError(f"{label} must be {wanted}.")
         return text if key in _KEEP_TYPED_DIGITS else str(number)
+    if key == "ach_bank_routing":
+        from app.services.nacha_export import validate_routing_number
+
+        if text == "":
+            return ""
+        if not validate_routing_number(text):
+            raise SettingValueError(
+                "Bank routing number must be the 9-digit ABA routing number "
+                "of the company's bank, as printed on the ACH origination "
+                "agreement."
+            )
+        return text
+    if key in _ACH_ID_SETTINGS:
+        if text == "":
+            return ""
+        if not _ALNUM.fullmatch(text) or len(text) > 10:
+            raise SettingValueError(
+                f"{_ACH_ID_SETTINGS[key]} must be up to 10 letters or digits, "
+                "as the bank assigned it."
+            )
+        return text
     if key in _DATE_SETTINGS:
         if text == "":
             return ""

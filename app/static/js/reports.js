@@ -27,6 +27,10 @@ const ReportsPage = {
         'general-ledger':       { label: 'General Ledger',     open: (p) => ReportsPage.generalLedger(p), keep: ['class_id'] },
         'income-by-customer':   { label: () => T('Income by Customer'), open: (p) => ReportsPage.incomeByCustomer(p) },
         'trial-balance':        { label: 'Trial Balance',      open: (p) => ReportsPage.trialBalance(p) },
+        'adjusting-entries':    { label: 'Adjusting Journal Entries', open: (p) => ReportsPage.adjustingEntries(p) },
+        'closing-date-exceptions': { label: 'Closing Date Exceptions', open: (p) => ReportsPage.closingDateExceptions(p) },
+        'accountants-package':  { label: "Accountant's Package", open: (p) => ReportsPage.accountantsPackage(p) },
+        'reclassify':           { label: 'Reclassify Transactions', open: (p) => ReportsPage.reclassify(p) },
         'cash-flow':            { label: 'Cash Flow Statement', open: (p) => ReportsPage.cashFlow(p) },
         'job-profitability':    { label: () => T('Job Profitability'),  open: (p) => ReportsPage.jobProfitability(p) },
         'job-budget-vs-actual': { label: () => T('Job Budget vs Actual'), open: (p) => ReportsPage.jobBudgetVsActual(p) },
@@ -352,6 +356,10 @@ const ReportsPage = {
                 ${card('income-by-customer', T('Income by Customer'), Terms.isNonprofit() ? 'Contribution totals per donor' : 'Sales totals per customer')}
                 ${card('customer-statement', T('Customer Statement'), Terms.text('Invoice/payment history PDF'))}
                 ${card('trial-balance', 'Trial Balance', 'Debits and credits by account')}
+                ${card('adjusting-entries', 'Adjusting Journal Entries', 'The accountant\'s adjustments for a period, with who posted each')}
+                ${card('closing-date-exceptions', 'Closing Date Exceptions', 'Every change made into a closed period with the password, before and after')}
+                ${card('accountants-package', "Accountant's Package", 'One zip: statements, ledger, agings, reconciliations, adjustments, exceptions and the audit log')}
+                ${card('reclassify', 'Reclassify Transactions', 'Move many lines from one account to another, or onto a class, as one audited change')}
                 ${card('cash-flow', 'Cash Flow', 'Operating, investing, financing')}
                 ${card('1099-summary', '1099 Summary', 'Vendor payments for 1099 filing')}
                 ${card('budget-vs-actual', 'Budget vs Actual', 'Monthly budget variance analysis')}
@@ -507,6 +515,11 @@ const ReportsPage = {
     async openDrillDown(accountId, accountName, startDate, endDate, classId = null, className = null, from = null, extra = {}) {
         accountId = parseInt(accountId, 10);
         if (!accountId) { toast('No account_id on this row', 'error'); return; }
+        // A Balance Sheet line gives only its as-of date: the list starts on
+        // January 1 of that date's year, not of this year — a date in an
+        // earlier year (a prior-year comparison) otherwise has its start
+        // after its end, and the dates are refused.
+        if (!startDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate || '')) startDate = `${endDate.slice(0, 4)}-01-01`;
         classId = classId ? parseInt(classId, 10) || null : null;
         const jobGiven = extra && extra.job_id !== undefined && extra.job_id !== null && extra.job_id !== '';
         const jobId = jobGiven ? parseInt(extra.job_id, 10) : null;
@@ -546,6 +559,10 @@ const ReportsPage = {
             const v = ReportsPage._view(back);
             const backParams = v.asOf ? { as_of_date: endDate } : { start_date: startDate, end_date: endDate };
             if ((v.keep || []).includes('class_id') && classId) backParams.class_id = classId;
+            // Back to the P&L or Balance Sheet returns to the dates and
+            // choices it was showing — a prior-year drill-down runs on last
+            // year's dates, which are not the report's own.
+            if (ReportsPage._viewReturn[back]) Object.assign(backParams, ReportsPage._viewReturn[back]);
             backBtn = ReportsPage._backButton(back, backParams, backToClass ? (className || T('Class')) : '');
         } else if (backPage) {
             backBtn = ReportsPage._backPageButton('classes', backPage, { start_date: startDate, end_date: endDate }, className || T('Class'));
@@ -581,7 +598,10 @@ const ReportsPage = {
             const accounts = await ReportsPage._drillAccounts(back, range, params.class_id);
             const data = await API.get(`/reports/account-transactions?${q.toString()}`);
             if (jobOn && !jobName) jobName = data.job_name;
-            $('#modal-title').textContent = title(data.account.name, data.class_name);
+            // the title reads as the row that opened it (a statement's row
+            // says "4000 - Service Income", W-8) while it shows that account;
+            // once the toolbar re-scopes it, the server's name
+            $('#modal-title').textContent = title(accountName && data.account.id === accountId ? accountName : data.account.name, data.class_name);
             // Rebuilt from the address, the class's name arrives now
             if (backToClass && !className && data.class_name) {
                 const btn = $('#modal-body [data-back-to="profit-loss-class"]');
@@ -626,7 +646,11 @@ const ReportsPage = {
             }).join('');
             const entries = data.entries || [];
             const closing = entries.length ? entries[entries.length - 1].running_balance : data.opening_balance;
+            // Save CSV / Save PDF, as the other reports have (#333): the
+            // account and range on the screen, the class and job with them
+            const exportQs = q.toString();
             return `<div id="drilldown-body" style="font-size:11px; color:var(--gray-500);">
+                ${ReportsPage._exportButtons('account-transactions', exportQs)}
                 <p style="margin-bottom:8px; color:var(--gray-500); font-size:12px;">
                     ${escapeHtml(data.account.number || '')} · ${escapeHtml(data.account.name)}
                     ${data.class_name ? `&middot; ${T('Class')}: <strong>${escapeHtml(data.class_name)}</strong>` : ''}
@@ -1032,74 +1056,153 @@ const ReportsPage = {
             await ReportsPage.profitLossOfClass(prefill.class_id, null, prefill);
             return;
         }
-        await ReportsPage.openPeriodModal(T("Profit & Loss"), "this_year_to_date", async (_period, range) => {
-            const data = await API.get(`/reports/profit-loss?start_date=${range.start}&end_date=${range.end}`);
-            const pdfBtn = ReportsPage._exportButtons('profit-loss', `start_date=${range.start}&end_date=${range.end}`);
+        // Compare to the same period a year earlier, with the $ and %
+        // change columns on or off: toolbar checkboxes whose choices ride on
+        // the address, saved reports and the PDF / CSV links.
+        const opts = { ...ReportsPage._statementOpts(prefill) };
+        const plParams = { ...opts.params, ...ReportsPage._compareParams(prefill) };
+        await ReportsPage.openPeriodModal(T("Profit & Loss"), "this_year_to_date", async (_period, range, params) => {
+            const cmp = params.compare === 'prior_year';
+            const show = !params.hide_changes;
+            ReportsPage._cmpSync(params);
+            const data = await API.get(`/reports/profit-loss?start_date=${range.start}&end_date=${range.end}${ReportsPage._sortQs(params)}${cmp ? '&compare=prior_year' : ''}`);
+            const prior = cmp ? data.prior : null;
+            ReportsPage._viewReturn['profit-loss'] = { ...ReportsPage._cmpKeep(params), start_date: range.start, end_date: range.end };
+            const pdfBtn = ReportsPage._exportButtons('profit-loss', `start_date=${range.start}&end_date=${range.end}${ReportsPage._sortQs(params)}${ReportsPage._cmpQs(params)}`);
             // Build the onclick payload outside the template so we can
             // HTML-escape the embedded double quotes from JSON.stringify().
             // Otherwise the inner " breaks the outer onclick="…" attribute.
-            const drillCall = (i) => escapeHtml(
-                `ReportsPage.openDrillDown(${i.account_id},${JSON.stringify(i.account_name)},${JSON.stringify(range.start)},${JSON.stringify(range.end)},null,null,'profit-loss')`
+            const drillCall = (i, start, end) => escapeHtml(
+                `ReportsPage.openDrillDown(${i.account_id},${JSON.stringify(i.account_label || i.account_name)},${JSON.stringify(start)},${JSON.stringify(end)},null,null,'profit-loss')`
             );
+            const cols = ReportsPage._cmpCols(prior, show);
+            const figures = (cur, before, item) => ReportsPage._cmpCells(cur, before, prior, show,
+                item && prior ? drillCall(item, prior.start_date, prior.end_date) : null);
             const section = (items) => {
-                if (!items.length) return `<tr><td colspan="2" style="color:var(--gray-400);">None</td></tr>`;
+                if (!items.length) return `<tr><td colspan="${cols}" style="color:var(--gray-400);">None</td></tr>`;
                 return items.map(i =>
                     `<tr><td style="padding-left:24px;">
                         <a href="javascript:void(0)" style="color:var(--text-link); text-decoration:none;"
-                           onclick="${drillCall(i)}">${escapeHtml(i.account_name)}</a>
-                        </td><td class="amount">${formatCurrency(i.amount)}</td></tr>`
+                           onclick="${drillCall(i, range.start, range.end)}">${escapeHtml(i.account_label || i.account_name)}</a>
+                        </td>${figures(i.amount, i.prior_amount, i)}</tr>`
                 ).join("");
             };
+            const head = (label) => `<tr><td><strong>${label}</strong></td>${'<td></td>'.repeat(cols - 1)}</tr>`;
+            const total = (label, key, style) => `<tr style="${style}"><td>${label}</td>${figures(data[key], prior ? prior[key] : 0)}</tr>`;
+            const sub = 'font-weight:600; background:var(--gray-50);';
             return `${pdfBtn}
-                <p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)}</p>
+                <p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)}${prior ? ` &nbsp;vs&nbsp; ${formatDate(prior.start_date)} &mdash; ${formatDate(prior.end_date)}` : ''}</p>
                 <div class="table-container"><table>
-                    <thead><tr><th scope="col">Account</th><th scope="col" class="amount">Amount</th></tr></thead>
+                    <thead><tr><th scope="col">Account</th>${ReportsPage._cmpHead(prior, show)}</tr></thead>
                     <tbody>
-                        <tr><td><strong>${T('Income')}</strong></td><td></td></tr>
+                        ${head(T('Income'))}
                         ${section(data.income)}
-                        <tr style="font-weight:600; background:var(--gray-50);"><td>${T('Total Income')}</td><td class="amount">${formatCurrency(data.total_income)}</td></tr>
-                        <tr><td><strong>Cost of Goods Sold</strong></td><td></td></tr>
+                        ${total(T('Total Income'), 'total_income', sub)}
+                        ${head('Cost of Goods Sold')}
                         ${section(data.cogs)}
-                        <tr style="font-weight:600; background:var(--gray-50);"><td>Gross Profit</td><td class="amount">${formatCurrency(data.gross_profit)}</td></tr>
-                        <tr><td><strong>Expenses</strong></td><td></td></tr>
+                        ${total('Gross Profit', 'gross_profit', sub)}
+                        ${head('Expenses')}
                         ${section(data.expenses)}
-                        <tr style="font-weight:600; background:var(--gray-50);"><td>Total Expenses</td><td class="amount">${formatCurrency(data.total_expenses)}</td></tr>
-                        <tr style="font-weight:700; font-size:15px; background:var(--primary-light);"><td>${T('Net Income')}</td><td class="amount">${formatCurrency(data.net_income)}</td></tr>
+                        ${total('Total Expenses', 'total_expenses', sub)}
+                        ${total(T('Net Income'), 'net_income', 'font-weight:700; font-size:15px; background:var(--primary-light);')}
                     </tbody>
                 </table></div>`;
-        }, "Dates", false, { reportType: 'profit_loss', view: 'profit-loss', prefill });
+        }, "Dates", false, { reportType: 'profit_loss', view: 'profit-loss', prefill, params: plParams, toolbar: opts.toolbar + ReportsPage._compareToolbar(plParams, 'Compare to same period last year'), wide: plParams.compare === 'prior_year' });
+    },
+
+    // The accounts' order on the two statements (#326): by number, then
+    // name, as the Trial Balance lists them (the server's default), or by
+    // name; a sub-account under its parent either way. The choice is a
+    // report param, so it rides on the address, into a saved report and
+    // into the PDF and CSV, and the toolbar's select is drawn once beside
+    // Dates.
+    _sortOpts(prefill) {
+        const sort = prefill && prefill.sort === 'name' ? 'name' : '';
+        const params = sort ? { sort } : {};
+        const toolbar = `<div class="form-group">
+                    <label for="report-sort-select">Sort by</label>
+                    <select id="report-sort-select" data-no-search onchange="ReportsPage.setParam('sort', this.value === 'name' ? 'name' : '')">
+                        <option value="number" ${sort ? '' : 'selected'}>Account number</option>
+                        <option value="name" ${sort ? 'selected' : ''}>Account name</option>
+                    </select>
+                </div>`;
+        return { params, toolbar };
+    },
+    _sortQs(params) {
+        return (params && params.sort === 'name' ? '&sort=name' : '') + ReportsPage._adjQs(params);
+    },
+    // "Without adjusting entries" (#341): the statement before the
+    // accountant's corrections. Rides on the address and the exports.
+    _adjQs(params) {
+        return params && params.exclude_adjusting ? '&exclude_adjusting=true' : '';
+    },
+    _adjOpts(prefill) {
+        const on = !!(prefill && (prefill.exclude_adjusting === 'true' || prefill.exclude_adjusting === true || prefill.exclude_adjusting === '1'));
+        const params = on ? { exclude_adjusting: 'true' } : {};
+        const toolbar = `<div class="form-group">
+                    <label style="display:flex; align-items:center; gap:6px; font-weight:400;">
+                        <input type="checkbox" id="report-exclude-adjusting" ${on ? 'checked' : ''} onchange="ReportsPage.setParam('exclude_adjusting', this.checked ? 'true' : '')">
+                        Without adjusting entries
+                    </label>
+                </div>`;
+        return { params, toolbar };
+    },
+    // the two statements' toolbar: the sort choice and the adjusting box
+    _statementOpts(prefill) {
+        const sort = ReportsPage._sortOpts(prefill);
+        const adj = ReportsPage._adjOpts(prefill);
+        return { params: { ...sort.params, ...adj.params }, toolbar: sort.toolbar + adj.toolbar };
     },
 
     async balanceSheet(prefill) {
-        await ReportsPage.openPeriodModal(T("Balance Sheet"), "this_year_to_date", async (_period, params) => {
-            const data = await API.get(`/reports/balance-sheet?as_of_date=${params.as_of_date}`);
-            const pdfBtn = ReportsPage._exportButtons('balance-sheet', `as_of_date=${params.as_of_date}`);
-            const drillCall = (i) => escapeHtml(
-                `ReportsPage.openDrillDown(${i.account_id},${JSON.stringify(i.account_name)},null,${JSON.stringify(params.as_of_date)},null,null,'balance-sheet')`
+        // Compare to the same date a year earlier, as the P&L does.
+        const opts = { ...ReportsPage._sortOpts(prefill) };
+        const bsParams = { ...opts.params, ...ReportsPage._compareParams(prefill) };
+        await ReportsPage.openPeriodModal(T("Balance Sheet"), "this_year_to_date", async (_period, params, live) => {
+            const cmp = live.compare === 'prior_year';
+            const show = !live.hide_changes;
+            ReportsPage._cmpSync(live);
+            const asOf = params.as_of_date;
+            const data = await API.get(`/reports/balance-sheet?as_of_date=${asOf}${ReportsPage._sortQs(live)}${cmp ? '&compare=prior_year' : ''}`);
+            const prior = cmp ? data.prior : null;
+            ReportsPage._viewReturn['balance-sheet'] = { ...ReportsPage._cmpKeep(live), as_of_date: asOf };
+            const pdfBtn = ReportsPage._exportButtons('balance-sheet', `as_of_date=${asOf}${ReportsPage._sortQs(live)}${ReportsPage._cmpQs(live)}`);
+            const drillCall = (i, date) => escapeHtml(
+                `ReportsPage.openDrillDown(${i.account_id},${JSON.stringify(i.account_label || i.account_name)},null,${JSON.stringify(date)},null,null,'balance-sheet')`
             );
+            const cols = ReportsPage._cmpCols(prior, show);
+            const figures = (cur, before, item) => ReportsPage._cmpCells(cur, before, prior, show,
+                item && prior && item.account_id ? drillCall(item, prior.as_of_date) : null);
+            // A computed line (net income to date) has no account to open.
+            const name = (i) => i.account_id
+                ? `<a href="javascript:void(0)" style="color:var(--text-link); text-decoration:none;"
+                       onclick="${drillCall(i, asOf)}">${escapeHtml(i.account_label || i.account_name)}</a>`
+                : escapeHtml(i.account_name);
             const section = (items) => items.map(i =>
-                `<tr><td style="padding-left:24px;">
-                    <a href="javascript:void(0)" style="color:var(--text-link); text-decoration:none;"
-                       onclick="${drillCall(i)}">${escapeHtml(i.account_name)}</a>
-                    </td><td class="amount">${formatCurrency(i.amount)}</td></tr>`
-            ).join("") || `<tr><td colspan="2" style="color:var(--gray-400);">None</td></tr>`;
+                `<tr><td style="padding-left:24px;">${name(i)}</td>${figures(i.amount, i.prior_amount, i)}</tr>`
+            ).join("") || `<tr><td colspan="${cols}" style="color:var(--gray-400);">None</td></tr>`;
+            const head = (label) => `<tr><td><strong>${label}</strong></td>${'<td></td>'.repeat(cols - 1)}</tr>`;
+            const total = (label, cur, before, style) => `<tr style="${style}"><td>${label}</td>${figures(cur, before)}</tr>`;
+            const sub = 'font-weight:600; background:var(--gray-50);';
+            const p = prior || {};
             return `${pdfBtn}
-                <p style="margin-bottom:12px; color:var(--gray-500);">As of ${formatDate(data.as_of_date)}</p>
+                <p style="margin-bottom:12px; color:var(--gray-500);">As of ${formatDate(data.as_of_date)}${prior ? ` &nbsp;vs&nbsp; ${formatDate(prior.as_of_date)}` : ''}</p>
                 <div class="table-container"><table>
-                    <thead><tr><th scope="col">Account</th><th scope="col" class="amount">Amount</th></tr></thead>
+                    <thead><tr><th scope="col">Account</th>${ReportsPage._cmpHead(prior, show)}</tr></thead>
                     <tbody>
-                        <tr><td><strong>Assets</strong></td><td></td></tr>
+                        ${head('Assets')}
                         ${section(data.assets)}
-                        <tr style="font-weight:600; background:var(--gray-50);"><td>Total Assets</td><td class="amount">${formatCurrency(data.total_assets)}</td></tr>
-                        <tr><td><strong>Liabilities</strong></td><td></td></tr>
+                        ${total('Total Assets', data.total_assets, p.total_assets, sub)}
+                        ${head('Liabilities')}
                         ${section(data.liabilities)}
-                        <tr style="font-weight:600; background:var(--gray-50);"><td>Total Liabilities</td><td class="amount">${formatCurrency(data.total_liabilities)}</td></tr>
-                        <tr><td><strong>${T('Equity')}</strong></td><td></td></tr>
+                        ${total('Total Liabilities', data.total_liabilities, p.total_liabilities, sub)}
+                        ${head(T('Equity'))}
                         ${section(data.equity)}
-                        <tr style="font-weight:600; background:var(--gray-50);"><td>${T('Total Equity')}</td><td class="amount">${formatCurrency(data.total_equity)}</td></tr>
+                        ${total(T('Total Equity'), data.total_equity, p.total_equity, sub)}
+                        ${total(T('Liabilities + Equity'), data.total_liabilities + data.total_equity, (p.total_liabilities || 0) + (p.total_equity || 0), 'font-weight:700; background:var(--primary-light);')}
                     </tbody>
                 </table></div>`;
-        }, "As Of", true, { reportType: 'balance_sheet', view: 'balance-sheet', prefill });
+        }, "As Of", true, { reportType: 'balance_sheet', view: 'balance-sheet', prefill, params: bsParams, toolbar: opts.toolbar + ReportsPage._compareToolbar(bsParams, 'Compare to same date last year'), wide: bsParams.compare === 'prior_year' });
     },
 
     async salesTax(prefill) {
@@ -1203,13 +1306,17 @@ const ReportsPage = {
                 // one is. The onclick payload is built outside the template and
                 // HTML-escaped, as profitLoss does, so JSON.stringify's quotes
                 // can't break the attribute.
+                // each account's heading: its number, then its path, a
+                // sub-account under its parents ("8610 — Automobile: Fuel"),
+                // as the statements' rows read (2.23.4 gate, W-12)
                 const drillCall = (acct) => escapeHtml(
-                    `ReportsPage.openDrillDown(${acct.account_id},${JSON.stringify(acct.account_name)},${JSON.stringify(range.start)},${JSON.stringify(range.end)},${data.class_id || null},${JSON.stringify(cls || null)},'general-ledger')`
+                    `ReportsPage.openDrillDown(${acct.account_id},${JSON.stringify(acct.account_path || acct.account_name)},${JSON.stringify(range.start)},${JSON.stringify(range.end)},${data.class_id || null},${JSON.stringify(cls || null)},'general-ledger')`
                 );
                 for (const acct of data.accounts) {
+                    const words = acct.account_path || acct.account_name;
                     const name = acct.account_id
-                        ? `<a href="javascript:void(0)" style="color:var(--text-link); text-decoration:none;" onclick="${drillCall(acct)}">${escapeHtml(acct.account_name)}</a>`
-                        : escapeHtml(acct.account_name);
+                        ? `<a href="javascript:void(0)" style="color:var(--text-link); text-decoration:none;" onclick="${drillCall(acct)}">${escapeHtml(words)}</a>`
+                        : escapeHtml(words);
                     html += `<h3 style="margin:12px 0 4px; font-size:12px; color:var(--qb-navy);">${escapeHtml(acct.account_number)} &mdash; ${name}</h3>`;
                     html += `<div class="table-container"><table>
                         <thead><tr><th scope="col">Date</th><th scope="col">Description</th><th scope="col">Reference</th><th scope="col">Source</th><th scope="col">${T('Class')}</th><th scope="col" class="amount">Debit</th><th scope="col" class="amount">Credit</th><th scope="col" class="amount">Balance</th></tr></thead><tbody>`;
@@ -1219,7 +1326,7 @@ const ReportsPage = {
                             <td>${formatDate(e.date)}</td>
                             <td>${escapeHtml(e.description)}</td>
                             <td>${escapeHtml(e.reference)}</td>
-                            <td style="font-size:10px; color:var(--gray-500);">${escapeHtml(e.source_type)}</td>
+                            <td style="font-size:10px; color:var(--gray-500);">${escapeHtml(sourceWord(e.source_type))}</td>
                             <td style="font-size:10px;">${escapeHtml(e.class_name || '')}</td>
                             <td class="amount">${e.debit > 0 ? formatCurrency(e.debit) : ""}</td>
                             <td class="amount">${e.credit > 0 ? formatCurrency(e.credit) : ""}</td>
@@ -1347,6 +1454,11 @@ const ReportsPage = {
                         <option value="90">90-Day Letter</option>
                     </select>
                     <button class="btn btn-sm btn-secondary" onclick="ReportsPage.sendCollectionLetters()">Send Collection Letters</button>
+                    <span style="display:inline-flex; align-items:center; gap:4px; margin-left:auto;">
+                        <label for="write-off-under" style="font-size:11px;">Write off balances under</label>
+                        <input id="write-off-under" type="number" step="0.01" min="0.01" value="5.00" style="width:76px; font-size:11px; padding:2px 6px;">
+                        <button class="btn btn-sm btn-secondary" onclick="ReportsPage.writeOffSmall('${params.as_of_date}')">List them…</button>
+                    </span>
                 </div>
                 <div class="table-container"><table>
                     <thead><tr>
@@ -1394,13 +1506,13 @@ const ReportsPage = {
     },
 
     async trialBalance(prefill) {
-        await ReportsPage.openPeriodModal("Trial Balance", "this_year_to_date", async (_period, range) => {
-            const data = await API.get(`/reports/trial-balance?start_date=${range.start}&end_date=${range.end}`);
+        await ReportsPage.openPeriodModal("Trial Balance", "this_year_to_date", async (_period, range, live) => {
+            const data = await API.get(`/reports/trial-balance?start_date=${range.start}&end_date=${range.end}${ReportsPage._adjQs(live)}`);
             // An account's name opens its register for the report's dates
             // (R9), with "Back to Trial Balance"
             const drill = (i) => i.account_id
-                ? ReportsPage._rowLink(`ReportsPage.openDrillDown(${i.account_id},${JSON.stringify(i.account_name)},${JSON.stringify(range.start)},${JSON.stringify(range.end)},null,null,'trial-balance')`, i.account_name, `drill:${i.account_id}`)
-                : escapeHtml(i.account_name);
+                ? ReportsPage._rowLink(`ReportsPage.openDrillDown(${i.account_id},${JSON.stringify(i.account_path || i.account_name)},${JSON.stringify(range.start)},${JSON.stringify(range.end)},null,null,'trial-balance')`, i.account_path || i.account_name, `drill:${i.account_id}`)
+                : escapeHtml(i.account_path || i.account_name);
             let rows = data.items.map(i =>
                 `<tr>
                     <td>${escapeHtml(i.account_number)}</td>
@@ -1418,13 +1530,256 @@ const ReportsPage = {
                 <td class="amount">${formatCurrency(data.total_credit)}</td>
                 <td class="amount" style="color:${diffColor}">${formatCurrency(data.difference)}</td>
             </tr>`;
-            return `${ReportsPage._exportButtons('trial-balance', `start_date=${range.start}&end_date=${range.end}`)}
-                <p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)}</p>
+            return `${ReportsPage._exportButtons('trial-balance', `start_date=${range.start}&end_date=${range.end}${ReportsPage._adjQs(live)}`)}
+                <p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)}${data.exclude_adjusting ? ' · without adjusting entries' : ''}</p>
                 <div class="table-container"><table>
                     <thead><tr><th scope="col">Number</th><th scope="col">Account</th><th scope="col">Type</th><th scope="col" class="amount">Debit</th><th scope="col" class="amount">Credit</th><th scope="col" class="amount">Net</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table></div>`;
-        }, "Dates", false, { view: 'trial-balance', prefill });
+        }, "Dates", false, { view: 'trial-balance', prefill, ...ReportsPage._adjOpts(prefill) });
+    },
+
+    // The accountant's adjusting entries for a period (#341): each with its
+    // lines and who posted it; the totals tie to the General Ledger.
+    async adjustingEntries(prefill) {
+        await ReportsPage.openPeriodModal("Adjusting Journal Entries", "this_year_to_date", async (_period, range) => {
+            const qs = `start_date=${range.start}&end_date=${range.end}`;
+            const data = await API.get(`/reports/adjusting-entries?${qs}`);
+            const entries = data.entries.map(e => {
+                const lines = e.lines.map(l =>
+                    `<tr><td style="padding-left:24px;">${l.account_number ? `${escapeHtml(l.account_number)} ` : ''}${escapeHtml(l.account_name)}${l.description ? ` <span style="color:var(--gray-500);">— ${escapeHtml(l.description)}</span>` : ''}</td>
+                         <td class="amount">${l.debit > 0 ? formatCurrency(l.debit) : ''}</td>
+                         <td class="amount">${l.credit > 0 ? formatCurrency(l.credit) : ''}</td></tr>`).join('');
+                return `<tr style="font-weight:600; background:var(--gray-50);">
+                        <td><a href="javascript:void(0)" style="color:var(--text-link); text-decoration:none;" onclick="JournalPage.view(${e.id})">#${e.id}</a>
+                            · ${formatDate(e.date)} · ${escapeHtml(e.description)}${e.reference ? ` (${escapeHtml(e.reference)})` : ''}
+                            ${e.posted_by ? `<span style="color:var(--gray-500); font-weight:400;"> · posted by ${escapeHtml(e.posted_by)}</span>` : ''}
+                            ${e.voided ? '<span class="journal-voided" style="color:var(--danger);"> · Voided</span>' : ''}
+                            ${e.is_reversal ? '<span style="color:var(--gray-500); font-weight:400;"> · reversal</span>' : ''}</td>
+                        <td class="amount">${formatCurrency(e.total_debit)}</td>
+                        <td class="amount">${formatCurrency(e.total_credit)}</td>
+                    </tr>${lines}`;
+            }).join('');
+            return `${ReportsPage._exportButtons('adjusting-entries', qs)}
+                <p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)} · ${data.count} ${data.count === 1 ? 'entry' : 'entries'}</p>
+                <div class="table-container"><table>
+                    <thead><tr><th scope="col">Entry</th><th scope="col" class="amount">Debit</th><th scope="col" class="amount">Credit</th></tr></thead>
+                    <tbody>${entries || '<tr><td colspan="3" style="text-align:center; color:var(--gray-400);">No adjusting entries in this period</td></tr>'}
+                    <tr style="font-weight:700; background:var(--gray-50);"><td>TOTALS</td><td class="amount">${formatCurrency(data.total_debit)}</td><td class="amount">${formatCurrency(data.total_credit)}</td></tr>
+                    </tbody>
+                </table></div>`;
+        }, "Dates", false, { reportType: 'adjusting_entries', view: 'adjusting-entries', prefill });
+    },
+
+    // What moved inside a closed period (#342): each use of the
+    // closing-date password, with the rows it changed before and after.
+    async closingDateExceptions(prefill) {
+        await ReportsPage.openPeriodModal("Closing Date Exceptions", "this_year_to_date", async (_period, range) => {
+            // the period's days and every time shown are the page's clock's:
+            // the log keeps UTC, and an evening override was dated tomorrow
+            // and missing from "this year to date" (NEW-152 / W-19)
+            const qs = `start_date=${range.start}&end_date=${range.end}&tz_offset=${new Date().getTimezoneOffset()}`;
+            const data = await API.get(`/reports/closing-date-exceptions?${qs}`);
+            const when = (ev) => ev.when_local ? `${formatDate(ev.when_local.slice(0, 10))} ${ev.when_local.slice(11, 16)}` : (ev.when ? `${formatDate(ev.when.slice(0, 10))} ${ev.when.slice(11, 16)}` : '');
+            const events = data.events.map(ev => {
+                const changes = ev.changes.map(c => {
+                    const record = `${c.action} ${c.record} ${c.record_id}${c.label ? ` (${escapeHtml(c.label)})` : ''}`;
+                    if (!c.fields.length) return `<tr><td style="padding-left:24px;">${record}</td><td></td><td></td><td></td></tr>`;
+                    return c.fields.map((f, i) =>
+                        `<tr><td style="padding-left:24px;">${i === 0 ? record : ''}</td>
+                             <td>${escapeHtml(f.field)}</td><td>${escapeHtml(f.before)}</td><td>${escapeHtml(f.after)}</td></tr>`).join('');
+                }).join('') || `<tr><td colspan="4" style="padding-left:24px; color:var(--gray-500);">The password was used; the rows it changed were not marked before 2.24.0.</td></tr>`;
+                return `<tr style="font-weight:600; background:var(--gray-50);">
+                        <td colspan="4">${when(ev)} · ${escapeHtml(ev.who)} · closing date ${formatDate(ev.closing_date)} · a ${formatDate(ev.transaction_date)} change</td>
+                    </tr>${changes}`;
+            }).join('');
+            return `${ReportsPage._exportButtons('closing-date-exceptions', qs)}
+                <p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)} · ${data.count} ${data.count === 1 ? 'override' : 'overrides'}, ${data.changes} ${data.changes === 1 ? 'change' : 'changes'}${data.closing_date ? ` · closing date now ${formatDate(data.closing_date)}` : ' · no closing date set'}${data.timezone ? ` · times in ${escapeHtml(data.timezone)}` : ''}</p>
+                <div class="table-container"><table>
+                    <thead><tr><th scope="col">Change</th><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
+                    <tbody>${events || '<tr><td colspan="4" style="text-align:center; color:var(--gray-400);">Nothing was changed inside a closed period with the password in this period</td></tr>'}</tbody>
+                </table></div>`;
+        }, "Dates", false, { reportType: 'closing_date_exceptions', view: 'closing-date-exceptions', prefill });
+    },
+
+    // One zip for the accountant (#343): what the dialog lists, then the
+    // download. The zip is built once to list its files.
+    async accountantsPackage(prefill) {
+        await ReportsPage.openPeriodModal("Accountant's Package", "last_year", async (_period, range) => {
+            const qs = `start_date=${range.start}&end_date=${range.end}&tz_offset=${new Date().getTimezoneOffset()}`;
+            const m = await API.get(`/reports/accountants-package/manifest?${qs}`);
+            const files = m.files.map(f => `<li style="font-family:var(--mono, monospace); font-size:12px;">${escapeHtml(f)}</li>`).join('');
+            const notes = (m.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join('');
+            return `<p style="margin-bottom:12px; color:var(--gray-500);">${formatDate(m.start_date)} &mdash; ${formatDate(m.end_date)}${m.closing_date ? ` · closing date ${formatDate(m.closing_date)}` : ''}</p>
+                <p style="margin-bottom:8px;">${Terms.text('Everything an outside reviewer asks for, in one file: the Financial Statements Pack, the General Ledger and Trial Balance, the A/R and A/P agings, each bank reconciliation completed in the period, the Adjusting Journal Entries and Closing Date Exceptions reports, and the audit log since the closing date. Each file is the same report run on its own.')}</p>
+                <ul style="margin:0 0 12px 18px;">${files}</ul>
+                ${notes ? `<ul style="margin:0 0 12px 18px; color:var(--gray-500);">${notes}</ul>` : ''}
+                <button class="btn btn-primary" onclick="window.open('/api/reports/accountants-package?${qs}','_blank')">Download the package (zip)</button>`;
+        }, "Dates", false, { view: 'accountants-package', prefill });
+    },
+
+    // Reclassify (#337): an account's lines for a period, the ticked ones
+    // moved to another account and/or class as one audited change. The
+    // account rides on the address (params.account_id), so Back and a
+    // saved address reopen the same list. Ticks are kept across redraws by
+    // line id; the move sends only the ticked lines still listed.
+    async reclassify(prefill) {
+        const p = prefill || {};
+        const params = {};
+        if (/^\d+$/.test(p.account_id || '')) params.account_id = p.account_id;
+        ReportsPage._rc = { lists: null, lines: [], ticked: new Set(), plan: null, range: null };
+        await ReportsPage.openPeriodModal('Reclassify Transactions', 'this_year_to_date', async (_period, range, prm) => {
+            const rc = ReportsPage._rc;
+            rc.range = range;
+            rc.plan = null;
+            if (!rc.lists) {
+                const [accounts, classes] = await Promise.all([
+                    API.get('/accounts').catch(() => []),
+                    API.get('/classes').catch(() => []),
+                ]);
+                rc.lists = { accounts, classes };
+            }
+            const accountId = String(prm.account_id || '');
+            const acctOpt = (a, selected) => `<option value="${a.id}"${String(a.id) === String(selected) ? ' selected' : ''}>${escapeHtml(a.account_number || '')} ${escapeHtml(a.name)}${a.is_active === false ? ' (inactive)' : ''}</option>`;
+            const picker = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                    <label for="rc-account" style="font-size:11px;">Lines on</label>
+                    <select id="rc-account" data-no-search style="max-width:300px;" onchange="ReportsPage.setParam('account_id', this.value)"><option value="">Choose an account…</option>${rc.lists.accounts.map(a => acctOpt(a, accountId)).join('')}</select>
+                </div>`;
+            if (!accountId) {
+                rc.lines = [];
+                return `${picker}<p style="color:var(--gray-500);">Pick the account the lines are parked on: a holding account, or one chosen by mistake. Tick the lines to move, choose where they belong, preview the move, then post it as one change. Every moved line is listed in the result and in the audit log.</p>`;
+            }
+            const data = await API.get(`/reclassify/lines?account_id=${accountId}&start_date=${range.start}&end_date=${range.end}`);
+            rc.lines = data.lines;
+            const listed = new Set(data.lines.map(l => l.id));
+            rc.ticked.forEach(id => { if (!listed.has(id)) rc.ticked.delete(id); });
+            const rows = data.lines.map(l => {
+                const tick = l.movable
+                    ? `<input type="checkbox" class="rc-tick" data-write data-line="${l.id}" ${rc.ticked.has(l.id) ? 'checked' : ''} aria-label="Move the ${escapeHtml(l.source_label.toLowerCase())} of ${formatDate(l.date)}, ${escapeHtml(l.description || 'no memo')}" onchange="ReportsPage.rcTick(${l.id}, this.checked)">`
+                    : `<span class="sr-only">Stays: </span>`;
+                // a document names itself ("Bill UT-20"), the rest by their
+                // type and reference ("Bill Bill UT-20" read the type twice: NEW-163)
+                const what = l.document ? escapeHtml(l.document) : `${escapeHtml(l.source_label)}${l.reference ? ` <span style="color:var(--gray-500);">${escapeHtml(l.reference)}</span>` : ''}`;
+                const muted = l.movable ? '' : ' style="color:var(--gray-400);"';
+                return `<tr${muted}>
+                        <td style="width:28px;">${tick}</td>
+                        <td>${formatDate(l.date)}</td>
+                        <td>${what}</td>
+                        <td>${escapeHtml(l.description || '')}${l.movable ? '' : ` <span style="font-size:11px;">(stays: ${escapeHtml(l.reason)})</span>`}</td>
+                        <td>${escapeHtml(l.class_name || '')}</td>
+                        <td class="amount">${formatCurrency(l.amount)}</td>
+                    </tr>`;
+            }).join('');
+            const targets = rc.lists.accounts.filter(a => a.is_active !== false && !a.bank_kind && !a.is_control && String(a.id) !== accountId);
+            const classOpts = rc.lists.classes.filter(c => !c.is_archived).map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+            const empty = `<tr><td colspan="6" style="text-align:center; color:var(--gray-400);">No lines on ${escapeHtml(data.account.label)} in this period</td></tr>`;
+            return `${picker}
+                <p style="margin-bottom:8px; color:var(--gray-500);">${formatDate(data.start_date)} &mdash; ${formatDate(data.end_date)} · ${data.count} ${data.count === 1 ? 'line' : 'lines'}, ${data.movable} can move${data.count ? ` · lines that can move total ${formatCurrency(data.movable_total)}` : ''}</p>
+                <div class="table-container"><table id="rc-table">
+                    <thead><tr>
+                        <th scope="col" style="width:28px;">${data.movable ? `<input type="checkbox" id="rc-all" data-write aria-label="Tick every line that can move" onchange="ReportsPage.rcTickAll(this.checked)">` : ''}</th>
+                        <th scope="col">Date</th><th scope="col">Type</th><th scope="col">Memo</th><th scope="col">${T('Class')}</th><th scope="col" class="amount">Amount</th>
+                    </tr></thead>
+                    <tbody>${rows || empty}</tbody>
+                </table></div>
+                <div id="rc-move" data-accountant-ok data-write style="margin-top:12px; padding:10px; border:1px solid var(--gray-200); border-radius:4px;">
+                    <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                        <div class="form-group" style="margin:0;">
+                            <label for="rc-to-account" style="font-size:11px;">Move the ticked lines to</label>
+                            <select id="rc-to-account" data-no-search data-write style="max-width:300px;"><option value="">Leave the account as it is</option>${targets.map(a => acctOpt(a, '')).join('')}</select>
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label for="rc-to-class" style="font-size:11px;">${T('Class')}</label>
+                            <select id="rc-to-class" data-no-search data-write style="max-width:220px;"><option value="">Leave as it is</option><option value="none">No ${T('class').toLowerCase()}</option>${classOpts}</select>
+                        </div>
+                        <button type="button" class="btn btn-secondary" data-write onclick="ReportsPage.rcPreview()">Preview the move</button>
+                    </div>
+                    <div id="rc-plan" style="margin-top:8px;" aria-live="polite"></div>
+                </div>`;
+        }, 'Dates', false, { view: 'reclassify', prefill, params });
+    },
+
+    rcTick(id, on) {
+        const rc = ReportsPage._rc;
+        if (on) rc.ticked.add(id); else rc.ticked.delete(id);
+        const all = $('#rc-all');
+        if (all) all.checked = rc.lines.filter(l => l.movable).every(l => rc.ticked.has(l.id));
+        const plan = $('#rc-plan');
+        if (plan && rc.plan) { rc.plan = null; plan.innerHTML = '<p style="color:var(--gray-500);">The ticks changed; preview the move again.</p>'; }
+    },
+
+    rcTickAll(on) {
+        const rc = ReportsPage._rc;
+        rc.lines.filter(l => l.movable).forEach(l => { if (on) rc.ticked.add(l.id); else rc.ticked.delete(l.id); });
+        $$('#rc-table .rc-tick').forEach(cb => { cb.checked = on; });
+        ReportsPage.rcTick(null, false);
+    },
+
+    _rcRequest(dryRun) {
+        const rc = ReportsPage._rc;
+        const ids = rc.lines.filter(l => l.movable && rc.ticked.has(l.id)).map(l => l.id);
+        const toAccount = ($('#rc-to-account') || {}).value || '';
+        const toClass = ($('#rc-to-class') || {}).value || '';
+        const body = { line_ids: ids, dry_run: dryRun };
+        if (toAccount) body.account_id = parseInt(toAccount, 10);
+        if (toClass === 'none') body.clear_class = true;
+        else if (toClass) body.class_id = parseInt(toClass, 10);
+        return body;
+    },
+
+    _rcPlanHtml(r, done) {
+        const where = [
+            r.to_account ? `to <strong>${escapeHtml(r.to_account.label)}</strong>` : '',
+            r.clear_class ? `with no ${T('class').toLowerCase()}` : (r.to_class ? `under ${T('class').toLowerCase()} <strong>${escapeHtml(r.to_class.name)}</strong>` : ''),
+        ].filter(Boolean).join(', ');
+        const rows = r.moved.map(m => `<tr>
+                <td>${formatDate(m.date)}</td>
+                <td>${m.document ? escapeHtml(m.document) : `${escapeHtml(m.source_label)}${m.reference ? ` <span style="color:var(--gray-500);">${escapeHtml(m.reference)}</span>` : ''}`}</td>
+                <td>${escapeHtml(m.description || '')}</td>
+                <td>${escapeHtml(m.from_account ? m.from_account.label : '')} → ${escapeHtml(m.to_account ? m.to_account.label : '')}</td>
+                <td>${escapeHtml(m.from_class ? m.from_class.name : '')} → ${escapeHtml(m.to_class ? m.to_class.name : '')}</td>
+                <td class="amount">${formatCurrency(m.amount)}</td>
+            </tr>`).join('');
+        const skipped = r.skipped.length ? `<p style="font-size:11px; color:var(--gray-500);">${r.skipped.length} ${r.skipped.length === 1 ? 'line stays' : 'lines stay'}: ${r.skipped.map(s => escapeHtml(s.reason)).filter((v, i, a) => a.indexOf(v) === i).join('; ')}.</p>` : '';
+        const verb = done ? 'Moved' : 'This moves';
+        return `<p style="margin:0 0 6px;"><strong>${verb} ${r.count} ${r.count === 1 ? 'line' : 'lines'}</strong> ${where}.${done ? ' Each is in the audit log.' : ''}</p>
+            ${skipped}
+            ${r.count ? `<div class="table-container"><table><thead><tr><th scope="col">Date</th><th scope="col">Type</th><th scope="col">Memo</th><th scope="col">Account</th><th scope="col">${T('Class')}</th><th scope="col" class="amount">Amount</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
+            ${(!done && r.count) ? `<div style="margin-top:8px;"><button type="button" class="btn btn-primary" data-write onclick="ReportsPage.rcMove()">Move ${r.count} ${r.count === 1 ? 'line' : 'lines'}</button></div>` : ''}`;
+    },
+
+    async rcPreview() {
+        const body = ReportsPage._rcRequest(true);
+        const plan = $('#rc-plan');
+        if (!body.line_ids.length) { plan.innerHTML = '<p style="color:var(--gray-500);">Tick the lines to move first.</p>'; return; }
+        if (!body.account_id && !body.class_id && !body.clear_class) { plan.innerHTML = `<p style="color:var(--gray-500);">Choose the account to move them to, or a ${T('class').toLowerCase()}.</p>`; return; }
+        try {
+            const r = await API.post('/reclassify', body);
+            ReportsPage._rc.plan = r;
+            plan.innerHTML = ReportsPage._rcPlanHtml(r, false);
+        } catch (err) {
+            plan.innerHTML = `<p style="color:var(--danger);">${escapeHtml(err.message)}</p>`;
+        }
+    },
+
+    async rcMove() {
+        const body = ReportsPage._rcRequest(false);
+        const plan = $('#rc-plan');
+        const btn = plan.querySelector('button');
+        if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+        try {
+            const r = await API.post('/reclassify', body);
+            ReportsPage._rc.ticked.clear();
+            toast(`Moved ${r.count} ${r.count === 1 ? 'line' : 'lines'}.`);
+            // the list redraws without the moved lines; the result stays
+            // under it until the next preview
+            const live = ReportsPage._live;
+            if (live && live.render) await live.render();
+            const after = $('#rc-plan');
+            if (after) after.innerHTML = ReportsPage._rcPlanHtml(r, true);
+        } catch (err) {
+            plan.innerHTML = `<p style="color:var(--danger);">${escapeHtml(err.message)}</p>`;
+        }
     },
 
     async cashFlow(prefill) {
@@ -1511,20 +1866,71 @@ const ReportsPage = {
                     <td>${escapeHtml(i.tax_id)}</td>
                     <td>${escapeHtml(i.vendor_1099_type)}</td>
                     <td class="amount">${formatCurrency(i.total_paid)}</td>
+                    <td>${i.w9_on_file ? 'On file' : (i.above_threshold ? '<span style="color:var(--danger); font-weight:700;">No W-9</span>' : 'No')}</td>
                     <td>${i.above_threshold ? '<span style="color:var(--danger); font-weight:700;">REPORT</span>' : ''}</td>
                 </tr>`
             ).join('');
             rows += `<tr style="font-weight:700; background:var(--gray-50);">
                 <td colspan="3">TOTAL</td><td class="amount">${formatCurrency(data.total)}</td>
+                <td>${data.vendors_missing_w9 ? `${data.vendors_missing_w9} with no W-9` : ''}</td>
                 <td>${data.vendors_above_threshold} vendor(s) above $${data.threshold}</td></tr>`;
             content.innerHTML = `
                 <div class="table-container"><table>
-                    <thead><tr><th scope="col">Vendor</th><th scope="col">Tax ID</th><th scope="col">Type</th><th scope="col" class="amount">Total Paid</th><th scope="col">Status</th></tr></thead>
+                    <thead><tr><th scope="col">Vendor</th><th scope="col">Tax ID</th><th scope="col">Type</th><th scope="col" class="amount">Total Paid</th><th scope="col">W-9</th><th scope="col">Status</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table></div>`;
             const restored = ReportsPage._refocusRow(content);
             ReportsPage._spotlight(content, { vendor_id: vendorId }, first && !restored);
         } catch (err) { content.innerHTML = `<div style="color:var(--danger);">${escapeHtml(err.message)}</div>`; }
+    },
+
+    // Small balances written off from A/R Aging (#255): the open invoices
+    // under the figure typed, listed first with a tick each, then one
+    // write-off credit memo per invoice to Bad Debt Expense, posted together.
+    async writeOffSmall(asOf) {
+        const under = parseFloat(document.getElementById('write-off-under').value);
+        if (!(under > 0)) { toast('Enter the figure: balances under it are listed.', 'error'); return; }
+        let rows;
+        try {
+            rows = await API.get(`/invoices/write-offs/candidates?under=${under}&as_of_date=${asOf}`);
+        } catch (err) { toast(err.message, 'error'); return; }
+        if (!rows.length) { toast(`No open balance under ${formatCurrency(under)} as of ${formatDate(asOf)}.`); return; }
+        const list = rows.map(r => `<tr>
+                <td><input type="checkbox" class="write-off-pick" value="${r.id}" checked aria-label="Write off ${escapeHtml(T('invoice'))} ${escapeHtml(r.invoice_number)}, ${escapeHtml(r.customer_name)}"></td>
+                <td>${escapeHtml(r.customer_name)}</td><td>${escapeHtml(r.invoice_number)}</td>
+                <td>${formatDate(r.date)}</td><td class="amount">${r.days_overdue || 0}</td>
+                <td class="amount">${formatCurrency(r.balance_due)}</td></tr>`).join('');
+        openModal(`Write Off Balances Under ${formatCurrency(under)}`, `
+            <form onsubmit="ReportsPage.saveWriteOffSmall(event, ${under})">
+                <div class="table-container"><table>
+                    <thead><tr><th scope="col">Write off</th><th scope="col">${T('Customer')}</th><th scope="col">#</th><th scope="col">Date</th><th scope="col" class="amount">Days over</th><th scope="col" class="amount">Balance</th></tr></thead>
+                    <tbody>${list}</tbody>
+                </table></div>
+                <div class="form-grid" style="margin-top:8px;">
+                    <div class="form-group"><label>Date *</label><input name="date" type="date" required value="${todayISO()}"></div>
+                    <div class="form-group"><label>Memo</label><input name="memo" placeholder="e.g. too small to collect"></div>
+                </div>
+                <div style="font-size:11px;color:var(--gray-500);margin-top:6px">Posts one credit memo per ${T('invoice')} to Bad Debt Expense, applied at once; a balance that changed since this list was made is left alone. Void a credit memo to undo it.</div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="App.refresh()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Write Off</button>
+                </div>
+            </form>`);
+    },
+
+    async saveWriteOffSmall(e, under) {
+        e.preventDefault();
+        const form = e.target;
+        const ids = [...form.querySelectorAll('.write-off-pick:checked')].map(c => Number(c.value));
+        if (!ids.length) { toast('Tick at least one.', 'error'); return; }
+        try {
+            const res = await API.post('/invoices/write-offs', { date: form.date.value, under, invoice_ids: ids, memo: form.memo.value || null });
+            const n = res.written_off.length;
+            let msg = `Wrote off ${n} balance${n === 1 ? '' : 's'} as credit memo${n === 1 ? '' : 's'}.`;
+            if (res.skipped.length) msg += ` Left alone: ${res.skipped.map(s => `#${s.invoice_number || s.invoice_id} (${s.reason})`).join('; ')}.`;
+            toast(msg, res.skipped.length ? 'warning' : 'success');
+            App.refresh();  // the aging report again, at its address, without these balances
+        } catch (err) { toast(err.message, 'error'); }
     },
 
     async applyLateFees() {
@@ -2326,6 +2732,77 @@ ReportsPage._exportButtons = function (path, qs) {
         <button class="btn btn-sm btn-secondary" onclick="window.open('/api/reports/${path}/pdf?${qs}','_blank')">Save PDF</button>
         <button class="btn btn-sm btn-secondary" onclick="window.open('/api/reports/${path}/csv?${qs}','_blank')">Save CSV</button>
     </div>`;
+};
+
+// Prior-year comparison on the Profit & Loss and the Balance Sheet: the
+// params a view starts with (from its address or saved report), the two
+// toolbar checkboxes, and the money cells — Amount alone, or Current |
+// Prior Year, plus $ Change | % Change unless they are turned off.
+ReportsPage._viewReturn = {};
+ReportsPage._compareParams = function (prefill) {
+    const p = prefill || {};
+    const out = {};
+    if (p.compare === 'prior_year') out.compare = 'prior_year';
+    if (['1', 'true'].includes(String(p.hide_changes))) out.hide_changes = '1';
+    return out;
+};
+// What Back from a drill-down returns to: the statement's own choices
+// (sort, adjusting entries, comparison), not the drill-down's dates.
+ReportsPage._cmpKeep = function (params) {
+    const keep = {};
+    for (const k of ['sort', 'exclude_adjusting', 'compare', 'hide_changes']) {
+        if (params && params[k]) keep[k] = params[k];
+    }
+    return keep;
+};
+ReportsPage._compareToolbar = function (params, label) {
+    const box = 'font-weight:normal; text-transform:none; font-size:12px; gap:6px; align-items:center;';
+    return `<div class="form-group" style="justify-content:flex-end; gap:4px;">
+        <label style="${box} display:inline-flex;"><input type="checkbox" id="cmp-prior" ${params.compare ? 'checked' : ''}
+            onchange="ReportsPage.setParam('compare', this.checked ? 'prior_year' : '')"> ${escapeHtml(label)}</label>
+        <label id="cmp-changes-wrap" style="${box} display:${params.compare ? 'inline-flex' : 'none'};"><input type="checkbox" id="cmp-changes" ${params.hide_changes ? '' : 'checked'}
+            onchange="ReportsPage.setParam('hide_changes', this.checked ? '' : '1')"> Show $ and % change</label>
+    </div>`;
+};
+// The change checkbox only means something while comparing, and so does
+// the wide dialog: five columns need it, two do not, and a dialog that is
+// wide for no reason reaches over the sidebar and takes the Open links from
+// under the pointer (test_browser_open_tabs; the #367 review). The width
+// follows the choice, and Back is re-measured against it.
+ReportsPage._cmpSync = function (params) {
+    const wrap = $('#cmp-changes-wrap');
+    if (wrap) wrap.style.display = params.compare ? 'inline-flex' : 'none';
+    const modal = $('#modal');
+    if (modal) modal.classList.toggle('modal--wide', params.compare === 'prior_year');
+    if (window.App && App.syncBack) App.syncBack();
+};
+ReportsPage._cmpQs = function (params) {
+    if (!params || params.compare !== 'prior_year') return '';
+    return `&compare=prior_year${params.hide_changes ? '&hide_changes=1' : ''}`;
+};
+ReportsPage._cmpCols = (prior, show) => (prior ? (show ? 5 : 3) : 2);
+ReportsPage._cmpHead = function (prior, show) {
+    if (!prior) return `<th scope="col" class="amount">Amount</th>`;
+    return `<th scope="col" class="amount">Current</th><th scope="col" class="amount">Prior Year</th>`
+        + (show ? `<th scope="col" class="amount">$ Change</th><th scope="col" class="amount">% Change</th>` : '');
+};
+ReportsPage._cmpPct = function (cur, before) {
+    cur = Number(cur || 0); before = Number(before || 0);
+    if (Math.abs(before) < 0.005) return '&mdash;';
+    const v = (cur - before) / Math.abs(before) * 100;
+    return `${v.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+};
+// priorDrill: an escaped onclick that opens last year's transactions for
+// the line, or null for a total.
+ReportsPage._cmpCells = function (cur, before, prior, show, priorDrill) {
+    if (!prior) return `<td class="amount">${formatCurrency(cur)}</td>`;
+    const priorCell = priorDrill
+        ? `<a href="javascript:void(0)" style="color:inherit; text-decoration:none;" title="Prior-year transactions" onclick="${priorDrill}">${formatCurrency(before || 0)}</a>`
+        : formatCurrency(before || 0);
+    const cells = `<td class="amount">${formatCurrency(cur)}</td><td class="amount">${priorCell}</td>`;
+    if (!show) return cells;
+    const diff = Number(cur || 0) - Number(before || 0);
+    return `${cells}<td class="amount">${formatCurrency(diff)}</td><td class="amount">${ReportsPage._cmpPct(cur, before)}</td>`;
 };
 
 // Prior-year comparison for the two statements a treasurer reads side by

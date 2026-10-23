@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from app.database import get_db
-from app.routes._helpers import clamp_pagination
+from app.routes._helpers import clamp_pagination, reject_null_updates
 from app.models.invoices import Invoice, InvoiceLine, InvoiceStatus
 from app.models.items import Item
 from app.models.contacts import Customer
@@ -18,7 +18,9 @@ from app.services.numbering import next_invoice_number
 from app.services.closing_date import check_closing_date
 
 from app.routes.invoices._router import router
+from app.services.contact_balances import home_amount
 from app.routes.invoices.helpers import (
+    confirm_credit_limit,
     confirm_zero_total,
     opening_status,
     refuse_due_before_date,
@@ -36,6 +38,7 @@ from app.services.jobs_service import (
     refuse_other_customers_jobs_on_edit,
 )
 from app.services.terminology import document_reference, terms_from_db
+from app.services.audit import audited_bulk_delete
 
 
 @router.get("", response_model=list[InvoiceResponse])
@@ -161,6 +164,12 @@ def create_invoice(data: InvoiceCreate, db: Session = Depends(get_db)):
     from app.services.currency import resolve_rate
 
     doc_currency, doc_rate = resolve_rate(db, data.currency, data.exchange_rate)
+    # Past the customer's credit limit? Ask, on the API as in the form
+    # (#256). A sales receipt, paid as it is made, comes through here with
+    # the flag set by its own route: it owes nothing.
+    confirm_credit_limit(
+        db, customer, home_amount(total, doc_rate), data.allow_over_credit_limit, noun
+    )
 
     for _ in range(10):
         invoice_number = next_invoice_number(db)
@@ -265,8 +274,9 @@ def update_invoice(invoice_id: int, data: InvoiceUpdate, db: Session = Depends(g
     check_closing_date(db, invoice.date)
     words = terms_from_db(db)
 
-    update_data = data.model_dump(
-        exclude_unset=True, exclude={"lines", "allow_zero_total"}
+    update_data = reject_null_updates(
+        Invoice,
+        data.model_dump(exclude_unset=True, exclude={"lines", "allow_zero_total"}),
     )
     # What the edit changes — the customer, the header's job, a line's job —
     # must leave the invoice on its customer's jobs (NEW-36); what it leaves
@@ -362,6 +372,24 @@ def update_invoice(invoice_id: int, data: InvoiceUpdate, db: Session = Depends(g
                 status_code=400,
                 detail="Invoice total cannot be less than the amount already paid",
             )
+        # An edit that raises what this invoice leaves owing, or moves it to
+        # another customer, asks about the credit limit as a new invoice
+        # does (#256); one that lowers it never does, even over the limit.
+        new_rate = update_data.get("exchange_rate", invoice.exchange_rate)
+        new_owed = home_amount(_q(total - invoice.amount_paid), new_rate)
+        now_owed = home_amount(invoice.balance_due, invoice.exchange_rate)
+        new_customer_id = update_data.get("customer_id", invoice.customer_id)
+        if new_owed > now_owed or new_customer_id != invoice.customer_id:
+            confirm_credit_limit(
+                db,
+                db.get(Customer, new_customer_id),
+                new_owed,
+                data.allow_over_credit_limit,
+                document_label(invoice, words).lower(),
+                exclude_invoice_id=(
+                    invoice.id if new_customer_id == invoice.customer_id else None
+                ),
+            )
 
     # An invoice or sales receipt the QuickBooks Online import created
     # becomes ours when its amounts or date change: the import's posting for
@@ -428,7 +456,10 @@ def update_invoice(invoice_id: int, data: InvoiceUpdate, db: Session = Depends(g
         )
 
         if data.lines is not None:
-            db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice_id).delete()
+            # each old line leaves a DELETE event with its amounts (#289)
+            audited_bulk_delete(
+                db, db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice_id)
+            )
             db.flush()
             for i, line_data in enumerate(data.lines):
                 db.add(

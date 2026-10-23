@@ -64,6 +64,7 @@ const ctx = {
   document: { addEventListener() {}, querySelector: () => null, querySelectorAll: () => [] },
   escapeHtml: (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'),
   formatDate: (s) => s || '',
+  sourceWord: (s) => String(s || ''),
   // utils.js's reader of address dates (NEW-35): the register asks it
   // for its filter; no query here, so nothing is ignored
   datesFromQuery: (q) => ({ start_date: (q && q.start_date) || '', end_date: (q && q.end_date) || '' }),

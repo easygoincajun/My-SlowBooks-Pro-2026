@@ -10,6 +10,9 @@ import socket
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
 
 from app.models.accounts import Account, AccountType
 from app.models.bank_rules import BankRule
@@ -230,6 +233,128 @@ def test_sync_warns_on_missing_mapped_account(db_session):
 
 
 # ---------------------------------------------------------------------------
+# Sign direction: a positive amount is a deposit, whatever the feed is named
+# ---------------------------------------------------------------------------
+
+# A checking account as one bank connection presents it: named like a
+# liability, balance negative, every amount with the opposite sign.
+REVERSED_CHECKING = {
+    "id": "ACT-4723",
+    "name": "Payable Business Checking (4723)",
+    "org": {"name": "Demo Bank"},
+    "currency": "USD",
+    "balance": "-3915.66",
+    "transactions": [
+        {
+            "id": "TXN-BILL",
+            "posted": 1788868800,  # 2026-09-08 UTC
+            "amount": "2689.93",  # a bill payment, reported as money in
+            "description": "Bill payment",
+            "payee": "City Water",
+        },
+        {
+            "id": "TXN-WIRE",
+            "posted": 1788955200,  # 2026-09-09 UTC
+            "amount": "-20000.00",  # an incoming transfer, reported as money out
+            "description": "Incoming transfer",
+            "payee": "Transfer in",
+        },
+    ],
+}
+
+
+def test_to_import_rows_reverses_signs_when_asked():
+    rows, errors = sf.to_import_rows(SF_DATA["accounts"][0], reverse_signs=True)
+    assert errors == []
+    assert [r["amount"] for r in rows] == [Decimal("55.50"), Decimal("-2500.00")]
+
+
+def test_an_account_name_never_changes_the_sign():
+    rows, _ = sf.to_import_rows(REVERSED_CHECKING)
+    assert [r["amount"] for r in rows] == [Decimal("2689.93"), Decimal("-20000.00")]
+
+
+def test_parse_reversed_tolerates_junk():
+    assert sf.parse_reversed("") == []
+    assert sf.parse_reversed("not json") == []
+    assert sf.parse_reversed('{"ACT-1": true}') == []
+    assert sf.parse_reversed('["ACT-1", 7, null]') == ["ACT-1", "7"]
+
+
+def test_a_reversed_liability_named_feed_lands_right_on_an_asset_account(
+    client, db_session, seed_accounts
+):
+    """Regression: a checking account the bank connection reports as
+    "Payable ... (4723)" with a negative balance, mapped to 1000 Checking.
+    Imported as-is, the bill payment came in as a deposit and nothing
+    auto-matched; with Reverse signs it lands as a withdrawal and matches
+    the expense already posted for it."""
+    feed = client.post(
+        "/api/banking/accounts",
+        json={"name": "Checking 4723", "account_id": seed_accounts["1000"].id},
+    ).json()
+    vendor = client.post("/api/vendors", json={"name": "City Water"}).json()
+    r = client.post(
+        "/api/expenses",
+        json={
+            "date": "2026-09-08",
+            "vendor_id": vendor["id"],
+            "expense_account_id": seed_accounts["6000"].id,
+            "paid_from_account_id": seed_accounts["1000"].id,
+            "amount": "2689.93",
+        },
+    )
+    assert r.status_code == 201, r.text
+    expense = r.json()
+    data = {"errors": [], "accounts": [REVERSED_CHECKING]}
+
+    result = sf.sync_accounts(
+        db_session, data, {"ACT-4723": feed["id"]}, reversed_ids={"ACT-4723"}
+    )
+    assert result["imported"] == 2
+
+    lines = {
+        t.import_id: t
+        for t in db_session.query(BankTransaction)
+        .filter(BankTransaction.bank_account_id == feed["id"])
+        .all()
+    }
+    assert lines["TXN-BILL"].amount == Decimal("-2689.93")
+    assert lines["TXN-WIRE"].amount == Decimal("20000.00")
+    assert lines["TXN-BILL"].match_status == "auto"
+    assert lines["TXN-BILL"].transaction_id == expense["id"]
+
+
+def test_without_reversal_the_same_feed_does_not_match(
+    client, db_session, seed_accounts
+):
+    feed = client.post(
+        "/api/banking/accounts",
+        json={"name": "Checking 4723", "account_id": seed_accounts["1000"].id},
+    ).json()
+    vendor = client.post("/api/vendors", json={"name": "City Water"}).json()
+    client.post(
+        "/api/expenses",
+        json={
+            "date": "2026-09-08",
+            "vendor_id": vendor["id"],
+            "expense_account_id": seed_accounts["6000"].id,
+            "paid_from_account_id": seed_accounts["1000"].id,
+            "amount": "2689.93",
+        },
+    )
+    data = {"errors": [], "accounts": [REVERSED_CHECKING]}
+    sf.sync_accounts(db_session, data, {"ACT-4723": feed["id"]})
+    bill = (
+        db_session.query(BankTransaction)
+        .filter(BankTransaction.import_id == "TXN-BILL")
+        .one()
+    )
+    assert bill.amount == Decimal("2689.93")
+    assert bill.match_status == "unmatched"
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -301,6 +426,38 @@ def test_sync_route_end_to_end(authed_client, db_session, monkeypatch):
     assert status["account_map"] == {"ACT-1": ba.id}
 
 
+def test_map_route_stores_reversed_feeds_and_sync_applies_them(
+    authed_client, db_session, monkeypatch
+):
+    ba = _mk_bank_account(db_session, name="Reversed Checking")
+    set_setting(db_session, "simplefin_access_url", ACCESS_URL)
+    db_session.commit()
+    r = authed_client.post(
+        "/api/simplefin/map",
+        json={"mapping": {"ACT-1": ba.id}, "reversed": ["ACT-1"]},
+    )
+    assert r.status_code == 200
+    assert r.json()["reversed"] == ["ACT-1"]
+
+    # A mapping saved without the field leaves the choice alone
+    r = authed_client.post("/api/simplefin/map", json={"mapping": {"ACT-1": ba.id}})
+    assert r.json()["reversed"] == ["ACT-1"]
+    assert authed_client.get("/api/simplefin/status").json()["reversed"] == ["ACT-1"]
+
+    monkeypatch.setattr(sf, "send", lambda req, **kw: _resp(json_body=SF_DATA))
+    assert authed_client.post("/api/simplefin/sync").status_code == 200
+    amounts = {
+        t.import_id: t.amount
+        for t in db_session.query(BankTransaction)
+        .filter(BankTransaction.bank_account_id == ba.id)
+        .all()
+    }
+    assert amounts == {"TXN-1": Decimal("55.50"), "TXN-2": Decimal("-2500.00")}
+
+    authed_client.post("/api/simplefin/disconnect")
+    assert authed_client.get("/api/simplefin/status").json()["reversed"] == []
+
+
 def test_sync_route_bridge_down_is_502(authed_client, db_session, monkeypatch):
     ba = _mk_bank_account(db_session, name="Down Checking")
     set_setting(db_session, "simplefin_access_url", ACCESS_URL)
@@ -309,6 +466,81 @@ def test_sync_route_bridge_down_is_502(authed_client, db_session, monkeypatch):
     monkeypatch.setattr(sf, "send", lambda req, **kw: _resp(status=500))
     r = authed_client.post("/api/simplefin/sync")
     assert r.status_code == 502
+
+
+def _bearer(token):
+    """Fresh cookie-less client so the Bearer (token) path authenticates,
+    not the admin session — mirrors tests/test_api_tokens.py."""
+    c = TestClient(app)
+    c.headers["Authorization"] = f"Bearer {token}"
+    return c
+
+
+def test_connection_management_is_admin_only(authed_client, db_session, monkeypatch):
+    """Claiming, remapping and disconnecting the bank feed change stored
+    credentials and the books' wiring — an administrator's, like other
+    connection settings (GET /api/settings redacts the access URL and a
+    non-admin is refused writes there). A bookkeeper may sync an
+    already-connected feed, which is daily books work, but must not connect,
+    remap or disconnect it; a read-only token is refused every write."""
+    keeper_token = authed_client.post(
+        "/api/tokens", json={"label": "keeper", "role": "bookkeeper"}
+    ).json()["token"]
+    reader_token = authed_client.post(
+        "/api/tokens", json={"label": "reader", "role": "readonly"}
+    ).json()["token"]
+    keeper = _bearer(keeper_token)
+    reader = _bearer(reader_token)
+
+    # An admin has already connected and mapped a feed.
+    ba = _mk_bank_account(db_session, name="Shared Checking")
+    set_setting(db_session, "simplefin_access_url", ACCESS_URL)
+    set_setting(db_session, "simplefin_account_map", json.dumps({"ACT-1": ba.id}))
+    db_session.commit()
+
+    # Connection management is refused for both non-admin roles. The claim's
+    # outbound POST must never fire, so no network mock is set: a 403 has to
+    # come from the gate, before claim_access_url would reach send().
+    for who in (keeper, reader):
+        assert (
+            who.post("/api/simplefin/claim", json={"setup_token": _token()}).status_code
+            == 403
+        )
+        assert (
+            who.post(
+                "/api/simplefin/map", json={"mapping": {"ACT-1": ba.id}}
+            ).status_code
+            == 403
+        )
+        assert who.post("/api/simplefin/disconnect").status_code == 403
+
+    # The refused calls changed nothing: the feed is still connected and mapped.
+    assert get_setting_raw(db_session, "simplefin_access_url") == ACCESS_URL
+
+    # A bookkeeper may sync the connected feed and read status; read-only may
+    # read status but not sync (any write).
+    monkeypatch.setattr(sf, "send", lambda req, **kw: _resp(json_body=SF_DATA))
+    assert keeper.get("/api/simplefin/status").status_code == 200
+    assert keeper.post("/api/simplefin/sync").status_code == 200
+    assert reader.get("/api/simplefin/status").status_code == 200
+    assert reader.post("/api/simplefin/sync").status_code == 403
+
+    # Admin (the session) still connects, maps and disconnects.
+    responses = [_resp(text=ACCESS_URL), _resp(json_body=SF_DATA)]
+    monkeypatch.setattr(sf, "send", lambda req, **kw: responses.pop(0))
+    assert (
+        authed_client.post(
+            "/api/simplefin/claim", json={"setup_token": _token()}
+        ).status_code
+        == 200
+    )
+    assert (
+        authed_client.post(
+            "/api/simplefin/map", json={"mapping": {"ACT-1": ba.id}}
+        ).status_code
+        == 200
+    )
+    assert authed_client.post("/api/simplefin/disconnect").status_code == 200
 
 
 def test_disconnect_route_clears_settings(authed_client, db_session):
@@ -667,3 +899,13 @@ def test_the_banking_page_offers_older_history():
     assert "BankingPage.showSimpleFINHistory()" in js
     assert "API.post('/simplefin/sync', { history_months: months })" in js
     assert '<option value="12" selected>12 months</option>' in js
+
+
+def test_the_banking_page_offers_reverse_signs_per_feed():
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "app/static/js/banking.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'class="simplefin-reverse"' in js
+    assert "API.post('/simplefin/map', { mapping, reversed })" in js

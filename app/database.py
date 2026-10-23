@@ -3,8 +3,12 @@
 # PostgreSQL in server mode, per-company SQLite files in desktop mode.
 # ============================================================================
 
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from starlette.requests import HTTPConnection
 
 from app.config import DATABASE_URL
@@ -25,7 +29,19 @@ if not _is_sqlite:
         pool_recycle=1800,
         pool_use_lifo=True,
     )
-engine = create_engine(DATABASE_URL, **_engine_kwargs)
+if _is_sqlite:
+    # A company file may be encrypted (SQLCipher, #290). The engine takes
+    # the sqlcipher3 module in place of sqlite3 and keys each connection
+    # before the PRAGMAs below — only when the file on disk is encrypted;
+    # a plain file, and the suite's :memory: database, open as they always
+    # did. The key is looked up once, and only if it is needed.
+    from app.services import company_file
+
+    engine = company_file.create_sqlite_engine(
+        DATABASE_URL, company_file.resolve_key, **_engine_kwargs
+    )
+else:
+    engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 
 def enable_sqlite_tuning(target_engine) -> None:
@@ -58,7 +74,120 @@ def enable_sqlite_tuning(target_engine) -> None:
 if _is_sqlite:
     enable_sqlite_tuning(engine)
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# ---------------------------------------------------------------------------
+# Several companies on one server (#358). Server Edition used to serve the
+# one company file DATABASE_URL names, and reaching a second meant a second
+# server or repointing this one for everybody. Now a signed-in person's
+# session names the company file they chose, the request runs with that
+# name in the contextvar below, and every Session opened during it binds to
+# that company's own engine — get_db, the audit hooks and the code that
+# calls SessionLocal() directly all follow without knowing. None is the
+# company the server was started for, which is every request on a desktop.
+# Which files may be named, and when, is app/services/served_companies.py.
+# ---------------------------------------------------------------------------
+
+_served_company: ContextVar[str | None] = ContextVar("served_company", default=None)
+_company_engines: dict = {}
+_company_engines_lock = threading.Lock()
+
+
+def served_company() -> str | None:
+    """The company file this request works in, by name; None for the one
+    the server was started for."""
+    return _served_company.get()
+
+
+@contextmanager
+def use_company(filename: str | None):
+    """Run the block in another company: sessions opened inside it bind to
+    that company's engine."""
+    token = _served_company.set(filename)
+    try:
+        yield
+    finally:
+        _served_company.reset(token)
+
+
+def started_company_file() -> str | None:
+    """The basename of the file the server was started for, when it is one."""
+    from app.services import company_file
+
+    path = company_file.sqlite_path(DATABASE_URL)
+    return path.name if path is not None else None
+
+
+def company_engine(filename: str | None):
+    """The engine for a company file, opened the first time it is asked
+    for. The company the server was started for keeps the module's own
+    engine (looked up at call time: the test harness repoints it)."""
+    if filename is None or filename == started_company_file():
+        return engine
+    found = _company_engines.get(filename)
+    if found is not None:
+        return found
+    with _company_engines_lock:
+        found = _company_engines.get(filename)
+        if found is None:
+            from app.services import served_companies
+
+            found = served_companies.open_engine(filename)
+            _company_engines[filename] = found
+        return found
+
+
+def current_engine():
+    """The engine of the company this request works in."""
+    return company_engine(_served_company.get())
+
+
+def another_company_url() -> str | None:
+    """The database URL of the company this request works in when it is not
+    the one the server was started for; None when it is. Code that reads
+    DATABASE_URL for the company in hand keeps reading it for that one."""
+    filename = _served_company.get()
+    if filename is None or filename == started_company_file():
+        return None
+    return current_engine().url.render_as_string(hide_password=False)
+
+
+def current_url() -> str:
+    """The database URL of the company this request works in."""
+    return another_company_url() or DATABASE_URL
+
+
+def forget_company_engines() -> None:
+    """Close and drop every other company's engine; the next request to one
+    opens it again (tests start each case clean)."""
+    with _company_engines_lock:
+        for found in _company_engines.values():
+            found.dispose()
+        _company_engines.clear()
+
+
+def drop_company_engines(filenames) -> None:
+    """Close and drop the engines of companies no longer on the served list:
+    a request naming one again is refused by the list, or opens it afresh if
+    it comes back."""
+    with _company_engines_lock:
+        for name in list(filenames):
+            found = _company_engines.pop(name, None)
+            if found is not None:
+                found.dispose()
+
+
+class CompanySession(Session):
+    """A Session bound to the company the request works in."""
+
+    def __init__(self, bind=None, **kwargs):
+        if _served_company.get() is not None:
+            bind = current_engine()
+        super().__init__(bind=bind, **kwargs)
+
+
+SessionLocal = sessionmaker(
+    class_=CompanySession, autocommit=False, autoflush=False, bind=engine
+)
 Base = declarative_base()
 
 

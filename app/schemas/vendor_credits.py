@@ -1,13 +1,14 @@
 from datetime import date as dt_date, datetime
 from decimal import Decimal
 from typing import Optional
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator, field_serializer
 
 from app.schemas.common import (
     StrictModel,
     TaxRateFloat,
     TaxRateOut,
     validate_non_negative_line,
+    quantity_text,
 )
 from app.schemas.invoices import RateOut
 
@@ -44,6 +45,10 @@ class VendorCreditLineResponse(BaseModel):
     cost_code_id: Optional[int] = None
     line_order: int = 0
     model_config = {"from_attributes": True}
+
+    @field_serializer("quantity")
+    def _quantity(self, value):
+        return quantity_text(value)
 
 
 class VendorCreditApplicationCreate(StrictModel):

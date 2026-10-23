@@ -336,8 +336,17 @@ def account_summaries(data: dict) -> list[dict]:
     return out
 
 
-def to_import_rows(sf_account: dict) -> tuple[list[dict], list[str]]:
+def to_import_rows(
+    sf_account: dict, reverse_signs: bool = False
+) -> tuple[list[dict], list[str]]:
     """SimpleFIN transactions → the dict shape import_transactions expects.
+
+    The protocol says a positive amount is money deposited into the
+    account, and that is how amounts are read. Some bank connections
+    report an account the other way round (a checking account presented
+    as a liability: negative balance, deposits negative); the account
+    object has no type field to detect it by, so the person says so per
+    feed and reverse_signs flips every amount.
 
     Skips pending transactions (their ids are not stable until posted).
     """
@@ -357,6 +366,8 @@ def to_import_rows(sf_account: dict) -> tuple[list[dict], list[str]]:
         if not txn_id:
             errors.append(f"{name}: skipped a transaction without a stable id")
             continue
+        if reverse_signs:
+            amount = -amount
         rows.append(
             {
                 "fitid": txn_id,
@@ -387,12 +398,25 @@ def parse_account_map(raw: str) -> dict[str, int]:
     return out
 
 
+def parse_reversed(raw: str) -> list[str]:
+    """Settings JSON → SimpleFIN account ids whose amounts are reversed."""
+    try:
+        data = json.loads(raw or "[]")
+    except ValueError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if isinstance(item, (str, int))]
+
+
 def sync_accounts(
     db: Session,
     data: dict,
     account_map: dict[str, int],
+    reversed_ids: frozenset[str] | set[str] = frozenset(),
 ) -> dict:
-    """Import every mapped bridge account's transactions. Returns totals."""
+    """Import every mapped bridge account's transactions. Returns totals.
+    Accounts in reversed_ids have their amounts' signs flipped."""
     imported = skipped = 0
     warnings: list[str] = []
     by_id = {str(a.get("id", "")): a for a in data.get("accounts", [])}
@@ -404,7 +428,9 @@ def sync_accounts(
                 "(bank connection may need attention on the SimpleFIN side)"
             )
             continue
-        rows, row_errors = to_import_rows(sf_account)
+        rows, row_errors = to_import_rows(
+            sf_account, reverse_signs=sf_id in reversed_ids
+        )
         warnings.extend(row_errors)
         result = import_transactions(
             db, bank_account_id, rows, import_source="simplefin"

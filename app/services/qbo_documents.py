@@ -1,18 +1,21 @@
-"""Documents the QuickBooks Online import created, acted on here.
+"""Documents an earlier QuickBooks Online import created, acted on here.
 
-The QBO import brings invoices, sales receipts and payments in as documents
-without a posting of their own. The ledger import (Posted Ledger Activity)
-posts QBO's own lines for each one, as a journal mapped by its QBO
-transaction ("Invoice:130", "Sales Receipt:132", "Payment:131").
-
-A person here voids or edits such a document like any other:
+The QuickBooks Online connector was retired in 2.23.2 (services/qbo_common.py
+says why). While it existed, its import brought invoices, sales receipts and
+payments in as documents without a posting of their own, and its ledger
+import posted QBO's own lines for each one, as a journal mapped by its QBO
+transaction ("Invoice:130", "Sales Receipt:132", "Payment:131"). A company
+that was connected still has those documents, and a person here voids or
+edits one like any other:
 
 - its import posting is reversed with it (the usual reversing entry, keyed
   by the transaction it reverses);
 - an edit makes it an ordinary document of ours, with a posting of its own
   (the import's one reversed first, so A/R is never counted twice);
-- the import mappings are marked CHANGED_HERE, so a later import leaves it
-  alone instead of posting it again.
+- the import mappings are marked CHANGED_HERE, as they were when a later
+  import had to leave the document alone.
+
+For any other document every function here is a no-op.
 """
 
 from decimal import Decimal
@@ -455,186 +458,68 @@ def adopt_unposted_payments(db: Session, invoice) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Changes made in QuickBooks Online, applied by the import
+# A repair for what the import left wrong (#317)
 # ---------------------------------------------------------------------------
 
 
-def why_not_changed(db: Session, txn, new_date=None) -> str | None:
-    """Why the import can't reverse its posting `txn` (and post a new
-    version dated `new_date`), in words; None when it can."""
-    from app.services.closing_date import get_closing_date
+def repair_double_counted_payments(db: Session) -> int:
+    """#317: the connector's invoice import set an invoice's amount paid from
+    QuickBooks Online (its total less its balance), and its payment import
+    then added each payment's allocation to it again. A paid invoice read
+    paid twice (a 11,666.66 invoice paid 23,333.32, due -11,666.66), a
+    partly paid one owed too little, and the aging, statements and open
+    lists were off; the ledger was right.
 
-    closing = get_closing_date(db)
-    if closing is not None:
-        for day in (txn.date, new_date):
-            if day is not None and day <= closing:
-                return f"the books are closed through {closing}, and it is dated {day}"
-    if any(line.reconciliation_id for line in txn.lines):
-        return "one of its lines is on a reconciled bank statement here"
-    if any(line.deposit_transaction_id for line in txn.lines):
-        return "its money is in a deposit made here"
-    return None
+    The repair is exact, not a recompute of every invoice: an invoice the
+    import created whose amount paid, less any credit memos applied here,
+    is twice what the payments applied to it is set to what the payments
+    and credits applied, with its balance and status. Any other invoice
+    (one whose QuickBooks Online payments did not all come across, one
+    never imported) is left alone. Runs at startup; a second pass finds
+    nothing. Returns the number repaired."""
+    from sqlalchemy import func
 
+    from app.models.credit_memos import CreditApplication, CreditMemo, CreditMemoStatus
+    from app.models.payments import PaymentAllocation
 
-def reverse_for_import(db: Session, txn) -> Transaction:
-    """The import reverses one of its own postings (QBO changed or voided
-    it): the usual reversing entry, keyed by the posting."""
-    from app.services.accounting import create_journal_entry, reversing_lines
-    from app.services.bank_posting import release_statement_links
-
-    reversal = create_journal_entry(
-        db,
-        txn.date,
-        f"VOID {txn.description or ''}".strip(),
-        reversing_lines(txn.lines),
-        source_type=f"{txn.source_type}_void",
-        source_id=txn.id,
-        reference=txn.reference or "",
-        class_id=txn.class_id,
-        job_id=txn.job_id,
-    )
-    release_statement_links(db, txn)
-    return reversal
-
-
-def amount_of(lines) -> str:
-    """ "25.54": what a posting moves (its debits), for the import log."""
-    total = sum(
-        (Decimal(str(line["debit"] if isinstance(line, dict) else line.debit)))
-        for line in lines
-    )
-    return f"{total:,.2f}"
-
-
-def void_document_from_qbo(db: Session, qbo_type: str, qbo_id: str) -> str | None:
-    """QBO voided a transaction whose document the QBO import created: void
-    that document here too (its import posting is reversed by the caller).
-    A sales receipt's payment goes with it; a payment QBO leaves standing
-    once the invoice it paid is voided stays, unapplied, as in QBO. Returns
-    the document's name for the import log, or None if there is none to
-    void (none, voided already, or ours now)."""
-    from app.services.inventory_service import reverse_sale
-    from app.services.qbo_common import VOIDED_IN_QBO
-
-    kind = {
-        "invoice": "invoice",
-        "salesreceipt": "sales_receipt",
-        "payment": "payment",
-    }.get(qbo_type.lower().replace(" ", ""))
-    if kind is None:
-        return None
-    mapping = (
-        db.query(QBOMapping)
-        .filter(QBOMapping.entity_type == kind, QBOMapping.qbo_id == qbo_id)
-        .first()
-    )
-    if mapping is None:
-        return None
-    if kind == "payment":
-        payment = db.get(Payment, mapping.slowbooks_id)
-        if payment is None or payment.is_voided or payment.transaction_id is not None:
-            return None
-        for alloc in payment.allocations:
-            unpay_invoice(alloc.invoice, alloc.amount)
-        payment.is_voided = True
-        mapping.qbo_sync_token = VOIDED_IN_QBO
-        return f"payment #{payment.id}"
-    invoice = db.get(Invoice, mapping.slowbooks_id)
-    if (
-        invoice is None
-        or invoice.status == InvoiceStatus.VOID
-        or invoice.transaction_id is not None
-    ):
-        return None
-    cost_here = local_cost_live(db, invoice)
-    for alloc in list(invoice.payment_allocations):
-        payment = alloc.payment
-        own = (
-            kind == "sales_receipt"
-            and payment is not None
-            and payment.transaction_id is None
-            and not payment.is_voided
+    imported = [
+        sid
+        for (sid,) in db.query(QBOMapping.slowbooks_id).filter(
+            QBOMapping.entity_type.in_(("invoice", "sales_receipt"))
         )
-        if own:
-            payment.is_voided = True  # the receipt's own payment goes with it
-        else:
-            db.delete(alloc)  # a payment of it stays, unapplied
-    for line in invoice.lines:
-        item = db.get(Item, line.item_id) if line.item_id else None
-        if item is not None and item.track_inventory:
-            reverse_sale(
-                db,
-                item,
-                quantity=Decimal(str(line.quantity)),
-                source_type="invoice_void",
-                source_id=invoice.id,
-                original_source_type="invoice",
-                original_source_id=invoice.id,
-                txn_date=invoice.date,
-                post_journal=cost_here,
-            )
-    invoice.amount_paid = Decimal("0")
-    invoice.balance_due = Decimal("0")
-    invoice.status = InvoiceStatus.VOID
-    mapping.qbo_sync_token = VOIDED_IN_QBO
-    noun = "sales receipt" if kind == "sales_receipt" else "invoice"
-    return f"{noun} {invoice.invoice_number}"
-
-
-def paid_past_new_total(invoice, qbo_id, new_total) -> dict | None:
-    """An invoice the QBO import made, changed in QuickBooks Online to a
-    total below the payments recorded against it here. Neither the document
-    import nor the ledger import applies that change, so the invoice and
-    its posting stay in step (it would owe less than nothing). The one line
-    both give for it, in the same words, so a run's log shows it once;
-    None when the change can be applied."""
-    paid = Decimal(str(invoice.amount_paid or 0))
-    new_total = Decimal(str(new_total))
-    if new_total >= paid:
-        return None
-    return {
-        "entity": "invoice",
-        "qbo_id": str(qbo_id),
-        "document_number": invoice.invoice_number,
-        "code": "IMPORT_QBO_CHANGE_NOT_APPLIED",
-        "message": (
-            f"Invoice QBO #{qbo_id} (document {invoice.invoice_number}) was changed "
-            f"in QuickBooks Online to {new_total:,.2f}, but the payments recorded "
-            f"against it here come to {paid:,.2f}, more than its new total. The "
-            "invoice and its posting stay as they were imported; take a payment "
-            "off it here, and the next import brings QuickBooks Online's change in."
-        ),
-    }
-
-
-def closed_on(db: Session, day) -> str | None:
-    """ "the books are closed through …" when `day` is in a closed period."""
-    from app.services.closing_date import get_closing_date
-
-    closing = get_closing_date(db)
-    if closing is not None and day is not None and day <= closing:
-        return f"the books are closed through {closing}, and it is dated {day}"
-    return None
-
-
-def pay_invoice(invoice, amount) -> None:
-    """Put a payment's amount on an invoice, as recording it does."""
-    invoice.amount_paid = (invoice.amount_paid or Decimal("0")) + amount
-    invoice.balance_due = invoice.total - invoice.amount_paid
-    invoice.status = (
-        InvoiceStatus.PAID
-        if invoice.balance_due <= 0
-        else InvoiceStatus.PARTIAL if invoice.amount_paid > 0 else InvoiceStatus.SENT
+    ]
+    if not imported:
+        return 0
+    paid = dict(
+        db.query(PaymentAllocation.invoice_id, func.sum(PaymentAllocation.amount))
+        .join(Payment, Payment.id == PaymentAllocation.payment_id)
+        .filter(PaymentAllocation.invoice_id.in_(imported))
+        .filter(Payment.is_voided.isnot(True))
+        .group_by(PaymentAllocation.invoice_id)
     )
-
-
-def unpay_invoice(invoice, amount) -> None:
-    """Take a payment's amount off an invoice it paid, as a payment void does."""
-    if invoice is None or invoice.status == InvoiceStatus.VOID:
-        return
-    invoice.amount_paid = (invoice.amount_paid or Decimal("0")) - amount
-    invoice.balance_due = (invoice.balance_due or Decimal("0")) + amount
-    if invoice.amount_paid > 0:
-        invoice.status = InvoiceStatus.PARTIAL
-    else:
-        invoice.status = InvoiceStatus.SENT
+    credited = dict(
+        db.query(CreditApplication.invoice_id, func.sum(CreditApplication.amount))
+        .join(CreditMemo, CreditMemo.id == CreditApplication.credit_memo_id)
+        .filter(CreditApplication.invoice_id.in_(imported))
+        .filter(CreditMemo.status != CreditMemoStatus.VOID)
+        .group_by(CreditApplication.invoice_id)
+    )
+    repaired = 0
+    for invoice in db.query(Invoice).filter(Invoice.id.in_(imported)):
+        if invoice.status == InvoiceStatus.VOID:
+            continue
+        applied = Decimal(str(paid.get(invoice.id) or 0))
+        credits = Decimal(str(credited.get(invoice.id) or 0))
+        if applied <= 0:
+            continue
+        if Decimal(str(invoice.amount_paid or 0)) - credits != applied * 2:
+            continue
+        invoice.amount_paid = applied + credits
+        invoice.balance_due = Decimal(str(invoice.total or 0)) - invoice.amount_paid
+        invoice.status = (
+            InvoiceStatus.PAID if invoice.balance_due <= 0 else InvoiceStatus.PARTIAL
+        )
+        repaired += 1
+    if repaired:
+        db.commit()
+    return repaired

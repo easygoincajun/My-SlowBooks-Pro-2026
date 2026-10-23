@@ -33,6 +33,10 @@ from app.services.iif_export import (
     export_payments,
     export_sales_receipts,
     export_vendors,
+    export_register_entries,
+    export_transfers,
+    export_bill_payments,
+    export_journal_entries,
     to_ansi,
 )
 from app.services.iif_import import import_all, validate_iif
@@ -116,6 +120,47 @@ def export_sales_receipts_iif(
     return _iif_response(content, "sales_receipts.iif")
 
 
+@router.get("/export/register-entries")
+def export_register_entries_iif(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    """Checks, deposits made from the register and card charges (#344)."""
+    content = export_register_entries(db, date_from, date_to)
+    return _iif_response(content, "register_entries.iif")
+
+
+@router.get("/export/transfers")
+def export_transfers_iif(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    content = export_transfers(db, date_from, date_to)
+    return _iif_response(content, "transfers.iif")
+
+
+@router.get("/export/bill-payments")
+def export_bill_payments_iif(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    content = export_bill_payments(db, date_from, date_to)
+    return _iif_response(content, "bill_payments.iif")
+
+
+@router.get("/export/journal-entries")
+def export_journal_entries_iif(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+):
+    content = export_journal_entries(db, date_from, date_to)
+    return _iif_response(content, "journal_entries.iif")
+
+
 @router.get("/export/customers")
 def export_customers_iif(db: Session = Depends(get_db)):
     content = export_customers(db)
@@ -169,6 +214,7 @@ def export_estimates_iif(db: Session = Depends(get_db)):
 async def import_iif(
     file: UploadFile = File(...),
     retitle_names: bool = Form(False),
+    adjusting: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """Upload and import an IIF file into Slowbooks.
@@ -189,7 +235,15 @@ async def import_iif(
         text = content.decode("cp1252", errors="replace")
 
     try:
-        result = import_all(db, text, retitle_names=retitle_names)
+        # ``adjusting``: the file is an accountant's, and its GENERAL
+        # JOURNAL blocks post as adjusting entries (#344, #341)
+        result = import_all(
+            db,
+            text,
+            retitle_names=retitle_names,
+            adjusting=adjusting,
+            posted_by=db.info.get("acting_username"),
+        )
     except Exception:
         db.rollback()
         logger.exception("IIF import failed")

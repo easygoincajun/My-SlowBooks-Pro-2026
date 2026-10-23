@@ -21,6 +21,7 @@ from app.services.accounting import (
 from app.services.terminology import document_reference
 
 ZERO_TOTAL_CODE = "zero_total"
+CREDIT_LIMIT_CODE = "credit_limit"
 logger = logging.getLogger(__name__)
 
 
@@ -72,6 +73,60 @@ def confirm_zero_total(
             "code": ZERO_TOTAL_CODE,
             "message": _zero_total_sentence(noun, action),
             "question": question or f"This {noun} adds up to $0.00. Save it anyway?",
+        },
+    )
+
+
+def confirm_credit_limit(
+    db,
+    customer,
+    owed,
+    allowed: bool,
+    noun: str = "invoice",
+    exclude_invoice_id=None,
+    question: str | None = None,
+) -> None:
+    """A customer's credit limit, told to every way of saving an invoice
+    (#256, 2.22.2). The form asked before it saved and nothing else did:
+    `POST /api/invoices` from an agent saved an over-limit invoice without
+    a word, though the limit is stored and imported from QuickBooks. Now a
+    document that would take what the customer owes past their limit is
+    refused with 409 and ``detail = {"code": "credit_limit", "message",
+    "question", "limit", "would_owe"}`` unless the request carries
+    ``allow_over_credit_limit: true``; the page asks the question and sends
+    the request again with the flag. What they owe is their open balance in
+    home dollars, net of the credits and unapplied payments they hold (as
+    A/R Aging and the customer page count it), less the invoice being
+    edited (whose new amount is `owed`). Nothing is written by the refused
+    request. A customer with no limit is never asked."""
+    from app.models.invoices import Invoice
+    from app.services.contact_balances import customer_balance, home_amount
+
+    if allowed or customer is None:
+        return
+    limit = Decimal(str(getattr(customer, "credit_limit", None) or 0))
+    if limit <= 0:
+        return
+    open_balance = customer_balance(db, customer.id)
+    if exclude_invoice_id is not None:
+        current = db.get(Invoice, exclude_invoice_id)
+        if current is not None and current.status != InvoiceStatus.VOID:
+            open_balance -= home_amount(current.balance_due, current.exchange_rate)
+    after = _q(open_balance + Decimal(str(owed or 0)))
+    if after <= limit:
+        return
+    sentence = (
+        f"{customer.name}'s credit limit is ${limit:,.2f}. "
+        f"With this {noun} they would owe ${after:,.2f}."
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": CREDIT_LIMIT_CODE,
+            "message": sentence,
+            "question": question or f"{sentence} Save it anyway?",
+            "limit": str(_q(limit)),
+            "would_owe": str(after),
         },
     )
 
@@ -186,8 +241,8 @@ def refuse_negative_lines(db: Session, lines, invoice=None) -> None:
 
 def kept_tax(invoice, tax_rate, lines):
     """The tax amount an edit keeps as it is: one an import brought with no
-    rate that gives it (QuickBooks Online's, when its tax lines don't make a
-    single rate; see qbo_import._qbo_rate). Worked out from the rate, it
+    rate that gives it (QuickBooks Online's, when its tax lines didn't make
+    a single rate). Worked out from the rate, it
     would come to 0.00. None when a rate is entered, when the invoice has a
     rate or no tax, or when no line is taxable now."""
     if tax_rate and Decimal(str(tax_rate)) != 0:
@@ -276,9 +331,9 @@ def _post_invoice_journal(
     """One construction/conversion/posting path for invoice create and edit.
 
     `balance_on_income` is for an invoice the QuickBooks Online import
-    created. Its discount and bundles come across as lines
-    (qbo_import._document_lines), so its lines add up to its total; a line
-    of a kind the import doesn't bring across still leaves a difference,
+    created. Its discount and bundles came across as lines, so its lines
+    add up to its total; a line of a kind the import didn't bring across
+    still leaves a difference,
     which the import log named. That difference posts to the income
     account, said plainly on the entry and in the server log, so the entry
     carries the total the invoice shows."""
@@ -342,24 +397,38 @@ def _post_invoice_journal(
 
 
 def _reverse_and_delete_journal(db: Session, transaction_id: int):
-    """Reverse account balances for existing journal lines, then delete them.
+    """Reverse account balances for existing journal lines, then delete them,
+    each leaving a DELETE audit event with its account and amounts (#289).
 
-    Used by update_invoice to prepare for a fresh journal rebuild.
+    Used by update_invoice and update_bill to prepare for a fresh journal
+    rebuild.
     """
     from app.models.transactions import TransactionLine
+    from app.services.accounting import apply_balance_deltas
+    from app.services.audit import audited_bulk_delete
 
     old_lines = (
         db.query(TransactionLine)
         .filter(TransactionLine.transaction_id == transaction_id)
         .all()
     )
+    # Aggregate the reversal per account and apply atomically, the same way
+    # the posting path does, so this can't lose a concurrent update.
+    balance_deltas: dict = {}
     for ol in old_lines:
         account = db.query(Account).filter(Account.id == ol.account_id).first()
         if account:
             if account.account_type.value in ("asset", "expense", "cogs"):
-                account.balance -= ol.debit - ol.credit
+                delta = -(ol.debit - ol.credit)
             else:
-                account.balance -= ol.credit - ol.debit
-    db.query(TransactionLine).filter(
-        TransactionLine.transaction_id == transaction_id
-    ).delete()
+                delta = -(ol.credit - ol.debit)
+            balance_deltas[account.id] = (
+                balance_deltas.get(account.id, Decimal("0")) + delta
+            )
+    apply_balance_deltas(db, balance_deltas)
+    audited_bulk_delete(
+        db,
+        db.query(TransactionLine).filter(
+            TransactionLine.transaction_id == transaction_id
+        ),
+    )

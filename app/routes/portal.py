@@ -29,7 +29,8 @@ from app.database import get_db
 from app.models.bank_accounts import BankAccountKind, DepositType, EmployeeBankAccount
 from app.models.payroll import Employee, FilingStatus, portal_token_digest
 from app.models.portal_access import PortalAccess
-from app.models.pto import PTOAccrual, PTOPolicy, PTORequest, PTOType
+from app.models.pto import PTOAccrual, PTOPolicy, PTORequest, PTORequestStatus, PTOType
+from app.routes.pto import cancel_pto_request
 from app.services import file_store
 from app.services.encryption import encrypt
 from app.services.nacha_export import validate_routing_number
@@ -326,10 +327,14 @@ def _add_bank(
     return None
 
 
-def _bank_error_url(message: str) -> str:
-    """Build the /portal/bank?error=... redirect target for a validation
+def _error_url(page: str, message: str) -> str:
+    """Build the /portal/<page>?error=... redirect target for a validation
     failure message (spaces become '+')."""
-    return "/portal/bank?error=" + message.replace(" ", "+")
+    return f"/portal/{page}?error=" + message.replace(" ", "+")
+
+
+def _bank_error_url(message: str) -> str:
+    return _error_url("bank", message)
 
 
 def _request_pto(
@@ -503,7 +508,13 @@ def portal_bank_add(
 
 @router.get("/portal/pto")
 @limiter.limit("30/minute")
-def portal_pto(request: Request, saved: int = 0, db: Session = Depends(get_db)):
+def portal_pto(
+    request: Request,
+    saved: int = 0,
+    withdrawn: int = 0,
+    error: str = "",
+    db: Session = Depends(get_db),
+):
     emp = _employee_from_cookie(request, db)
     accruals = (
         db.query(PTOAccrual, PTOPolicy)
@@ -526,6 +537,8 @@ def portal_pto(request: Request, saved: int = 0, db: Session = Depends(get_db)):
         requests=requests,
         pto_types=list(PTOType),
         saved=saved,
+        withdrawn=withdrawn,
+        error=error,
     )
 
 
@@ -551,6 +564,35 @@ def portal_pto_request(
         db=db,
     )
     return _portal_redirect("/portal/pto?saved=1")
+
+
+@router.post("/portal/pto/{request_id}/withdraw")
+@limiter.limit("10/minute")
+def portal_pto_withdraw(
+    request: Request, request_id: int, db: Session = Depends(get_db)
+):
+    """The employee takes back a request nobody has acted on yet. One that
+    was approved is the employer's to cancel — the hours have left the bank
+    and the relief is posted, so it goes through the HR page."""
+    emp = _employee_from_cookie(request, db)
+    req = (
+        db.query(PTORequest)
+        .filter(PTORequest.id == request_id, PTORequest.employee_id == emp.id)
+        .first()
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req.status != PTORequestStatus.PENDING:
+        return _portal_redirect(
+            _error_url(
+                "pto",
+                "Only a request that is still pending can be withdrawn. "
+                "Ask your employer to cancel it.",
+            )
+        )
+    cancel_pto_request(db, req)
+    db.commit()
+    return _portal_redirect("/portal/pto?withdrawn=1")
 
 
 @router.post("/portal/logout")

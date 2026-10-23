@@ -1,5 +1,5 @@
 /**
- * IIF Import/Export — QuickBooks 2003 Pro Interoperability
+ * IIF Import/Export — QuickBooks Desktop Interoperability
  *
  * In QB2003: Import: File > Utilities > Import > IIF Files
  * Export: File > Utilities > Export > Lists to IIF Files
@@ -14,9 +14,9 @@ const IIFPage = {
     async render() {
         return `
             <div class="page-header">
-                <h2>QuickBooks Interop</h2>
+                <h2>Interoperability</h2>
                 <div style="font-size:10px; color:var(--text-muted);">
-                    IIF Import/Export &mdash; Compatible with QuickBooks 2003 Pro
+                    IIF Import/Export &mdash; Works with QuickBooks Desktop
                 </div>
             </div>
 
@@ -25,7 +25,7 @@ const IIFPage = {
                 <div class="iif-section">
                     <h3>&#9660; Export to IIF</h3>
                     <p style="font-size:11px; color:var(--text-secondary); margin-bottom:12px;">
-                        Download Slowbooks data as .iif files for import into QuickBooks 2003 Pro
+                        Download Slowbooks data as .iif files for import into QuickBooks Desktop
                         via File &gt; Utilities &gt; Import &gt; IIF Files.
                     </p>
 
@@ -64,6 +64,12 @@ const IIFPage = {
                             <button class="btn btn-secondary" style="flex:1;" onclick="IIFPage.exportSection('bills')">Bills</button>
                             <button class="btn btn-secondary" style="flex:1;" onclick="IIFPage.exportSection('deposits')">Deposits</button>
                         </div>
+                        <div style="display:flex; gap:6px; margin-top:6px;">
+                            <button class="btn btn-secondary" style="flex:1;" onclick="IIFPage.exportSection('register-entries')">Checks &amp; Card Charges</button>
+                            <button class="btn btn-secondary" style="flex:1;" onclick="IIFPage.exportSection('transfers')">Transfers</button>
+                            <button class="btn btn-secondary" style="flex:1;" onclick="IIFPage.exportSection('bill-payments')">Bill Payments</button>
+                            <button class="btn btn-secondary" style="flex:1;" onclick="IIFPage.exportSection('journal-entries')">Journal Entries</button>
+                        </div>
                     </div>
                 </div>
 
@@ -71,9 +77,17 @@ const IIFPage = {
                 <div class="iif-section" data-write>
                     <h3>&#9650; Import from IIF</h3>
                     <p style="font-size:11px; color:var(--text-secondary); margin-bottom:12px;">
-                        Upload .iif files exported from QuickBooks 2003 Pro
-                        via File &gt; Utilities &gt; Export &gt; Lists to IIF Files.
+                        Upload .iif files exported from QuickBooks Desktop
+                        via File &gt; Utilities &gt; Export &gt; Lists to IIF Files. Transaction
+                        blocks come in too: invoices, payments, sales receipts, estimates, bills,
+                        deposits, checks, card charges, transfers, bill payments (as journal
+                        entries on the bank and Accounts Payable) and general journal entries.
+                        A block already here posts nothing twice.
                     </p>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:8px;">
+                        <input type="checkbox" id="iif-adjusting">
+                        This is an accountant's file: post its GENERAL JOURNAL blocks as adjusting entries
+                    </label>
 
                     <div id="iif-dropzone" class="iif-dropzone"
                          onclick="document.getElementById('iif-file-input').click()"
@@ -107,12 +121,26 @@ const IIFPage = {
                         QuickBooks Desktop can't export transactions to IIF — export a detail
                         <strong>report</strong> to CSV instead and upload it here. The report type is
                         detected automatically: <strong>Transaction Detail</strong> filtered to Sales
-                        Receipt (each imports as a paid sale + payment), <strong>Deposit
-                        Detail</strong>, or <strong>Check Detail</strong> (both import as journal
-                        entries on your bank account). Keep the report's default columns.
-                        Safe to re-upload — duplicates are skipped.
+                        Receipt or Invoice (a receipt imports as a paid sale + payment; an invoice with
+                        its lines, its Customer:Job and its number, open, partly paid or paid by the
+                        report's <strong>Open Balance</strong> column — add that column, or every
+                        invoice comes in open; upload again with it and the open ones here are marked
+                        paid), <strong>Deposit Detail</strong>, or <strong>Check Detail</strong> (both
+                        import as journal entries on your bank account), or <strong>Transaction Detail
+                        by Account</strong> with the dates set to All (every transaction of every type
+                        as a journal entry; import the lists IIF first); or, for timesheets, <strong>Time by Name by Job detail</strong> or <strong>Time by Job by Name detail</strong> (Reports > Jobs, Time &amp; Mileage), saved as CSV or Excel: every entry becomes an approved time entry under its employee, marked as QuickBooks' so no pay run picks it up. Keep the report's default
+                        columns. Safe to re-upload — what is already here is skipped.
+                        <strong>A categorized bank sheet</strong> (the Transaction Pro / SaasAnt layout: Bank Account, Transaction Date, Memo, Payee, Account, Amount) posts each row as the register entry it is, rows sharing the date, payee and memo as one split entry; payees not on the lists are added.
                     </p>
-                    <input type="file" id="qbcsv-file-input" aria-label="QuickBooks report CSV file" accept=".csv" style="font-size:11px; margin-bottom:8px;">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:8px;">
+                        <input type="checkbox" id="qbcsv-outflow-positive">
+                        In this sheet money out is positive (the usual way round is money out negative)
+                    </label>
+                    <input type="file" id="qbcsv-file-input" aria-label="QuickBooks report file (CSV or Excel)" accept=".csv,.xlsx" style="font-size:11px; margin-bottom:8px;">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:8px;">
+                        <input type="checkbox" id="qbcsv-adjusting-only">
+                        Adjusting entries only: an accountant's Transaction Detail by Account filtered to journal entries. Anything else in the file is refused, and what posts is marked adjusting.
+                    </label>
                     <div>
                         <button class="btn btn-primary" onclick="IIFPage.importQbReportCsv()">Import Report CSV</button>
                     </div>
@@ -124,54 +152,101 @@ const IIFPage = {
     // What an import says when it's done (#197). One that came back with
     // errors said "Imported 0 records" in green and "Import complete", and the
     // red box below was the only sign of them.
-    _reportImport(total, errors) {
-        const records = `Imported ${total} record${total === 1 ? '' : 's'}`;
+    // The error lists of the last import, by box, for Save the list.
+    _errors: {},
+
+    // The whole list in the box, however long, with its count and a button
+    // that saves it as a text file: the box showed twenty and "and 14,070
+    // more", and the person asked where the rest were (discussion #349).
+    _errorBox(errors, box) {
+        IIFPage._errors[box] = errors;
+        const n = errors.length;
+        let html = '<div class="iif-errors">';
+        if (n > 1) {
+            html += `<div style="margin-bottom:4px;"><strong>${n.toLocaleString()} problems.</strong> `
+                + `<button type="button" class="btn btn-sm btn-secondary" onclick="IIFPage.saveErrors('${box}')" title="Every line of this list, as a text file">Save the list</button></div>`;
+        }
+        errors.forEach(e => { html += `${escapeHtml(e)}<br>`; });
+        return html + '</div>';
+    },
+
+    // The desktop app saves it to Documents/SlowBooks Pro/Reports and says
+    // where; a browser downloads it.
+    async saveErrors(box) {
+        const errors = IIFPage._errors[box] || [];
+        if (!errors.length) return;
+        const day = todayISO();  // the local date: UTC is tomorrow on a US evening
+        const filename = `Import-problems_${day}.txt`;
+        const blob = new Blob([errors.join('\n') + '\n'], { type: 'text/plain' });
+        const desktop = window.SlowbooksDesktop;
+        if (!(desktop && await desktop.saveFile(blob, filename))) {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = filename;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+            toast(`Saved ${filename}`);
+        }
+    },
+
+    _reportImport(total, errors, unsupported = 0, words = null) {
+        const records = words || `Imported ${total} record${total === 1 ? '' : 's'}`;
+        const left = unsupported > 0 ? `, ${unsupported} not imported (type not supported)` : '';
         if (errors > 0) {
-            toast(`${records}, ${errors} error${errors === 1 ? '' : 's'}: see the list below`, 'error');
-            App.setStatus('QuickBooks Interop — Import finished with errors');
+            toast(`${records}${left}, ${errors} error${errors === 1 ? '' : 's'}: see the list below`, 'error');
+            App.setStatus('Interoperability — Import finished with errors');
         } else {
-            toast(records);
-            App.setStatus('QuickBooks Interop — Import complete');
+            toast(`${records}${left}`);
+            App.setStatus('Interoperability — Import complete');
         }
     },
 
     async importQbReportCsv() {
         const input = $('#qbcsv-file-input');
-        if (!input?.files[0]) { toast('Choose a CSV file first', 'error'); return; }
+        if (!input?.files[0]) { toast('Choose a file first', 'error'); return; }
         const formData = new FormData();
         formData.append('file', input.files[0]);
+        formData.append('adjusting_only', $('#qbcsv-adjusting-only')?.checked ? 'true' : 'false');
+        formData.append('outflow_positive', $('#qbcsv-outflow-positive')?.checked ? 'true' : 'false');
         try {
             App.setStatus('Importing QuickBooks report CSV...');
             const res = await fetch('/api/csv/import/qb-report', { method: 'POST', body: formData });
             if (!res.ok) throw new Error(await API.responseError(res, 'Import failed'));
             const result = await res.json();
 
-            const kindLabel = { sales_receipts: 'Sales Receipts', deposits: 'Deposits', checks: 'Checks' };
+            const kindLabel = { sales_receipts: 'Sales Receipts', invoices: 'Invoices', sales_and_invoices: 'Sales Receipts and Invoices', deposits: 'Deposits', checks: 'Checks', ledger: 'Transaction Detail by Account', journals: 'Journal entries', time: 'Time by Name by Job detail', time_entries: 'Time entries', categorized: 'Categorized bank sheet', posted: 'Register entries', splits: 'Split entries' };
             let html = '<div class="iif-results"><h4>Results</h4>';
             if (result.detected) {
-                html += `<div class="result-row"><span>Detected report</span><span class="result-count">${kindLabel[result.detected] || result.detected}</span></div>`;
+                html += `<div class="result-row"><span>Detected report</span><span class="result-count">${escapeHtml(result.report || kindLabel[result.detected] || result.detected)}</span></div>`;
             }
-            for (const key of ['sales_receipts', 'deposits', 'checks']) {
+            for (const key of ['sales_receipts', 'invoices', 'deposits', 'checks', 'journals', 'time_entries', 'posted', 'splits']) {
                 if (result[key] > 0) {
-                    html += `<div class="result-row"><span>${kindLabel[key]}</span><span class="result-count">${result[key]} imported</span></div>`;
+                    const how = key === 'journals' && result.adjusting ? ' imported as adjusting entries' : ' imported';
+                    html += `<div class="result-row"><span>${kindLabel[key]}</span><span class="result-count">${result[key]}${how}</span></div>`;
                 }
+            }
+            if (result.invoices > 0) {
+                html += `<div class="result-row"><span style="font-size:11px;color:var(--gray-500)">${result.invoices_open || 0} open, ${result.invoices_partly_paid || 0} partly paid, ${result.invoices_paid || 0} paid</span></div>`;
+            }
+            if (result.invoices_updated > 0) {
+                html += `<div class="result-row"><span>Already here, marked paid or partly paid from Open Balance</span><span class="result-count">${result.invoices_updated}</span></div>`;
             }
             if (result.duplicates_skipped > 0) {
                 html += `<div class="result-row"><span>Duplicates skipped</span><span class="result-count">${result.duplicates_skipped}</span></div>`;
             }
             html += '</div>';
             if (result.warnings?.length) {
-                html += '<div class="iif-errors" style="border-color:var(--warning,#cc9933);">';
+                // a warning sits in the warnings box, as the IIF import's do
+                // (it sat in the error box with an orange border)
+                html += '<div class="iif-warnings">';
                 result.warnings.forEach(w => { html += `${escapeHtml(w)}<br>`; });
                 html += '</div>';
             }
             if (result.errors?.length) {
-                html += '<div class="iif-errors">';
-                result.errors.forEach(e => { html += `${escapeHtml(typeof e === 'string' ? e : JSON.stringify(e))}<br>`; });
-                html += '</div>';
+                html += IIFPage._errorBox(result.errors.map(e => typeof e === 'string' ? e : JSON.stringify(e)), 'qbcsv');
             }
             $('#qbcsv-import-result').innerHTML = html;
-            const total = (result.sales_receipts || 0) + (result.deposits || 0) + (result.checks || 0);
+            const total = (result.sales_receipts || 0) + (result.invoices || 0) + (result.deposits || 0) + (result.checks || 0) + (result.journals || 0) + (result.time_entries || 0) + (result.posted || 0);  // + the categorized sheet's register entries (W-21)
             IIFPage._reportImport(total, (result.errors || []).length);
         } catch (err) {
             toast(err.message, 'error');
@@ -188,7 +263,7 @@ const IIFPage = {
     exportSection(section) {
         let url = `/api/iif/export/${section}`;
         // Add date range for invoices/payments
-        if (['invoices', 'payments', 'sales-receipts', 'bills', 'deposits'].includes(section)) {
+        if (['invoices', 'payments', 'sales-receipts', 'bills', 'deposits', 'register-entries', 'transfers', 'bill-payments', 'journal-entries'].includes(section)) {
             const from = $('#iif-date-from')?.value;
             const to = $('#iif-date-to')?.value;
             const params = [];
@@ -229,7 +304,7 @@ const IIFPage = {
                 setTimeout(() => URL.revokeObjectURL(a.href), 30000);
                 toast(`Exported ${filename}`);
             }
-            App.setStatus('QuickBooks Interop — Ready');
+            App.setStatus('Interoperability — Ready');
         } catch (err) {
             toast(err.message, 'error');
             App.setStatus('Export failed');
@@ -321,7 +396,7 @@ const IIFPage = {
             } else {
                 toast('Validation found errors', 'error');
             }
-            App.setStatus('QuickBooks Interop — Ready');
+            App.setStatus('Interoperability — Ready');
         } catch (err) {
             toast(err.message, 'error');
             App.setStatus('Validation failed');
@@ -349,6 +424,15 @@ const IIFPage = {
             html += `<div class="result-row">
                 <span>${section}</span>
                 <span class="result-count">${count} records</span>
+            </div>`;
+        }
+
+        // The blocks the import would not take, by type, before the person
+        // decides (#288); the warning below names each block
+        for (const [ttype, count] of Object.entries(report.unsupported_counts || {})) {
+            html += `<div class="result-row">
+                <span>${escapeHtml(ttype)} &mdash; not imported</span>
+                <span class="result-count">${count} block${count === 1 ? '' : 's'}</span>
             </div>`;
         }
 
@@ -397,6 +481,7 @@ const IIFPage = {
         const formData = new FormData();
         formData.append('file', IIFPage._selectedFile);
         formData.append('retitle_names', $('#iif-retitle-names')?.checked ? 'true' : 'false');
+        formData.append('adjusting', $('#iif-adjusting')?.checked ? 'true' : 'false');
 
         try {
             App.setStatus('Importing IIF file...');
@@ -412,11 +497,41 @@ const IIFPage = {
                           (result.sales_receipts || 0) +
                           (result.estimates || 0) + (result.bills || 0) +
                           (result.deposits || 0);
-            IIFPage._reportImport(total, (result.errors || []).length);
+            IIFPage._reportImport(total, (result.errors || []).length, result.unsupported || 0,
+                IIFPage._importedWords(result));
         } catch (err) {
             toast(err.message, 'error');
             App.setStatus('Import failed');
         }
+    },
+
+    // Transactions the import took, every type together.
+    _transactionsImported(result) {
+        return (result.invoices || 0) + (result.payments || 0) + (result.sales_receipts || 0)
+            + (result.estimates || 0) + (result.bills || 0) + (result.deposits || 0)
+            + (result.ledger_entries || 0);
+    },
+
+    // What the IIF import brought in, in the panel's own terms (2.23.1 gate,
+    // NEW-106: "Imported 4 records" was a class and three transactions added
+    // up, a total the panel never shows): "Imported 1 class and 3
+    // transactions"; a file of records already here, "Nothing imported, 3
+    // already here".
+    _importedWords(result) {
+        const parts = [];
+        const say = (n, one, many) => { if (n > 0) parts.push(`${n} ${n === 1 ? one : many}`); };
+        say(result.classes || 0, 'class', 'classes');
+        say(result.accounts || 0, 'account', 'accounts');
+        say(result.customers || 0, 'customer', 'customers');
+        say(result.vendors || 0, 'vendor', 'vendors');
+        say(result.items || 0, 'item', 'items');
+        say(IIFPage._transactionsImported(result), 'transaction', 'transactions');
+        if (!parts.length) {
+            const here = result.duplicates_skipped || 0;
+            return here > 0 ? `Nothing imported, ${here} already here` : 'Nothing imported';
+        }
+        const last = parts.pop();
+        return `Imported ${parts.length ? `${parts.join(', ')} and ` : ''}${last}`;
     },
 
     _showImportResult(result) {
@@ -432,6 +547,8 @@ const IIFPage = {
             ['Estimates', result.estimates],
             ['Bills', result.bills],
             ['Deposits', result.deposits],
+            ['Checks, card charges, transfers and bill payments', (result.ledger_entries || 0) - (result.journal_entries || 0)],
+            ['Journal entries', result.journal_entries],
         ];
 
         let html = '<div class="iif-results"><h4>Import Results</h4>';
@@ -451,6 +568,26 @@ const IIFPage = {
                 <span class="result-count">${result.duplicates_skipped}</span>
             </div>`;
         }
+        // Blocks of a type the importer doesn't take (#288): counted and
+        // named, never dropped without a word; the warnings say which types
+        if (result.unsupported > 0) {
+            const named = (result.unsupported_blocks || []).slice(0, 8).map(u =>
+                `block ${u.block}: ${escapeHtml(u.type)}${u.docnum ? ' ' + escapeHtml(u.docnum) : ''}${u.date ? ', ' + escapeHtml(u.date) : ''}${u.name ? ', ' + escapeHtml(u.name) : ''}`).join('; ');
+            html += `<div class="result-row">
+                <span>Not imported (type not supported)</span>
+                <span class="result-count">${result.unsupported}</span>
+            </div>
+            <div class="result-row"><span style="font-size:11px;color:var(--gray-500)">${named}${(result.unsupported_blocks || []).length > 8 ? '; …' : ''}</span></div>`;
+        }
+        // Every transaction block in the file accounted for, in one sentence
+        // on a line of its own: as a label beside a count across the row it
+        // wrapped after "the", the count's "3:" reading as a superscript
+        // (2.23.1 gate, NEW-106)
+        if (result.transaction_blocks > 0) {
+            const n = result.transaction_blocks;
+            const imported = IIFPage._transactionsImported(result);
+            html += `<div class="result-row result-row--line">${n} transaction block${n === 1 ? '' : 's'} in the file: ${imported} imported, ${result.duplicates_skipped || 0} already here, ${result.unsupported || 0} not imported, ${(result.errors || []).length} failed</div>`;
+        }
         if (result.names_changed > 0) {
             html += `<div class="result-row">
                 <span>ALL-CAPS names changed to normal capitalization</span>
@@ -469,12 +606,7 @@ const IIFPage = {
         }
 
         if (result.errors && result.errors.length) {
-            html += '<div class="iif-errors">';
-            result.errors.forEach(e => {
-                const msg = typeof e === 'string' ? e : `Row ${e.row}: ${e.message}`;
-                html += `${escapeHtml(msg)}<br>`;
-            });
-            html += '</div>';
+            html += IIFPage._errorBox(result.errors.map(e => typeof e === 'string' ? e : `Row ${e.row}: ${e.message}`), 'iif');
         }
 
         $('#iif-import-result').innerHTML = html;

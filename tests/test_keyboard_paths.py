@@ -46,8 +46,13 @@ def test_the_dialogs_tab_is_walked_in_script_in_the_browsers_order():
         r"const _TAB_SEL = 'a\[href\], area\[href\], button, input, select, textarea, summary, iframe, \[tabindex\]",
         utils,
     )
-    # the dialog's first control is found the same way
-    assert "_tabStops($('#modal-body'), null)[0]" in utils
+    # the dialog's first control is found the same way — passing a form's
+    # own skip link by (#266), which stays the first stop for Tab
+    assert "const stops = _tabStops($('#modal-body'), null);" in utils
+    assert (
+        "const first = stops.find(el => !el.matches('.skip-link')) || stops[0];"
+        in utils
+    )
     # a text box's words are selected on the way in, a textarea's are not
     tab_to = utils[utils.index("function _tabTo(el)") :]
     tab_to = tab_to[: tab_to.index("\n}\n")]
@@ -103,10 +108,13 @@ def test_the_alt_shortcuts_compare_the_keys_position_and_cmd_k_finds():
     # Save or the × they opened another form in its place (W-6 review);
     # the theme fires anywhere but a field
     assert "const leaves = (code) => letter(code) && !App.editingDialog();" in keys
-    for code in ("KeyN", "KeyP", "KeyQ", "KeyH"):
+    for code in ("KeyN", "KeyP", "KeyQ", "KeyH", "KeyB", "KeyE"):
         assert f"if (leaves('{code}'))" in keys, code
     assert "if (letter('KeyD'))" in keys
-    assert "const entry = leaves('KeyN') || leaves('KeyP') || leaves('KeyQ');" in keys
+    assert (
+        "const entry = leaves('KeyN') || leaves('KeyP') || leaves('KeyQ') || leaves('KeyB') || leaves('KeyE');"
+        in keys
+    )
     assert "if (entry && App.isReadOnly())" in keys
     # ⌘⌥[ is not Back
     assert (

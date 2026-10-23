@@ -1,0 +1,50 @@
+name: Upstream release watch
+
+# This fork carries the original project's releases (VonHoltenCodes/
+# SlowBooks-Pro-2026) under its own features: app/__init__.py's version is
+# the upstream release it carries plus a fork build number (2.26.0.1).
+# Once a day this asks for upstream's latest release and, when it is newer
+# than the one carried, opens an issue to sync it, once per release.
+# The sync itself is the routine in CLAUDE.md, "Syncing upstream".
+
+on:
+  schedule:
+    - cron: "17 13 * * *"  # daily, 13:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    if: github.repository == 'easygoincajun/My-SlowBooks-Pro-2026'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare upstream's latest release with the one carried
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          carried=$(sed -n 's/^__version__ = "\([0-9]*\.[0-9]*\.[0-9]*\).*"/\1/p' app/__init__.py)
+          tag=$(gh api repos/VonHoltenCodes/SlowBooks-Pro-2026/releases/latest --jq .tag_name)
+          latest=${tag#v}
+          echo "Carried: $carried   upstream latest: $latest"
+          newest=$(printf '%s\n%s\n' "$carried" "$latest" | sort -V | tail -1)
+          if [ "$latest" = "$carried" ] || [ "$newest" != "$latest" ]; then
+            echo "Up to date."
+            exit 0
+          fi
+          title="Upstream $tag released: sync it into the fork"
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state all --search "\"$title\" in:title" \
+               --json title --jq '.[].title' | grep -Fxq "$title"; then
+            echo "Issue already opened for $tag."
+            exit 0
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$(cat <<EOF
+          The original project released [$tag](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/releases/tag/$tag). This fork carries $carried.
+
+          Sync it with the routine in CLAUDE.md, "Syncing upstream": fetch the tag, merge it on a \`sync/upstream-$tag\` branch, resolve conflicts keeping the fork's features, run the tests, open a PR, then tag the fork build \`v${latest}.1\`.
+          EOF
+          )"

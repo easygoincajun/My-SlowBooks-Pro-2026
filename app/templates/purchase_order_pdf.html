@@ -92,7 +92,7 @@
         {% for line in po.lines %}
             <tr>
                 <td>{{ line.description or (line.item.name if line.item else '') }}</td>
-                <td class="r">{{ line.quantity }}</td>
+                <td class="r">{{ line.quantity | qty }}</td>
                 <td class="r">{{ line.rate | currency }}</td>
                 <td class="r">{{ line.amount | currency }}</td>
             </tr>

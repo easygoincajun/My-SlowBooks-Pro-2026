@@ -371,7 +371,11 @@ def test_a_company_file_another_program_is_writing_keeps_the_folder(
     _old_books(books_before, busy)
     _open_on_this_version(busy)
     _manifest(data_folder, ("Busy Books", "busy.db"))
-    with closing(sqlite3.connect(busy, isolation_level=None)) as writer:
+    # the other program's lock, held through the library the sweep reads with:
+    # in one process only the same SQLite library sees the lock (NEW-156)
+    from app.services.company_file import sqlite_module
+
+    with closing(sqlite_module().connect(busy, isolation_level=None)) as writer:
         writer.execute("BEGIN EXCLUSIVE")
         r = client.get("/api/uploads/legacy")
         writer.execute("ROLLBACK")
@@ -571,3 +575,23 @@ def test_a_company_in_use_is_read_through_its_wal(tmp_path):
         assert legacy_uploads._company_file_needs_folder(db) is False
     finally:
         con.close()
+
+
+def test_an_encrypted_company_file_is_left_alone(tmp_path):
+    """The shared-folder decision never opens an encrypted company file
+    (2.23.2, #290): it cannot read one, and the plain read would have left
+    -wal and -shm files beside it. Such a file is new enough to keep nothing
+    in the shared folder, so the answer is no, with nothing written."""
+    from app.services import company_file
+
+    if not company_file.available():
+        pytest.skip("sqlcipher3 is not installed")
+    path = tmp_path / "Encrypted Co.db"
+    key = b"\x11" * company_file.KEY_BYTES
+    with closing(company_file.connect_raw(path, key)) as conn:
+        conn.execute("CREATE TABLE alembic_version (version_num TEXT)")
+        conn.execute("INSERT INTO alembic_version VALUES ('e8f9a0b1c2d3')")
+        conn.commit()
+    assert company_file.is_encrypted_file(path)
+    assert legacy_uploads._company_file_needs_folder(path) is False
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Encrypted Co.db"]

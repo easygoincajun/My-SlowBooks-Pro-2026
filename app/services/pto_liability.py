@@ -158,6 +158,34 @@ def relieve_dollars(
     return dollars
 
 
+def restore_dollars(
+    db: Session,
+    policy: PTOPolicy,
+    accrual: PTOAccrual,
+    emp: Employee,
+    dollars: Decimal,
+    when: date,
+    memo: str = None,
+) -> Decimal:
+    """Put dollars a relief took out back into the bank — a cancelled
+    request. Posts DR PTO expense / CR accrued PTO liability for exactly
+    the amount the relief moved, so the two journals cancel out."""
+    dollars = _q(_d(dollars))
+    if dollars <= 0:
+        return ZERO
+    accrual.dollar_balance = _q(_d(accrual.dollar_balance) + dollars)
+    _post(
+        db,
+        policy,
+        when,
+        memo or f"PTO request cancelled — {emp.full_name} — {policy.name}",
+        dollars,
+        True,
+        accrual,
+    )
+    return dollars
+
+
 def revalue(
     db: Session, policy: PTOPolicy, accrual: PTOAccrual, emp: Employee, when: date
 ) -> Decimal:

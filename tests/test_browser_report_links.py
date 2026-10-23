@@ -506,6 +506,19 @@ def test_a_read_only_sign_in_keeps_the_reports_rows(
 
 
 ACTIVE_ID = "() => document.activeElement && document.activeElement.id"
+SELECTED = "(sel) => document.querySelector(sel).selectedIndex"
+
+
+def _next_period(page):
+    """ArrowDown on the focused period select: the next period. Chromium on
+    a Mac answers ArrowDown on a select with its menu, which headless never
+    draws, so no key moves the choice there: the next choice is taken for
+    it, with the same change event, focus left where it was."""
+    sel = "#report-period-select"
+    was = page.evaluate(SELECTED, sel)
+    page.keyboard.press("ArrowDown")
+    if page.evaluate(SELECTED, sel) == was:
+        page.select_option(sel, index=was + 1)
 
 
 def test_a_period_change_from_the_keyboard_keeps_focus_on_the_period_select(
@@ -521,7 +534,7 @@ def test_a_period_change_from_the_keyboard_keeps_focus_on_the_period_select(
         _report(page)
         assert page.evaluate(FOCUSED_KEY) == f"customer:{cid}"
         page.focus("#report-period-select")
-        page.keyboard.press("ArrowDown")
+        _next_period(page)
         settle(page, handled)
         _report(page)
         q = _query(_hash(page))
@@ -529,7 +542,7 @@ def test_a_period_change_from_the_keyboard_keeps_focus_on_the_period_select(
         assert page.evaluate(ACTIVE_ID) == "report-period-select"
         # the row is still picked out, just not focused
         assert page.locator('#report-content tr[aria-current="true"]').count() == 1
-        page.keyboard.press("ArrowDown")
+        _next_period(page)
         settle(page, handled)
         _report(page)
         assert _query(_hash(page))["period"] != q["period"]

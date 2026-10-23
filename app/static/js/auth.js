@@ -18,6 +18,10 @@
     const AUTH_STATUS_URL = "/api/auth/status";
     const AUTH_SETUP_URL = "/api/auth/setup";
     const AUTH_LOGIN_URL = "/api/auth/login";
+    const AUTH_COMPANY_URL = "/api/auth/company";
+    // The username a company switch carried over (#358): the sign-in screen
+    // of the company switched to has it chosen already.
+    const SWITCH_USERNAME_KEY = "slowbooks_switch_username";
 
     const OVERLAY_ID = "auth-overlay";
     const MIN_PASSWORD_LEN = 8;
@@ -189,6 +193,34 @@
     // never see it.
     let multiUser = false;
     let usernames = [];
+    // Several companies on one server (#358): the sign-in screen asks which.
+    let companies = [];
+
+    function rememberedUsername() {
+        try { return sessionStorage.getItem(SWITCH_USERNAME_KEY) || ""; } catch (e) { return ""; }
+    }
+
+    function rememberUsername(name) {
+        try {
+            if (name) sessionStorage.setItem(SWITCH_USERNAME_KEY, name);
+            else sessionStorage.removeItem(SWITCH_USERNAME_KEY);
+        } catch (e) {}
+    }
+
+    function companySelectHTML() {
+        if (companies.length < 2) return "";
+        const opts = companies.map(function (c) {
+            const e = document.createElement("option");
+            e.value = c.file; e.textContent = c.name;
+            if (c.current) e.setAttribute("selected", "");
+            return e.outerHTML;
+        }).join("");
+        return (
+            '<label for="auth-company" style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;">Company</label>' +
+            '<select id="auth-company" style="' + inputStyle() + '">' + opts + "</select>" +
+            '<div style="height:10px"></div>'
+        );
+    }
 
     // Inside the native desktop window the launcher's bridge is present;
     // in a browser (Server Edition) it is not, and the picker does not exist.
@@ -264,9 +296,11 @@
                 autocomplete: "username",
             });
         }
+        const chosen = rememberedUsername();
         const opts = usernames.map(function (u) {
             const e = document.createElement("option");
             e.value = u; e.textContent = u;
+            if (u === chosen) e.setAttribute("selected", "");
             return e.outerHTML;
         }).join("");
         return (
@@ -295,6 +329,7 @@
                     ? "Enter the password for " + escapeText(name) + " to continue."
                     : "Enter your password to continue.") +
             "</p>" +
+            companySelectHTML() +
             (multiUser ? userSelectHTML() + '<div style="height:10px"></div>' : "") +
             field("auth-password", "Password", {
                 type: "password",
@@ -315,6 +350,42 @@
         );
     }
 
+    // The Company select on a served host's screens (#358): another
+    // company's own people and its own password. The person stays chosen
+    // when the other company has them. Shared by the sign-in and the setup
+    // view, so a wrong choice is one more choice away from either.
+    function wireCompanySelect(overlay, onSuccess) {
+        const companyInput = overlay.querySelector("#auth-company");
+        if (!companyInput) return;
+        const errBox = overlay.querySelector("#auth-error");
+        const userInput = overlay.querySelector("#auth-username");
+        companyInput.addEventListener("change", async function () {
+            errBox.textContent = "";
+            if (userInput) rememberUsername(userInput.value);
+            try {
+                const r = await postJSON(AUTH_COMPANY_URL, { file: companyInput.value });
+                if (r && r.authenticated) {
+                    // This session's sign-in opens that company too, so it
+                    // is signed in there now: start from its Home page, as
+                    // the topbar's switch does. (It used to call promptAuth,
+                    // which found the session signed in and drew nothing:
+                    // the screen closed onto the page the old company's
+                    // missing file had left, with the old company's name in
+                    // the topbar — 2.25.0 gate, macbase1 NEW-169, #370.)
+                    rememberUsername("");
+                    removeOverlay();
+                    window.location.hash = "#/";
+                    window.location.reload();
+                    return;
+                }
+                removeOverlay();
+                promptAuth(onSuccess);
+            } catch (err) {
+                errBox.textContent = err.message;
+            }
+        });
+    }
+
     function wireLogin(overlay, onSuccess) {
         const form = overlay.querySelector("#auth-form");
         wireSwitchCompany(overlay);
@@ -322,7 +393,8 @@
         const userInput = overlay.querySelector("#auth-username");
         const errBox = overlay.querySelector("#auth-error");
         const btn = overlay.querySelector("#auth-submit");
-        (userInput || input).focus();
+        wireCompanySelect(overlay, onSuccess);
+        (rememberedUsername() && userInput ? input : (userInput || input)).focus();
 
         form.addEventListener("submit", async function (e) {
             e.preventDefault();
@@ -333,6 +405,7 @@
                 const body = { password: input.value };
                 if (userInput) body.username = userInput.value.trim();
                 await postJSON(AUTH_LOGIN_URL, body);
+                rememberUsername("");
                 removeOverlay();
                 if (onSuccess) onSuccess();
                 else window.location.reload();
@@ -378,6 +451,12 @@
             "Just enough to get you in. You can configure everything else later." +
             "</p>" +
             existingNotice +
+            // On a served host the setup form is one choice among the
+            // companies, like the sign-in: a company nobody has set up yet,
+            // chosen by the wrong person, held the browser on this form
+            // with no way back (2.25.0 gate, skytech W-28, #369). Empty on
+            // a server with one company, and on the desktop.
+            companySelectHTML() +
             field("operator_name", "Your name", { required: true }) +
             field("operator_email", "Your email", {
                 type: "email",
@@ -406,6 +485,16 @@
                 minlength: MIN_PASSWORD_LEN,
                 autocomplete: "new-password",
             }) +
+            // Encrypt the company file from the first day (#290): shown on
+            // the desktop, where the key is the person's own; a server
+            // keys the file from its operator secret, under Settings.
+            (desktopWindow
+                ? '<label style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 0;font-size:13px;color:#333;line-height:1.5;">' +
+                  '<input type="checkbox" id="auth-encrypt" style="margin-top:3px;">' +
+                  '<span><strong>Encrypt this company file.</strong> Nothing readable is written to disk; your sign-in unlocks the books, ' +
+                  'and a recovery key shown once opens them if every password is lost. Recommended where the customer list is private ' +
+                  '(a clinic, a law office).</span></label>'
+                : '') +
             '<div style="height:18px"></div>' +
             '<button type="submit" id="auth-submit" style="' +
             primaryButtonStyle() +
@@ -431,6 +520,8 @@
         const out = {
             password: overlay.querySelector("#auth-password").value,
         };
+        const encrypt = overlay.querySelector("#auth-encrypt");
+        if (encrypt && encrypt.checked) out.encrypt = true;
         ids.forEach(function (id) {
             const el = overlay.querySelector("#" + id);
             if (el && el.value.trim() !== "") {
@@ -448,6 +539,7 @@
         const btn = overlay.querySelector("#auth-submit");
         const firstField = overlay.querySelector("#operator_name");
 
+        wireCompanySelect(overlay, onSuccess);
         if (firstField) firstField.focus();
 
         form.addEventListener("submit", async function (e) {
@@ -467,7 +559,13 @@
             btn.disabled = true;
             btn.textContent = "...";
             try {
-                await postJSON(AUTH_SETUP_URL, collectSetupPayload(overlay));
+                const done = await postJSON(AUTH_SETUP_URL, collectSetupPayload(overlay));
+                if (done && done.recovery_key) {
+                    // the wizard's last page: the recovery key, shown once
+                    showRecoveryKey(overlay, done, onSuccess);
+                    return;
+                }
+                if (done && done.encryption_note) window.alert(done.encryption_note);
                 removeOverlay();
                 if (onSuccess) onSuccess();
                 else window.location.reload();
@@ -475,7 +573,11 @@
                 // 409 means the password was set between status check and
                 // submit — guide the user to the login view rather than
                 // leaving them stuck.
-                if (err.status === 409) {
+                // Two 409s: a password already set (switch to sign in), and
+                // a company name another file already has, which stays here
+                // with its sentence (2.24.0 round 2, W-24: it switched to an
+                // Unlock form for a company with no password).
+                if (err.status === 409 && !/already named/i.test(err.message || "")) {
                     errBox.textContent =
                         "Setup is already complete on this server. Switching to sign in.";
                     setTimeout(function () {
@@ -488,6 +590,56 @@
                 btn.textContent = "Set up & continue";
             }
         });
+    }
+
+    // The recovery key, shown once after setup encrypted the file (#290):
+    // copy it, or save it as a text file, then go on into the books.
+    function showRecoveryKey(overlay, done, onSuccess) {
+        const form = overlay.querySelector("#auth-form");
+        if (!form) return;
+        form.innerHTML =
+            '<h2 style="margin:0 0 6px;font-size:22px;">Your recovery key</h2>' +
+            '<p style="margin:0 0 10px;color:#333;font-size:13px;line-height:1.5;">The company file is encrypted. ' +
+            "<strong>This recovery key is shown once.</strong> It opens the file, and every backup of it, if every " +
+            "administrator's password is lost. Anyone holding it can read the books, so keep it where the backups are not: " +
+            "a safe, a password manager, a sealed envelope.</p>" +
+            '<p id="auth-recovery-key" style="margin:0 0 12px;font-family:monospace;font-size:16px;letter-spacing:0.04em;' +
+            'text-align:center;padding:10px;border:1px solid #c6ccd4;border-radius:6px;user-select:all;">' +
+            escapeText(done.recovery_key) + "</p>" +
+            '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
+            '<button type="button" id="auth-copy-key" style="flex:1;padding:8px;border:1px solid #c6ccd4;border-radius:6px;background:#f4f6f8;cursor:pointer;">Copy</button>' +
+            '<button type="button" id="auth-save-key" style="flex:1;padding:8px;border:1px solid #c6ccd4;border-radius:6px;background:#f4f6f8;cursor:pointer;">Save as a text file</button>' +
+            "</div>" +
+            '<button type="button" id="auth-kept-key" style="' + primaryButtonStyle() + '">I have kept it, open the books</button>';
+        const text = done.recovery_file || done.recovery_key;
+        form.querySelector("#auth-copy-key").addEventListener("click", async function () {
+            try { await navigator.clipboard.writeText(done.recovery_key); this.textContent = "Copied"; }
+            catch (e) { this.textContent = "Select the key and copy it"; }
+        });
+        form.querySelector("#auth-save-key").addEventListener("click", async function () {
+            const name = ((existingCompany.name || "company").replace(/[^A-Za-z0-9 _-]+/g, "").trim() || "company") + " recovery key.txt";
+            const api = window.pywebview && window.pywebview.api;
+            if (api && api.save_secret_file) {
+                // a Save panel on the desktop: never the synced Reports folder unasked
+                const r = await api.save_secret_file(name, text);
+                this.textContent = r && r.success ? "Saved" : (r && r.cancelled ? "Not saved" : "Could not save");
+                return;
+            }
+            const blob = new Blob([text], { type: "text/plain" });
+            if (window.SlowbooksDesktop && (await window.SlowbooksDesktop.saveFile(blob, name))) { this.textContent = "Saved"; return; }
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = name;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+            this.textContent = "Saved";
+        });
+        form.querySelector("#auth-kept-key").addEventListener("click", function () {
+            removeOverlay();
+            if (onSuccess) onSuccess();
+            else window.location.reload();
+        });
+        form.querySelector("#auth-kept-key").focus();
     }
 
     // ----- view orchestration ---------------------------------------------
@@ -551,12 +703,19 @@
                 multiUser = status.multi_user === true;
                 desktopWindow = status.desktop === true;
                 usernames = Array.isArray(status.usernames) ? status.usernames : [];
+                companies = Array.isArray(status.companies) ? status.companies : [];
                 existingCompany = {
                     name: status.company_name || "",
                     hasData: status.has_data === true,
                 };
                 if (status.authenticated) return false;
                 renderView(status.setup_needed ? "setup" : "login", onSuccess);
+                if (status.company_unavailable) {
+                    // the session's company cannot be opened now (#358):
+                    // the sentence, with the other companies still offered
+                    const box = document.querySelector("#" + OVERLAY_ID + " #auth-error");
+                    if (box) box.textContent = status.company_unavailable;
+                }
                 return true;
             } finally {
                 authPromptPromise = null;
@@ -568,6 +727,9 @@
     // Expose globals so api.js can prompt on 401
     window.SlowbooksAuth = {
         promptAuth: promptAuth,
+        // the header's company switch (app.js) when the sign-in did not
+        // open the other company: its sign-in screen has this person chosen
+        rememberUsername: rememberUsername,
         // Back-compat: explicit view requests still work
         promptLogin: function () {
             renderView("login");

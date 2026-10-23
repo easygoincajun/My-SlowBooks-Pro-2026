@@ -100,11 +100,9 @@ SWEEP = r"""(root) => {
   const ADMIN = new RegExp([
     /\bAPI\s*\.\s*(?:post|put|del|patch)\s*\(\s*['"`]\/(?:settings|backups|companies|users|tokens|employees|migration)\b/,
     /\bAPI\s*\.\s*(?:get|post|put|del|patch)\s*\(\s*['"`]\/(?:payroll|tax-forms|benefits|deductions|onboarding|users|tokens)\b/,
-    /\bAPI\s*\.\s*get\s*\(\s*['"`]\/qbo\/auth-url\b/,
-    /\bAPI\s*\.\s*(?:post|del)\s*\(\s*['"`]\/(?:qbo\/connect-manual|qbo\/import|uploads\/logo)\b/,
-    // fetch: an import from another program, starting a QBO import (not
-    // reading its log), the logo
-    /['"`]\/api\/(?:migration\/|qbo\/import-runs['"`]|uploads\/logo)/,
+    /\bAPI\s*\.\s*(?:post|del)\s*\(\s*['"`]\/uploads\/logo\b/,
+    // fetch: an import from another program, the logo
+    /['"`]\/api\/(?:migration\/|uploads\/logo)/,
   ].map(r => r.source).join('|'));
   const CALL = /\b(this|[A-Z][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
   // A function's own code: not its comments, nor the handlers it writes
@@ -282,7 +280,6 @@ FOUND_ON_PAGES = {
     "#/batch-payments": {"Select All", "Apply Batch Payment"},
     "#/quick-entry": {"Save & Next (Ctrl+Enter)"},
     "#/csv": {"Import"},
-    "#/qbo": {"Finish QBO connection"},
     "#/banking": {"Connect"},
 }
 FOUND_IN_DIALOGS = {
@@ -630,7 +627,7 @@ def test_a_read_only_sign_in_leaves_settings_unasked(
 # ---- a bookkeeper ------------------------------------------------------------
 # A bookkeeper keeps the daily books, but the administrator's writes are
 # refused to it: company settings, backups, new company files, the logo,
-# connecting and importing from QuickBooks Online, Migrate Data. The pages
+# Migrate Data. The pages
 # offered them all the same (2.18.0). The controls the owner and the gate
 # named, as the sweep labels them: the admin's pages must show each as the
 # administrator's, or the sweep is not looking.
@@ -647,7 +644,6 @@ ADMIN_ON_PAGES = {
         "ocr-engine-pref",
         "Save AI settings",
     },
-    "#/qbo": {"Start connection with Intuit", "Finish QBO connection"},
     "#/companies": {"+ New Company"},
 }
 KEEPER_NOTES = {
@@ -655,10 +651,6 @@ KEEPER_NOTES = {
         "Company settings are changed by an administrator.",
         "AI settings are changed by an administrator.",
         "Backups are made, downloaded and restored by an administrator.",
-    ],
-    "#/qbo": [
-        "Connecting to QuickBooks Online is done by an administrator.",
-        "Importing from QuickBooks Online is done by an administrator.",
     ],
     "#/companies": ["New company files are created by an administrator."],
 }
@@ -685,8 +677,8 @@ def test_no_page_offers_a_bookkeeper_an_administrators_control(
         for route in only
         if not keeper_run["headings"][route].endswith("is for administrators")
     } == {}
-    # everything else stays: Settings' lists, QBO's export, every other
-    # page's reads and writes
+    # everything else stays: Settings' lists, every other page's reads and
+    # writes
     assert (
         _lost_to_keeper({r: c for r, c in admin.items() if r not in only}, kept) == {}
     )
@@ -701,7 +693,6 @@ def test_no_page_offers_a_bookkeeper_an_administrators_control(
         "opening-balances",
         "settings",
         "companies",
-        "qbo",
     } <= set(keeper_run["sidebar"])
 
 
@@ -738,7 +729,8 @@ def test_a_bookkeeper_on_a_first_page_of_settings(browser, company, books, db_se
                 add_class: shown(add) && !add.disabled,
             };
         }""")
-        assert got["fields"] >= 50 and got["open"] == []
+        # 49 named fields since the QuickBooks Online section left (2.23.2)
+        assert got["fields"] >= 45 and got["open"] == []
         assert (got["save"], got["picker"], got["add_class"]) == (False, False, True)
         assert got["notes"] == KEEPER_NOTES["#/settings"]
         # opening a template asks for the template, and sends no settings

@@ -2,8 +2,8 @@
 # Sage 50 (US / Peachtree lineage) import dialect.
 #
 #   - Chart: "Account ID" / "Account Description" / "Account Type" —
-#     Sage's types are descriptive strings ("Equity-gets closed",
-#     "Accumulated Depreciation", ...).
+#     Import/Export uses numeric types; report CSVs may use descriptive
+#     strings ("Equity-gets closed", "Accumulated Depreciation", ...).
 #   - General Ledger report: "Date", "Reference", "Jrnl" (journal code),
 #     "Account ID", "Trans Description", "Debit Amt" / "Credit Amt".
 #     Rows carry the ACCOUNT ID, resolved through the bundled chart.
@@ -37,6 +37,26 @@ LABEL = "Sage 50"
 _DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d")
 
 _SAGE_TYPE_MAP = {
+    # Sage US Import/Export codes; real 2026 fixture and source reference in
+    # tests/fixtures/sage50_2026/README.md. Reserved codes stay unmapped.
+    "0": AccountType.ASSET,  # Cash
+    "1": AccountType.ASSET,  # Accounts Receivable
+    "2": AccountType.ASSET,  # Inventory
+    "3": AccountType.ASSET,  # Receivable Retainage
+    "4": AccountType.ASSET,  # Other Current Assets
+    "5": AccountType.ASSET,  # Fixed Assets
+    "6": AccountType.ASSET,  # Accumulated Depreciation (contra-asset)
+    "8": AccountType.ASSET,  # Other Assets
+    "10": AccountType.LIABILITY,  # Accounts Payable
+    "11": AccountType.LIABILITY,  # Payable Retainage
+    "12": AccountType.LIABILITY,  # Other Current Liabilities
+    "14": AccountType.LIABILITY,  # Long Term Liabilities
+    "16": AccountType.EQUITY,  # Equity-doesn't close
+    "18": AccountType.EQUITY,  # Equity-Retained Earnings
+    "19": AccountType.EQUITY,  # Equity-gets closed
+    "21": AccountType.INCOME,
+    "23": AccountType.COGS,
+    "24": AccountType.EXPENSE,
     "cash": AccountType.ASSET,
     "accounts receivable": AccountType.ASSET,
     "inventory": AccountType.ASSET,

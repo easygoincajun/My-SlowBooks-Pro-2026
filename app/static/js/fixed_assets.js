@@ -110,7 +110,7 @@ const FixedAssetsPage = {
             API.get('/bills'),
             API.get('/expenses'),
         ]);
-        const bankOpts = banks.map(a => `<option value="${a.id}">${escapeHtml(a.account_number || '')} - ${escapeHtml(a.name)}</option>`).join('');
+        const bankOpts = banks.map(a => `<option value="${a.id}">${accountLabel(a)}</option>`).join('');
         const docs = bills.filter(b => b.status !== 'void' && b.status !== 'draft').slice(0, 100)
             .map(b => `<option value="bill:${b.id}">Bill ${escapeHtml(b.bill_number)} · ${escapeHtml(b.vendor_name || '')} · ${formatDate(b.date)} · ${formatCurrency(b.total)}</option>`)
             .concat(expenses.filter(x => x.status !== 'void').slice(0, 100)

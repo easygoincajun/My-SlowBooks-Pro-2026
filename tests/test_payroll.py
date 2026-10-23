@@ -390,7 +390,9 @@ def test_time_entry_approval_workflow(client):
         f"/api/time-entries/{te['id']}/approve", json={"approved_by": "boss"}
     ).json()
     assert approved["status"] == "approved"
-    assert approved["approved_by"] == "boss"
+    # The approver is the signed-in principal, not the body's claim;
+    # the authenticated test client is the default admin.
+    assert approved["approved_by"] == "admin"
 
 
 def test_time_entries_feed_pay_run(client, db_session, seed_accounts):

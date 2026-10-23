@@ -28,7 +28,7 @@ concurrency:
 jobs:
   build:
     name: Build unsigned macOS arm64 app
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +82,11 @@ jobs:
             -r requirements-desktop.txt \
             -r packaging/macos/requirements-build.txt
 
+      - name: The encrypted-file driver's wheel installed (issue #290)
+        # The smoke test below is the proof that counts (the module inside
+        # the frozen bundle); this names the wheel in the log either way.
+        run: python -c "import sqlcipher3; print('sqlcipher', sqlcipher3.connect(':memory:').execute('PRAGMA cipher_version').fetchone()[0])"
+
       - name: Build the application icon
         run: |
           python packaging/macos/build_icon.py \
@@ -118,8 +123,19 @@ jobs:
           bundle_version="$(plutil -extract CFBundleVersion raw -o - "$app/Contents/Info.plist")"
           test "$bundle_version" = "${APP_VERSION}+${GITHUB_SHA:0:12}"
           test "$bundle_version" != "$APP_VERSION"
-          test "$(plutil -extract LSMinimumSystemVersion raw -o - \
-            "$app/Contents/Info.plist")" = "14.0"
+          min_os="$(plutil -extract LSMinimumSystemVersion raw -o - \
+            "$app/Contents/Info.plist")"
+          test "$min_os" = "15.0"
+          # A bundled library built for a newer macOS than the bundle
+          # declares crashes the app at launch on the older one (2.25.0's
+          # Homebrew libraries were macOS 14, built on macos-14). vtool
+          # reads one file per call.
+          highest="$(find "$app" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 \
+            | xargs -0 -n1 vtool -show-build 2>/dev/null \
+            | awk '/minos/{print $2}' | sort -V | tail -1)"
+          echo "Declared minimum macOS $min_os; highest library minimum $highest"
+          test -n "$highest"
+          test "$(printf '%s\n%s\n' "$highest" "$min_os" | sort -V | tail -1)" = "$min_os"
           test "$(lipo -archs "$app/Contents/MacOS/SlowBooksPro")" = "arm64"
           codesign --verify --deep --strict --verbose=2 "$app"
           python packaging/macos/audit_bundle.py "$app" \
@@ -207,7 +223,7 @@ jobs:
     needs: build
     # Signing secrets exist only in the canonical repo; forks build unsigned.
     if: github.repository == 'VonHoltenCodes/SlowBooks-Pro-2026'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

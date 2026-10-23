@@ -194,6 +194,28 @@ def toggle(db: Session, recon: Reconciliation, line_id: int) -> TransactionLine:
     return line
 
 
+def mark_all(db: Session, recon: Reconciliation, cleared: bool, through=None) -> int:
+    """Tick, or untick, every line the session shows at once (#258): the
+    lines on the account up to the statement date (and up to `through`,
+    when given, so a statement that ends mid-period is ticked through its
+    own date), none of them in a completed reconciliation. A quiet month,
+    or a first reconciliation where the statement matches the books, was
+    hundreds of single ticks. Returns how many lines changed."""
+    _open(recon)
+    if through is not None and through > recon.statement_date:
+        raise HTTPException(
+            status_code=400, detail="That date is after the statement date"
+        )
+    changed = 0
+    for tl, txn in _candidates(db, recon):
+        if through is not None and txn.date > through:
+            continue
+        if bool(tl.cleared) != cleared:
+            tl.cleared = cleared
+            changed += 1
+    return changed
+
+
 def complete(db: Session, recon: Reconciliation) -> dict:
     _open(recon)
     data = session(db, recon)

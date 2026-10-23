@@ -267,8 +267,10 @@ const ResellerPermitsPage = {
             ]);
         } catch (err) { toast(err.message, 'error'); return; }
 
-        const custById = Object.fromEntries(customers.map(c => [c.id, c]));
-        const vendById = Object.fromEntries(vendors.map(v => [v.id, v]));
+        // id -> name, as the list view builds them: _businessNameFor returns the
+        // map's value, so mapping to the whole record showed "[object Object]".
+        const custById = Object.fromEntries(customers.map(c => [c.id, c.name]));
+        const vendById = Object.fromEntries(vendors.map(v => [v.id, v.name]));
         const businessName = ResellerPermitsPage._businessNameFor(permit, custById, vendById);
         const taxId = ResellerPermitsPage._taxIdFor(permit, customers, vendors);
 
@@ -289,6 +291,14 @@ const ResellerPermitsPage = {
                    Find your state's tax-agency permit lookup manually.
                </p>`;
 
+        // The Copy buttons carry their text in data-copy, read back through
+        // this.dataset in the handler — NOT interpolated into the onclick as a
+        // JS string. escapeHtml() emits the numeric entity for a quote, and the
+        // HTML parser decodes that back to a quote before any JS runs, so the
+        // old handler that embedded an escaped value inside a single-quoted JS
+        // string let a permit number, business name or tax ID containing a
+        // quote break the handler and run script (stored XSS). A data-
+        // attribute is read as text, never as code.
         openModal(`Verify ${permit.jurisdiction} Permit`, `
             <div style="font-size:13px;line-height:1.6">
                 <p style="margin:0 0 12px 0;color:var(--text-muted)">
@@ -302,21 +312,24 @@ const ResellerPermitsPage = {
                         <td style="width:30%"><strong>Permit #</strong></td>
                         <td><code style="font-size:14px">${escapeHtml(permit.permit_number)}</code>
                             <button class="btn btn-sm btn-secondary" style="margin-left:8px"
-                                onclick="ResellerPermitsPage._copy('${escapeHtml(permit.permit_number)}', 'Permit #')">⧉ Copy</button>
+                                data-copy="${escapeHtml(permit.permit_number)}" data-copy-label="Permit #"
+                                onclick="ResellerPermitsPage._copy(this.dataset.copy, this.dataset.copyLabel)">⧉ Copy</button>
                         </td>
                     </tr>
                     <tr>
                         <td><strong>Business name</strong></td>
                         <td>${escapeHtml(businessName)}
                             <button class="btn btn-sm btn-secondary" style="margin-left:8px"
-                                onclick="ResellerPermitsPage._copy('${escapeHtml(businessName)}', 'Business name')">⧉ Copy</button>
+                                data-copy="${escapeHtml(businessName)}" data-copy-label="Business name"
+                                onclick="ResellerPermitsPage._copy(this.dataset.copy, this.dataset.copyLabel)">⧉ Copy</button>
                         </td>
                     </tr>
                     ${taxId ? `<tr>
                         <td><strong>Tax ID${permit.jurisdiction === 'WA' ? ' / UBI' : ''}</strong></td>
                         <td><code>${escapeHtml(taxId)}</code>
                             <button class="btn btn-sm btn-secondary" style="margin-left:8px"
-                                onclick="ResellerPermitsPage._copy('${escapeHtml(taxId)}', 'Tax ID')">⧉ Copy</button>
+                                data-copy="${escapeHtml(taxId)}" data-copy-label="Tax ID"
+                                onclick="ResellerPermitsPage._copy(this.dataset.copy, this.dataset.copyLabel)">⧉ Copy</button>
                         </td>
                     </tr>` : ''}
                     ${permit.expires_at ? `<tr>

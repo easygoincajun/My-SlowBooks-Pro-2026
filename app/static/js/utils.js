@@ -63,6 +63,9 @@ function sourceWord(type) {
         iif_import: 'IIF import', depreciation: 'Depreciation',
         asset_acquisition: 'Asset acquisition', asset_disposal: 'Asset disposal',
         qbo_ledger: 'QuickBooks import', qbo_journal: 'QuickBooks journal', qbo_cogs: 'QuickBooks cost of goods',
+        qbo_export_import: 'QuickBooks Online export', xero_import: 'Xero import', myob_import: 'MYOB import',
+        sage_import: 'Sage 50 import', wave_import: 'Wave import', zoho_import: 'Zoho Books import',
+        gnucash_import: 'GnuCash import', qb_ledger_import: 'QuickBooks Desktop import',
     };
     const t = String(type || 'journal');
     for (const [end, word] of [['_void', 'void'], ['_edit', 'edit'], ['_apply', 'applied']]) {
@@ -121,6 +124,16 @@ function reversedRangeRefused(start, end, kept) {
     return true;
 }
 
+// An account's words in a picker or a list: "1000 - Checking", and for an
+// account with no number (optional since 2.23.5) its name alone, not
+// "- Checking" at the top of the list (2.23.5 round 2, NEW-144). `name`
+// overrides the name shown (a path, say).
+function accountLabel(a, name = null) {
+    const shown = name !== null ? name : (a.name || '');
+    const number = a.account_number || '';
+    return number ? `${escapeHtml(number)} - ${escapeHtml(shown)}` : escapeHtml(shown);
+}
+
 function todayISO() {
     const d = new Date();
     return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
@@ -166,6 +179,216 @@ function chartColor(name) {
         value = getComputedStyle(document.documentElement).getPropertyValue('--chart-' + name).trim();
     } catch (e) { /* no stylesheet (a probe) */ }
     return value || CHART_FALLBACK[name] || name;
+}
+
+// Money the size a chart label can hold: $1.2k, $12k, $3.4M, -$850, $45.50.
+function compactMoney(v) {
+    const n = Number(v) || 0;
+    const a = Math.abs(n);
+    let body;
+    if (a >= 1e6) body = (a / 1e6).toFixed(a >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    else if (a >= 1e3) body = (a / 1e3).toFixed(a >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'k';
+    else if (a >= 100 || a === Math.round(a)) body = String(Math.round(a));
+    else body = a.toFixed(2);
+    return `${n < 0 ? '-' : ''}$${body}`;
+}
+
+// A colour as the three channels it shows over the page: a translucent one
+// blended with the theme's ground first (a pale green at 35% is pale,
+// whatever its RGB). null for a colour that cannot be read.
+function _channels(color, dark) {
+    const hex = /^#?([0-9a-f]{6})$/i.exec(String(color || '').trim());
+    const rgb = /^rgba?\(([^)]+)\)/i.exec(String(color || ''));
+    let r, g, b, a = 1;
+    if (hex) { const n = parseInt(hex[1], 16); r = n >> 16; g = (n >> 8) & 255; b = n & 255; }
+    else if (rgb) { [r, g, b, a] = rgb[1].split(',').map(x => parseFloat(x)); if (Number.isNaN(a)) a = 1; }
+    else return null;
+    const ground = dark ? [30, 34, 48] : [255, 255, 255];
+    return [r, g, b].map((c, i) => a * c + (1 - a) * ground[i]);
+}
+
+// WCAG relative luminance and contrast, as the accessibility sweep measures
+function _luminance([r, g, b]) {
+    const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+function _contrast(l1, l2) { return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); }
+const _INK = '#1a1a28', _INK_LUM = _luminance([26, 26, 40]);
+
+// The text that reads best on a colour (a bar's, a slice's, a segment's):
+// the app's ink or white, whichever contrasts more, with the ratio it
+// gets. A caller that must meet AA (text in the page) leaves the figure
+// off under 4.5; a chart label takes the better of the two.
+function figureTextOn(color, dark) {
+    const ch = _channels(color, dark);
+    if (!ch) return { fill: dark ? '#e6e6f0' : _INK, ratio: 0 };
+    const l = _luminance(ch);
+    const onInk = _contrast(l, _INK_LUM), onWhite = _contrast(l, 1);
+    return onInk >= onWhite ? { fill: _INK, ratio: onInk } : { fill: '#ffffff', ratio: onWhite };
+}
+
+function _textOn(color, dark) {
+    return figureTextOn(color, dark).fill;
+}
+
+// A theme variable's value ('' in a probe with no stylesheet)
+function cssVar(name) {
+    try { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); } catch (e) { return ''; }
+}
+
+// Does a line's own path run through a box? The segments into and out of
+// point `i`, each sampled along its curve (Chart.js keeps a tension line's
+// bezier control points on the point elements as cp1x/cp1y/cp2x/cp2y; a
+// straight segment when there are none), the box grown by the stroke's
+// half-width. Used to keep a point's figure off its own line (W-6).
+function _lineCrosses(points, i, box, grow) {
+    const x0 = box.x - grow, x1 = box.x + box.w + grow, y0 = box.y - grow, y1 = box.y + box.h + grow;
+    const hit = (x, y) => x > x0 && x < x1 && y > y0 && y < y1;
+    const pairs = [[points[i - 1], points[i]], [points[i], points[i + 1]]];
+    for (const [a, b] of pairs) {
+        if (!a || !b || a.skip || b.skip) continue;
+        const curved = [a.cp2x, a.cp2y, b.cp1x, b.cp1y].every((v) => typeof v === 'number' && !Number.isNaN(v));
+        for (let k = 0; k <= 24; k++) {
+            const t = k / 24, u = 1 - t;
+            let x, y;
+            if (curved) {
+                x = u * u * u * a.x + 3 * u * u * t * a.cp2x + 3 * u * t * t * b.cp1x + t * t * t * b.x;
+                y = u * u * u * a.y + 3 * u * u * t * a.cp2y + 3 * u * t * t * b.cp1y + t * t * t * b.y;
+            } else {
+                x = a.x + (b.x - a.x) * t;
+                y = a.y + (b.y - a.y) * t;
+            }
+            if (hit(x, y)) return true;
+        }
+    }
+    return false;
+}
+
+// A Chart.js plugin: every bar, slice and point gets its figure as text on
+// or beside the mark (#265), so the colour is not the only way from a mark
+// to its amount — the legend and the table under the chart stay. A bar's
+// figure sits past its end, inside the bar when the chart area has no room
+// there; a stacked segment's sits in the segment when it fits; a slice's
+// sits in the slice (one under 4% is too thin to hold text); a point's
+// sits above it (below, for every other line), sliding sideways to stay in
+// the chart area at a first or last point, and moving to the other side,
+// beside the point or to a corner when its own line would run through it.
+// A label that would land on one already drawn, or outside the chart area,
+// or across its own line wherever it goes, is left off, and so is one
+// on a mark whose colour gives neither ink nor white 4.5:1: a crowded line
+// shows what fits, and the table has the rest. Colours follow the theme at
+// draw time, so a theme change needs only a redraw.
+function chartFigures(opts = {}) {
+    const fmt = opts.format || compactMoney;
+    const size = opts.size || 10;
+    return {
+        id: 'sbFigures',
+        afterDatasetsDraw(chart) {
+            const ctx = chart.ctx, area = chart.chartArea;
+            if (!ctx || !area || !chart.data || !chart.data.datasets) return;
+            const dark = typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'dark';
+            const ink = opts.color || (dark ? '#e6e6f0' : '#1a1a28');
+            const placed = [];
+            const inside = (b) => b.x >= area.left && b.x + b.w <= area.right && b.y >= area.top && b.y + b.h <= area.bottom;
+            const free = (b) => !placed.some(p => !(b.x + b.w < p.x || p.x + p.w < b.x || b.y + b.h < p.y || p.y + p.h < b.y));
+            // 'drawn', or why not: 'outside' the chart area, 'taken' by a label
+            // already there, or 'contrast' — no fill reads on the mark
+            // 'crossed' — the mark's own line runs through the label (W-6)
+            const draw = (text, cx, cy, fill, keepIn, crossed) => {
+                if (!fill) return 'contrast';
+                const w = ctx.measureText(text).width + 4, h = size + 2;
+                // a point's label slides sideways to stay in the chart area (a
+                // first or last month's point sits on the area's edge — NEW-81
+                // / W-5); a bar's does not, since 'outside' is how it learns
+                // to go inside the bar instead
+                if (keepIn) cx = Math.min(Math.max(cx, area.left + w / 2), area.right - w / 2);
+                const box = { x: cx - w / 2, y: cy - h / 2, w, h };
+                if (!inside(box)) return 'outside';
+                if (!free(box)) return 'taken';
+                if (crossed && crossed(box)) return 'crossed';
+                ctx.fillStyle = fill;
+                ctx.fillText(text, cx, cy);
+                placed.push(box);
+                return 'drawn';
+            };
+            // text on a mark: ink or white, whichever reads better, and only
+            // when it reaches AA (4.5:1) — a slice or segment where neither
+            // does keeps its figure in the table, as the dashboard's aging
+            // bar does (2.22.3 gate, NEW-75: the doughnut's red, blue and
+            // purple drew figures at 4.2–4.4:1)
+            const on = (color) => { const t = figureTextOn(color, dark); return t.ratio >= 4.5 ? t.fill : null; };
+            ctx.save();
+            ctx.font = `${size}px ${opts.family || 'system-ui, sans-serif'}`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            chart.data.datasets.forEach((ds, di) => {
+                const meta = chart.getDatasetMeta(di);
+                if (!meta || meta.hidden || !meta.data) return;
+                const total = (meta.type === 'doughnut' || meta.type === 'pie')
+                    ? ds.data.reduce((a, b) => a + Math.abs(Number(b) || 0), 0) : 0;
+                meta.data.forEach((el, i) => {
+                    const v = ds.data[i];
+                    const n = Number(v);
+                    if (v == null || Number.isNaN(n) || n === 0) return;
+                    const text = fmt(n, ds, i);
+                    const w = ctx.measureText(text).width + 4, h = size + 2;
+                    const own = el.options && el.options.backgroundColor;
+                    if (meta.type === 'doughnut' || meta.type === 'pie') {
+                        if (total && Math.abs(n) / total < 0.04) return;
+                        const p = el.tooltipPosition ? el.tooltipPosition() : el.getCenterPoint();
+                        draw(text, p.x, p.y, on(own));
+                    } else if (meta.type === 'bar') {
+                        const base = el.base == null ? el.y : el.base;
+                        const stacked = ds.stack != null;
+                        // text inside a bar needs the bar's thickness as well as
+                        // its length (gate round 1, NEW-61 / W-5: ~7px bars)
+                        if (el.horizontal) {
+                            const left = Math.min(el.x, base), right = Math.max(el.x, base);
+                            const thick = el.height == null || el.height >= h;
+                            if (stacked) {
+                                if (thick && right - left >= w + 2) draw(text, (left + right) / 2, el.y, on(own));
+                                return;
+                            }
+                            const past = n >= 0 ? el.x + w / 2 + 2 : el.x - w / 2 - 2;
+                            if (draw(text, past, el.y, ink) !== 'drawn' && thick) draw(text, n >= 0 ? el.x - w / 2 - 2 : el.x + w / 2 + 2, el.y, on(own));
+                        } else {
+                            const top = Math.min(el.y, base), bottom = Math.max(el.y, base);
+                            const thick = el.width == null || el.width >= w;
+                            if (stacked) {
+                                if (thick && bottom - top >= h + 2) draw(text, el.x, (top + bottom) / 2, on(own));
+                                return;
+                            }
+                            const past = n >= 0 ? el.y - h / 2 - 2 : el.y + h / 2 + 2;
+                            if (draw(text, el.x, past, ink) !== 'drawn' && thick) draw(text, el.x, n >= 0 ? el.y + h / 2 + 2 : el.y - h / 2 - 2, on(own));
+                        }
+                    } else {
+                        // a point: above it, below for every other line — its
+                        // own side, so a label never reads as the other
+                        // line's; then the other side, beside the point, and
+                        // the four corners, the first place that is on the
+                        // chart, free, and not crossed by the point's own line
+                        // (the segments into and out of it, along their curve
+                        // — 2.22.3 gate, W-6: a label under a peak sat on the
+                        // line rising into it); one with no such place is left
+                        // off, and the table has it
+                        const crossed = (box) => _lineCrosses(meta.data, i, box, 2);
+                        // its own side first — straight, then the two corners —
+                        // so a moved label still reads as this line's; then
+                        // beside the point; the other side last
+                        const up = di % 2 ? 1 : -1, gx = w / 2 + 10, gy = h / 2 + 6;
+                        const spots = [
+                            [0, up], [-gx, up], [gx, up], [-gx, 0], [gx, 0],
+                            [0, -up], [-gx, -up], [gx, -up],
+                        ];
+                        for (const [sx, sy] of spots) {
+                            if (draw(text, el.x + sx, el.y + sy * gy, ink, true, crossed) === 'drawn') break;
+                        }
+                    }
+                });
+            });
+            ctx.restore();
+        },
+    };
 }
 
 // A toast that carries one action (e.g. "Saved to … [Show in folder]").
@@ -269,6 +492,28 @@ function focusFor(el, keyboard) {
     try { el.focus(keyboard ? { focusVisible: true } : undefined); return true; } catch (e) { return false; }
 }
 
+// A skip link inside a long form or page (#266): hidden until the keyboard
+// reaches it, then shown where it sits, so Tab from the top of an invoice
+// offers "Skip to the line items" before the forty stops of the address
+// block. The landing is the first control inside the target (a line's
+// first box, the chart's filter), with the keyboard's ring on it.
+function skipLinkHtml(target, text) {
+    return `<a href="#" class="skip-link skip-link--inline" onclick="return skipTo(event, '${escapeHtml(target)}')">${escapeHtml(text)}</a>`;
+}
+
+function skipTo(e, target) {
+    if (e && e.preventDefault) e.preventDefault();
+    const root = document.querySelector(target);
+    if (!root) return false;
+    const into = root.matches(_TAB_SEL) && root.tabIndex >= 0 ? root : _tabStops(root, null)[0];
+    if (into) { focusFor(into, true); return false; }
+    // nothing to land on inside: the place itself, as the main skip link does
+    root.setAttribute('tabindex', '-1');
+    root.addEventListener('blur', () => root.removeAttribute('tabindex'), { once: true });
+    focusFor(root, true);
+    return false;
+}
+
 // Whether the last input was the keyboard (App.keyboardFocus), for focus
 // the app moves after either.
 function _byKeyboard() {
@@ -297,6 +542,15 @@ function openModal(title, html, opts) {
     // in (app.js App.lockForms).
     if (window.App && typeof window.App.lockForms === 'function') window.App.lockForms($('#modal-body'));
     if (window.App && typeof window.App.hideWriteControls === 'function') window.App.hideWriteControls($('#modal-body'));
+    // A long form names where its lines are (data-skip-to, with the link's
+    // words in data-skip-text) and gets a skip link as its first child
+    // (#266) — placed here, so the page scripts call nothing new and the
+    // link is the dialog's first stop wherever the form came from.
+    for (const form of $('#modal-body').querySelectorAll('form[data-skip-to]')) {
+        if (!form.querySelector(':scope > a.skip-link--inline')) {
+            form.insertAdjacentHTML('afterbegin', skipLinkHtml(form.dataset.skipTo, form.dataset.skipText || 'Skip to the lines'));
+        }
+    }
     $('#modal-overlay').classList.remove('hidden');
     const modal = $('#modal');
     modal.classList.toggle('modal--wide', !!(opts && opts.wide));
@@ -317,8 +571,11 @@ function openModal(title, html, opts) {
     // focus itself then, as one with no control does, and a screen reader
     // says its title (macOS gate NEW-32: the journal entry, job cost and
     // deposit views opened on Void).
+    // A form's own skip link (skipLinkHtml) is the first stop for Tab and
+    // a screen reader, not where a dialog opens: the first field is.
     setTimeout(() => {
-        const first = _tabStops($('#modal-body'), null)[0];
+        const stops = _tabStops($('#modal-body'), null);
+        const first = stops.find(el => !el.matches('.skip-link')) || stops[0];
         const target = first && !first.matches('[data-destructive]') ? first : modal;
         focusFor(target, _byKeyboard());
     }, 0);
@@ -1033,7 +1290,13 @@ function currencyPayloadFromForm(form) {
 // Hence: name the real cause when we know it, and leave the text SELECTED so
 // the fallback is one keystroke rather than an instruction to aim a mouse.
 function _selectElementText(el) {
-    if (!el || !window.getSelection || !document.createRange) return false;
+    if (!el) return false;
+    // a text box selects its own value (a range over the element would
+    // only take its first text)
+    if (typeof el.select === 'function' && typeof el.setSelectionRange === 'function') {
+        try { el.focus(); el.select(); return true; } catch (e) { return false; }
+    }
+    if (!window.getSelection || !document.createRange) return false;
     try {
         const range = document.createRange();
         range.selectNodeContents(el);
@@ -1044,6 +1307,23 @@ function _selectElementText(el) {
     } catch (e) {
         return false;
     }
+}
+
+/**
+ * One line of something shown once (an invitation, a copy's passphrase) for
+ * a three-column grid: its label, the value as text a click selects whole,
+ * and a Copy button of its own (NEW-167: a box that selected all of its text
+ * on any click gave no way to copy the password alone).
+ * @param {string} id       the value element's id, for the Copy fallback
+ * @param {string} label    what the line is, e.g. 'One-time password'
+ * @param {string} value    the text
+ * @param {string} handler  the button's onclick
+ * @returns {string} HTML
+ */
+function copyLineHtml(id, label, value, handler) {
+    return `<span style="font-size:12px; color:var(--text-muted);">${escapeHtml(label)}</span>`
+        + `<code id="${id}" style="font-family:var(--font-mono); font-size:12px; user-select:all; overflow-wrap:anywhere;">${escapeHtml(value || '')}</code>`
+        + `<button type="button" class="btn btn-secondary btn-sm" aria-label="Copy the ${escapeHtml(label.toLowerCase())}" onclick="${handler}">Copy</button>`;
 }
 
 /**

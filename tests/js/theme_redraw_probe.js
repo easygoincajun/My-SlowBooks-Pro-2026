@@ -14,6 +14,8 @@ const ctx = {
   window: {}, T: (s) => s, formatCurrency: (n) => String(n), escapeHtml: (s) => s, App: {}, API: {}, $: () => null,
   // utils.js's chartColor: the theme's --chart-* colour
   chartColor: (name) => (theme === 'dark' ? 'dark-' : 'light-') + name,
+  // utils.js's chartFigures: the figures-on-the-marks plugin (#265)
+  chartFigures: () => ({ id: 'sbFigures' }),
 };
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync('app/static/js/dashboard.js', 'utf8') + '\nthis.DashboardPage = DashboardPage;', ctx);

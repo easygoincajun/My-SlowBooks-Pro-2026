@@ -148,7 +148,26 @@ jobs:
           # Playwright: its books fixture lives in conftest), +1
           # tests/test_browser_keyboard.py, +1 tests/test_browser_job_picker.py,
           # +1 a PDF test of the round-2 exports (WeasyPrint's native stack).
-          MAX_SKIPS: "115"
+          # 2.22.2: +1 the deposit slip's real-PDF test (#260), which the
+          # WeasyPrint hook skips here as it does the other PDF tests.
+          # 2.22.3: +1 PR #283's source-run process pair, POSIX-only (#121);
+          # its Windows counterpart runs here (W-7).
+          # 2.23.1: +1 the bill form's browser measurement (W-5), one more
+          # playwright module, skipped here as its sixteen siblings are.
+          # 119 since 2.24.0: tests/test_browser_open_tabs.py joins the browser
+          # modules that skip here without playwright's Chromium; 120 with
+          # 2.24.0's round 2: the Closing Date Exceptions clock test renders
+          # the report's PDF, which skips here with the other PDF tests
+          # (no WeasyPrint stack on the runner)
+          # 2.24.0's round 4: the invitation's browser test, skipped like
+          # the other Playwright modules (no Playwright on the runner)
+          # 125 with printed register checks: four tests in
+          # tests/test_register_check_print.py render the check's PDF, which
+          # skips here with the other PDF tests (no WeasyPrint stack)
+          # 126 with atomic account balances: the concurrent-postings race
+          # in tests/test_atomic_account_balance.py needs a Postgres server
+          # (SLOWBOOKS_TEST_POSTGRES_URL), like the other Postgres-only tests
+          MAX_SKIPS: "126"
         shell: pwsh
         run: |
           # -v names each test as it starts, so a mid-run death is identified

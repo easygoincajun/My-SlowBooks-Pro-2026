@@ -98,6 +98,7 @@ to existing SlowBooks behavior.
 | Bank account # | ✅ Fernet-encrypted; only last-4 plaintext |
 | AI provider API keys | ✅ Fernet-encrypted via `app/services/crypto.py` |
 | Password hashes | ✅ Argon2id (one-way) |
+| Company file (SQLite) | ✅ Optional whole-file SQLCipher encryption (#290), off by default; on a desktop the key is the practice's own (a recovery key shown once, unlocked by an administrator's sign-in), on a server the operator's secret; backups are ciphertext; PostgreSQL is the host's job |
 | Employee SSN | ⚠ Only last 4 digits stored — full SSN never collected |
 | Employee name / address | ⚠ Plaintext (not PHI in HIPAA terms) |
 | HSA / health-insurance deduction amounts | ⚠ Plaintext (not PHI in HIPAA terms) |

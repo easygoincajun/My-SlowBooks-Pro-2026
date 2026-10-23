@@ -52,9 +52,9 @@ def _posted_source_types():
         found |= set(re.findall(r'void_document\([^)]*?"([a-z_]+)"\s*\)', text))
         found |= set(re.findall(r'VOID_SOURCE_TYPE\s*=\s*"([a-z_]+)"', text))
         derived_sites += text.count('f"{txn.source_type}_void"')
-    # the derived form is still in use (journal void, QBO reversals) — if it
-    # went away, so should DERIVED_VOID_BASES
-    assert derived_sites >= 3, derived_sites
+    # the derived form is still in use (the journal's void, the reversal of
+    # an import posting) — if it went away, so should DERIVED_VOID_BASES
+    assert derived_sites >= 2, derived_sites
     found |= {f"{base}_void" for base in DERIVED_VOID_BASES}
     return found
 

@@ -8,16 +8,17 @@ For module-deep references (models, routes, UI pages, pending items),
 see [docs/payroll-hr-module.md](payroll-hr-module.md) for payroll/HR,
 [docs/security-hardening.md](security-hardening.md) for the security
 pass, and the per-integration setup guides ([Stripe](setup-stripe.md),
-[QuickBooks Online](setup-qbo.md), [TLS proxy](tls-proxy-setup.md)).
+[TLS proxy](tls-proxy-setup.md)).
 
 ---
 
 ## Invoicing & Payments (Accounts Receivable)
-- **Invoices** — Create, edit, duplicate, void, mark as sent, email as PDF. Auto-numbering, auto due-date from terms, dynamic line items with running totals. Print/PDF generation via WeasyPrint. Inline customer creation from invoice form
+- **Invoices** — Create, edit, duplicate, void, mark as sent, email as PDF. Auto-numbering, auto due-date from terms, dynamic line items with running totals. Print/PDF generation via WeasyPrint. Inline customer creation from invoice form. **Draft means not yet marked sent, not unposted:** creating an invoice posts it to the books at once (A/R and income, and inventory-tracked items come out of stock); Mark Sent changes the status and posts nothing more. The form says so beside Create (v2.23.0, #293) **Quantities keep four decimal places** (v2.23.0): a line's quantity is stored to four places as unit prices are, shown as entered (2.125; 3.00 as before), refused finer, on invoices, estimates, credit memos, recurring invoices, bills, purchase orders and vendor credits — the imports stored a finer quantity and every read gave two places, so an edit took cents off the document
 - **Sales Receipts** — One-screen invoice + payment for point-of-sale style sales where the customer pays on the spot. Payment method, deposit-to account, and line items on a single form; posts both documents and their journal entries atomically. Imports from QuickBooks Desktop (IIF `CASH SALE`) and QuickBooks Online (SalesReceipt API)
 - **Receipt scanning (Tier 2 OCR)** — A Scan Receipt button on the Sales Receipt and Bill forms uploads a receipt image or PDF and pre-fills the form from local OCR: date, merchant/vendor hint, and the grand total as a single line, with detected tax split out (tax-rate field on sales receipts; noted in Bill Notes). The operator always reviews before saving, and the source file attaches to the document. On Windows and macOS the OS engine reads the text and the OS renders PDF pages, so nothing is installed; on Linux, Tesseract + poppler-utils are user-installed system binaries called via subprocess — zero new Python dependencies, never bundled, graceful "install Tesseract to enable scanning" degrade. Deterministic parsing, no AI. Spec: [docs/design/receipt-intake-spec.md](design/receipt-intake-spec.md)
 - **Estimates** — Full estimate workflow with convert-to-invoice: the invoice is dated the day it is made, due by the customer's terms, addressed to the customer (the estimate is addressed when saved). Inline customer creation from estimate form
-- **Payments** — Record payments with allocation across multiple invoices. Typing the amount fills the Apply column oldest invoice first (change any of it); money left over is kept as a customer credit only when you tick the box that says so. Draft invoices can be paid too. Auto-updates invoice balances and status (draft/sent/partial/paid). Void payments with reversing journal entries — refused while the payment is in a deposit, and once that deposit is reconciled
+- **Write Off** (v2.22.2, #255) — forgive an open balance in any company, not only a nonprofit: a credit memo to Bad Debt Expense, applied to the invoice at once, voidable to undo. From **A/R Aging**, **Write off balances under…** a figure you type lists the open invoices under it, each with a tick, and posts one credit memo per invoice together; a balance that changed since the list was made (a payment landed) is left alone and named, and a closed period refuses the batch
+- **Payments** — Record payments with allocation across multiple invoices. Typing the amount fills the Apply column oldest invoice first (change any of it); money left over is kept as a customer credit only when you tick the box that says so. Draft invoices can be paid too. Auto-updates invoice balances and status (draft/sent/partial/paid). Void payments with reversing journal entries — refused while the payment is in a deposit, and once that deposit is reconciled. **Retry-safe recording** (v2.23.0, #292): a client that may send a request twice — a form after a lost response, an agent, a script — puts an `Idempotency-Key` header on `POST /api/payments` or `/api/bill-payments`; the same key with the same body answers with the first response (`X-Replayed: true`) and books nothing more, the same key with another body is a 409 (the body is compared by its values, so 100 and 100.00 are the same amount and a re-serialised retry still replays), every keyed answer carries an `Idempotency-Key` header naming the key it was booked or replayed under, a first delivery still running is a 409 until it finishes, and keys are kept seven days. The app's own Receive Payment and Pay Bills forms send one per submit and ignore a second click while one is in flight
 - **Customer credits** — Unapplied payment money and open credit memos are listed on Receive Payment, the customer page, the payment and the invoice, each with **Apply**; applying a foreign-currency remainder posts the realized exchange difference. A/R Aging, Income by Customer, the dashboard and every customer balance count them, so they tie to account 1100
 - **Foreign-currency invoices** — The document carries its currency ("EUR 850.00") on screen, in lists, on the PDF and in email; the ledger books the home amount at the invoice's rate, and A/R reports count that booked amount. Receive Payment offers the customer's invoice currencies and takes the rate on the payment date
 - **Recurring Invoices** — Schedule automatic invoice generation (weekly/monthly/quarterly/yearly) with manual "Generate Now" or cron script. The form prices the item and shows a total; a schedule that adds up to $0.00 is refused, and the generator skips an old one
@@ -25,7 +26,7 @@ pass, and the per-integration setup guides ([Stripe](setup-stripe.md),
 - **Invoice numbering and footer** — Settings' invoice prefix, next invoice number (leading zeros kept as padding) and invoice footer are used
 - **Walk-in sales** — A sales receipt needs no customer: counter sales go to a built-in Walk-in Customer (Anonymous Donor in a nonprofit)
 - **Unit prices to four places** — $0.045 a box on invoices, estimates, sales receipts, credit memos, recurring schedules, bills, purchase orders, vendor credits and items; each line amount is rounded to the cent
-- **Credit limit** — Saving an invoice that takes a customer past their credit limit asks first
+- **Credit limit** — Saving an invoice, editing one up, or converting an estimate that takes a customer past their credit limit asks first, in the form and (v2.22.2, #256) on the API: 409 `credit_limit` with the limit and what they'd owe, saved only with `allow_over_credit_limit: true`. What they owe counts the credits and unapplied payments they hold, as A/R Aging does; a sales receipt, paid at once, is never asked
 - **Batch Payments** — Apply payments to multiple invoices across multiple customers in a single transaction. Each line pays only its own customer's invoices, in the home currency; a batch with one wrong line is refused whole
 - **Credit Memos** — Issue credits against customers, apply to that customer's invoices to reduce balance due. Picking an item fills its price; the form totals up; tax starts at the company's rate or the credited invoice's, and falls on the lines an invoice would tax. View, Save PDF and Print. Proper reversing journal entries
 - **Vendor Credits** — Record a credit a supplier gave you for a return, a short shipment or an overcharge. Debits Accounts Payable and credits the expense (or Inventory, for stock going back), then applies to any of that vendor's open bills or sits on their account until there is one. Applying posts nothing — A/P moved when the credit was issued
@@ -34,44 +35,50 @@ pass, and the per-integration setup guides ([Stripe](setup-stripe.md),
 ![Invoices with IRS Pub 583 Mock Data](../screenshots/invoices.png)
 
 ## Accounts Payable
+- **Vendors: search and paid-to-date** (v2.23.5) — the list filters as you type; a vendor's page shows paid this year and all time, with a payments CSV
 - **Purchase Orders** — Non-posting documents to vendors with auto-numbering, live line amounts and totals, View, Save PDF and Print, and a To Bill step that asks for an account on each line that has none. A new PO starts at no tax
 - **Bills** — Enter vendor bills (AP mirror of invoices). A posted bill can be edited the way an invoice can (v2.21.0): the header or the lines, re-posting its journal; not below what has been paid, not when voided, not into a closed period. Track payables with status progression (draft/unpaid/partial/paid/void). Each line posts to the account on the line, else the item's expense account, else the vendor's default — a line none of them names is refused (it used to fall back to 6000). Enter Bill has an Account column, fills a picked item's cost and account, takes the vendor's terms and due date, shows a running total and refuses $0.00. Save PDF and Print. Scan a vendor receipt to pre-fill the form (see Receipt scanning under Sales Receipts)
 - **Expenses** — A receipt that's already paid, by card, cash or check: DR the expense account, CR the bank, cash or credit-card account it was paid from, in one step with no bill to pay later. Scan Receipt fills it in. An expense takes a vendor or a payee, a reference, a class, a job and cost code, a nonprofit function, and can be marked billable. **An expense is not edited, unlike a bill**: a mistake is voided (a reversing entry; both stay in the register) and entered again. Voiding is refused once the expense is reconciled or when its date is in a closed period
 - **Tax on a purchase** — Sales tax a supplier charges is part of what the purchase cost: spread over the lines to the cent and posted with them (expense, cost of goods or inventory, in the item's unit cost). It never touches 2200 Sales Tax Payable. The Sales Tax report names purchase tax an older release posted there and gives the correcting entry
-- **Vendor page** (v2.21.0) — click a vendor for its own page: contact, terms, 1099 status, the default account, notes edited in place, what's owed, its bills, bill payments and unapplied credits, each opening from the page
+- **Vendor page** (v2.21.0) — click a vendor for its own page: contact, terms, 1099 status and whether a W-9 is on file (v2.22.2), the default account, notes edited in place, what's owed, its bills, bill payments and unapplied credits, each opening from the page
+- **W-9 on file** (v2.22.2, #257) — a vendor's W-9 flag, next to the 1099 question on the vendor form. The 1099-NEC always printed "W-9 on file: No", because nothing could set the flag it prints. The 1099 Summary shows each vendor's W-9 and counts the reportable vendors without one (`vendors_missing_w9`)
 - **Vendor list** — Balances worked out from open bills and unapplied credits; a vendor can be made inactive; cost-of-goods accounts can be a vendor's default ("Default Expense or COGS Account")
-- **Bill Payments** — Pay vendor bills with allocation. Journal: DR AP, CR Bank. Pay Bills makes one payment per vendor and asks for one vendor at a time when a check number is entered; a payment pays only its own vendor's bills. A bill lists its payments, each with View, Print Check and Void (refused once the check is reconciled). Paying from a bank account that would go below zero asks first
+- **Bill Payments** — Pay vendor bills with allocation. Journal: DR AP, CR Bank. Pay Bills makes one payment per vendor and asks for one vendor at a time when a check number is entered; a payment pays only its own vendor's bills. A bill lists its payments, each with View, Print Check and Void (refused once the check is reconciled). A check written straight into the bank register, or entered as an Expense paid from a bank account, prints from its register row or the expense's view (discussion #354): the same 3-per-page stock, each split line on the stub. Paying from a bank account that would go below zero asks first. A payment that names no bank pays from Checking (1000); a chart without it is refused with a 409 naming the account, nothing written (v2.22.3, #284)
 - **AP Aging Report** — Outstanding payables grouped by vendor with 30/60/90 day buckets past due, in home currency, with vendor credits and bill-payment money not yet applied netted, so the total equals account 2000. A bill with no due date ages from its date and terms
 
 ## Double-Entry Accounting
+- **Chart of accounts: numbers optional, seeded accounts removable** (v2.23.5) — the account form says the number is optional; "Remove unused seeded accounts…" takes every seeded account with no postings, sub-accounts, register or control role off the chart in one step, naming the ones that stay
 - **Manual Journal Entries** — Full CRUD for manual journal entries with dynamic line rows, running debit/credit totals, balance indicator, and void with reversing entries
 - **Auto Journal Entries** — Every invoice, payment, bill, and payroll run automatically creates balanced journal entries. Void creates reversing entries
 - **Chart of Accounts** — 39+ seeded accounts (Contractor template), 6 account types (asset, liability, equity, income, COGS, expense)
 - **Control accounts** — Fifteen accounts are found by their number when a document posts: 1000 Checking, 1100 Accounts Receivable, 1200 Undeposited Funds, 1300 Inventory, 2000 Accounts Payable, 2100 Credit Card, 2200 Sales Tax Payable, 3200 Retained Earnings, 4000 Service Income, 4800 Late Fee Income, 5000 Cost of Goods Sold, 5900 Inventory Adjustments, 6000 Advertising & Marketing, 6120 Payroll Tax Expense, 6150 Employee Benefits Expense. **You can rename any of them** — the Chart of Accounts marks them `CONTROL` and its edit form says why the number and type are fixed while the name is yours; changing the number or the type is refused, because a document that cannot find its control account would have nowhere to post. Every other account, seeded or not, can be renumbered freely. A posting that cannot resolve a control account fails with a 409 naming it and writes nothing — it never saves a document that skipped the ledger (issue #119)
 - **Closing Date Enforcement** — Prevent modifications to transactions before a configurable closing date with optional password protection
-- **Audit Log** — Automatic logging of all create/update/delete operations with old/new value tracking via SQLAlchemy event hooks
+- **Audit Log** — Automatic logging of all create/update/delete operations with old/new value tracking via SQLAlchemy event hooks. **Line replacement is audited per line** (v2.23.0, #289): editing a posted bill's or invoice's lines, and re-posting its journal, writes a DELETE event for each old bill line, invoice line and journal line, with its account and amounts, and INSERT events for the new ones, in the same transaction as the edit — the bulk deletes those edits use went past the hooks before. The QuickBooks Online re-import of a changed sale and an estimate edit replace their lines the same way, and every replaced row leaves the session as it is deleted
 - **Account Balances** — Updated in real-time as transactions post
 - **Fixed Assets** — Register an asset and its purchase posts: paid from a bank or card account, on a bill or expense already entered (the cost moves out of the expense account), or owned before the books began (with depreciation already taken). Straight-line depreciation posts monthly; salvage above cost is refused
 
 ## Payroll & HR
 - **Core payroll** — pay runs with federal/state/FICA withholding, balanced journal entries, pay stubs, YTD totals, encrypted ACH direct deposit, gross-up calculator, supplemental wages, multi-state withholding
-- **HR** — 8-task onboarding checklist with e-signature, time tracking (hours shown, approve or reject from draft, clock times work out the hours), PTO policies + requests with accrual draw-down, pre/post-tax deductions, court-ordered garnishments. A pay run that would pay someone $0.00 is refused and names them and the time waiting for approval
+- **Direct deposit file** (discussion #211) — the bank's details are saved once under Settings → Direct Deposit (ACH): its routing number, name, the company account the pay comes from (encrypted at rest) and the two identifiers the bank assigns ("1" + EIN unless it says otherwise). A processed pay run then has a **Direct deposit file** button: the NACHA file to upload to the bank, named for the pay date, crediting each employee's active account (one still waiting on a prenote is left out) and debiting the company account for the total. The run's view says who the file pays and who is paid by check (`direct_deposit` on each stub). SlowBooks does not send the money; the business account needs ACH origination from the bank. `POST /api/payroll/{id}/nacha` still takes the details in the body, each field optional now, outranking the saved one
+- **HR** — 8-task onboarding checklist with e-signature, time tracking (hours shown, approve or reject from draft, clock times work out the hours), PTO policies + requests with accrual draw-down (cancel a pending or approved request from the HR page: the hours it drew go back into the bank and its relief journal is reversed, the request stays on the list as cancelled; an employee withdraws their own pending request from the portal), pre/post-tax deductions, court-ordered garnishments. A pay run that would pay someone $0.00 is refused and names them and the time waiting for approval
 - **Pay stubs** — a Stub PDF per employee on the pay-run view, naming the company; the view's Other column (state taxes other than income tax, garnishments) makes every row add up to Net. Processing a run that would overdraw the bank account asks first
-- **Tax forms** — W-2, W-3, Form 940 (FUTA), Form 941 (FICA), 1099-NEC and 1096. JSON for downstream integrations + WeasyPrint PDFs with tamper-evident audit hashes in the footer (SHA-256 + audit ID matched against the `document_audits` table). The PDFs open by GET, as invoices do, so they appear in the desktop app's viewer. W-3, 940 and 941 count only employees paid wages; the 941 works lines 5a–5d from the rates and carries the rounding on line 7. A vendor marked "1099 Vendor: Yes" reaches the 1099-NEC and 1096
-- **Self-service portal** — token-accessed at `/portal/{token}` — pay stubs, W-4 updates, direct-deposit setup, PTO requests; branded with the employer's logo and company name
+- **Tax forms** — W-2, W-3, Form 940 (FUTA), Form 941 (FICA), 1099-NEC and 1096. JSON for downstream integrations + WeasyPrint PDFs with tamper-evident audit hashes in the footer (SHA-256 + audit ID matched against the `document_audits` table). The PDFs open by GET, as invoices do, so they appear in the desktop app's viewer. W-3, 940 and 941 count only employees paid wages; the 941 works lines 5a–5d from the rates and carries the rounding on line 7. A vendor marked "1099 Vendor: Yes" reaches the 1099-NEC and 1096. **Form history** (v2.22.2) on the Tax Forms page lists every W-2, W-3, 940 and 941 generated — what, when, by whom, its hash — and Check re-figures one from today's books and says in a sentence whether it still matches (a voided pay run in its period is said too); a footer hash can be looked up. Admin only, read-only
+- **Self-service portal** — token-accessed at `/portal/{token}` — pay stubs, W-4 updates, direct-deposit setup, PTO requests (and withdrawing one still pending); branded with the employer's logo and company name
 
 Tax calculations are approximate — verify with a tax professional. Full module reference (models, routes, UI pages, pending items) lives at [docs/payroll-hr-module.md](payroll-hr-module.md).
 
 ## Banking
+- **A register you can type into** (v2.23.5) — a bank or card account's register reads oldest to newest with the running balance down the right, and its last row takes the next entry (date, payee, memo, ref, category, out or in); Enter posts it and the next row is ready. An entry can be **split across accounts** (a loan payment's principal and interest) from the dialog's "Split this entry…". **Reconcile** can show only the lines dated through a day you pick, for several statements worked back to back
 The register is the ledger account (v2.10, issue #114). Full guide: [docs/banking.md](banking.md).
 - **Bank and credit-card accounts** — chart accounts flagged `bank` / `credit_card`; every paid-from, deposit-to and pay-from picker lists exactly those
 - **Register** — every posting on the account with a running balance (a card shows the amount owed), payee, source link, cleared/reconciled marks; a register entry posts (DR category / CR account for money out, the reverse for money in)
 - **Transfers** — DR to / CR from between bank and card accounts; paying a card is a transfer. Voidable
-- **Make Deposits** — Move funds from Undeposited Funds to a bank account. Select pending payments (each named with its receipt or check number), choose target account, create deposit. A deposit records the payments it took; Recent deposits lists them with View and Void
+- **Make Deposits** — Move funds from Undeposited Funds to a bank account. A deposit has a **slip** to print or save as a PDF (v2.22.2, #260): the account, the date, each check or payment it took (who, number, method, amount), the checks and cash subtotalled, and the total; a void deposit's says VOID. Select pending payments (each named with its receipt or check number), choose target account, create deposit. A deposit records the payments it took; Recent deposits lists them with View and Void
 - **Credit Card Charges** — DR Expense, CR the card you pick (default 2100). Voidable
 - **Check Printing** — Generate check PDFs in standard 3-per-page format (stub/stub/check) with payee, amount in words, memo, and signature line
 - **Bank feeds and file imports (SimpleFIN, OFX/QFX, any CSV with a date, a description and an amount)** — a review queue: each statement line is auto-matched to the posting the ledger already has (same amount and side within five days, check number narrows, ambiguity waits), or added with a category, or excluded. A category picked on screen is kept on the line. A CSV the import can't read asks which column is which. Bank rules suggest categories and never post. Adding a feed compares the statement balance with the books and never counts it twice. **Fetch older history** reaches a SimpleFIN feed back 3, 6 or 12 months, as far as the provider keeps (the Bridge about 90 days, BankSync a year), in slices the Bridge accepts
-- **Bank Reconciliation** — over the ledger's lines: beginning balance from the prior statement, tick cleared lines (matched statement lines arrive cleared), difference must be $0 (Finish says by how much when it isn't), completing locks the lines; statements go forward only; each completed reconciliation has a report and PDF
+- **A rule from a statement line** (v2.22.2, #259) — on a line in To review, after the category is chosen, **Rule…** opens the bank-rule form with the payee as the pattern and that category filled in (Contains, any case; shorten the pattern to catch other spellings). Saved, the rules run over the queue and the register comes back
+- **Bank Reconciliation** — over the ledger's lines: beginning balance from the prior statement, tick cleared lines (matched statement lines arrive cleared), difference must be $0 (Finish says by how much when it isn't); **Mark all**, **Mark through** a date and **Clear all** tick or untick every line at once (v2.22.2, #258), lines after the statement date never among them; completing locks the lines; statements go forward only; each completed reconciliation has a report and PDF
 - **Register links** — every register line opens its document: invoice, payment, bill, bill payment, deposit, expense, card charge, transfer, or its journal entry
 
 ## Reports & Tax
@@ -83,8 +90,20 @@ The register is the ledger account (v2.10, issue #114). Full guide: [docs/bankin
 - **Reports from the customer and vendor pages** (v2.22.0) — a Reports row on the customer page (Statement PDF in business mode, Income by Customer, A/R Aging, Job Profitability for that customer's jobs) and on the vendor page (A/P Aging, 1099 Summary for 1099 vendors, the default expense account's register), each on this year to date with the customer's or vendor's row picked out; the pages have addresses (`#/customers/<id>`, `#/vendors/<id>`) so Back returns to them
 - **The drill-down** (v2.22.0) — sits on the period shell: change its dates, class or account in place, step Previous / Next through the accounts of the report it came from, save it as a report that reopens. It shows Payee, the cleared mark (✓ cleared, R reconciled), void lines struck through, the balance brought forward and a period total. Every posting in a register or drill-down links to its document — job cost entries, pay runs, credit memos, in-kind gifts, releases and allocations at their own addresses; PTO accruals, checks, inventory adjustments, sales-tax payments, IIF lines and asset postings at their journal entry
 - **QuickBooks-style period selector** — All reports support preset periods (This Month, This Quarter, This/Last Year, Year to Date, Custom Date) with live refresh
-- **Profit & Loss** — Income vs expenses for any date range
-- **Balance Sheet** — Assets, liabilities, and equity as of any date
+- **An Accountant role** (v2.24.0, #340) — Settings → Users offers Accountant: a sign-in that reads everything, the audit log included, posts journal entries, voids the ones it posted and attaches the support behind one, and nothing else; every other write is refused with a sentence that says what the role is for; payroll and HR stay the administrator's
+- **Adjusting entries, marked and reported** (v2.24.0, #341) — a journal entry can be marked as an adjusting entry (an accountant's always is) and carries who posted it; the Journal Entries list filters to them; Reports → Adjusting Journal Entries lists them for a period as PDF or CSV, and the Profit & Loss and Trial Balance run without them on request
+- **Closing Date Exceptions** (v2.24.0, #342) — every change made into a closed period with the closing-date password is written to the audit log as such; Reports → Closing Date Exceptions lists each use, who, when, the closing date at the time and every row it changed before and after, as PDF or CSV
+- **The Accountant's Package** (v2.24.0, #343) — Reports → Accountant's Package: one zip for the period with the Financial Statements Pack, the General Ledger and Trial Balance as CSV, the A/R and A/P agings, each bank reconciliation completed in the period, the Adjusting Journal Entries and Closing Date Exceptions reports and the audit log since the closing date; the dialog lists the files first
+- **The QuickBooks Desktop round trip, both ways** (v2.24.0, #344) — the IIF export carries checks, card charges, transfers, bill payments and journal entries, the IIF import takes the same five blocks back as journal entries (nothing twice; an accountant's GENERAL JOURNAL blocks as adjusting entries on request), and the Transaction Detail by Account import has an Adjusting entries only mode that refuses a file holding anything else
+- **A categorized bank sheet imports as posted transactions** (v2.24.0) — the Transaction Pro / SaasAnt layout (Bank Account, Transaction Date, Memo, Payee, Account, Amount), each row the register entry it is, rows sharing the date, payee and memo one split entry, a transfer when the account is another bank account; the file checked whole first, nothing posted twice, payees added to the lists
+- **Reclassify Transactions** (v2.24.0) — Reports → Reclassify Transactions: pick an account and a period, tick the lines to move, choose the account they belong on (and a class), preview, then post the move as one audited change naming every line; a bill's own line follows its posting, the bank side of an entry and a document's item lines stay put and say why, and a move dated into a closed period takes the closing-date password
+- **Open screens** (v2.24.0) — the pages, registers, documents and dialog reports opened in a session are listed under Open at the top of the sidebar, each a link back and each closable (a report with its period, a register by its account, a document by its title); the one showing is marked, closing it goes to the one before, a reload keeps the list and Close all empties it
+- **Company file encryption on the desktop** (v2.24.0, #290) — Settings → Company File Encryption → Turn on (or the first-run setup's checkbox) makes a recovery key shown once and encrypts the file under it; an administrator's sign-in at the company picker unlocks the books, other administrators' after their next sign-in, and the recovery key opens the file and every backup of it anywhere; a new recovery key re-keys the file and retires the old; a restore of a backup made under another key asks for its recovery key; Server Edition keeps COMPANY_FILE_ENCRYPTION_SECRET
+- **Accountant's Copy** (v2.24.0) — Companies → Send to accountant writes an encrypted copy of the books (a passphrase shown once, the owner's sign-ins and secrets left out) with a dividing date; the accountant opens it in their own SlowBooks Pro, where it takes journal entries on or before that date and nothing else, and sends one signed change file back; Apply accountant's changes previews and posts the new entries as adjusting entries in their name, once, and refuses a file from another company or altered on the way
+- **Invite your accountant** (v2.24.0) — Settings → Users makes a sign-in with a one-time password (shown once with the address), the Accountant role, and an end date if the engagement has one; the person sets their own password at the first sign-in, an ended sign-in is refused with the date, and the Users list shows each person's last sign-in
+- **Drill-down export** (v2.23.5) — an account's detail for a date range saves as CSV and PDF, the figures on the screen
+- **Profit & Loss** — Income vs expenses for any date range; accounts by number then name, the Trial Balance's order, or by name ("Sort by", v2.23.4), a sub-account under its parent either way and named by its path with its number
+- **Balance Sheet** — Assets, liabilities, and equity as of any date, in the same order
 - **Trial Balance** — Every account's debit or credit balance for the period, with totals that must agree
 - **Save as spreadsheet / printable** — Profit & Loss, Balance Sheet, Trial Balance and General Ledger each save as a CSV (amounts as plain numbers, one row per line, ready for Excel or LibreOffice) and a PDF. The figures in the file are the figures on the screen
 - **A/R Aging** — Outstanding receivables grouped by customer with 30/60/90 day buckets, in home currency, with a Credits column for unapplied payments and credit memos; the total equals account 1100. Email All Overdue sends a statement to each customer with overdue sent invoices and reports who didn't get one
@@ -110,6 +129,7 @@ The register is the ledger account (v2.10, issue #114). Full guide: [docs/bankin
 - **Classes page** (v2.22.0) — `#/classes`, outside Settings: every class with its income, cost of goods, expenses and net for a period (Active / Archived / All); every class together is the Profit & Loss for the dates, and a filtered list says what it totals
 - **A class's own page** (v2.22.0) — `#/classes/<id>`: Overview with the class's P&L account by account, its net income and share of the company's, and links into its Profit & Loss and into P&L by Class landing on its column; Transactions with every posted line tagged to the class across every account, each opening its document; the Uncategorized page is the cleanup list; archived classes keep their page; fund fields in nonprofit mode. The global search finds classes and opens the page. Rename and archive stay in Settings
 - **Register filters** (v2.22.0) — a bank or card register takes a date range and a class in its address; with a start date it shows the balance brought forward, and a class-filtered running balance is labelled beside the account's whole balance; From after To typed is refused and the filter in use kept
+- **Landmarks and skip links on the long forms** (v2.22.2) — the invoice, bill and journal-entry forms are form landmarks (named by the dialog's title) whose first stop is "Skip to the line items", landing the keyboard on the first line with the focus ring showing; the chart of accounts is a navigation landmark with "Skip to the account filter" first. A dialog still opens on its first field, never on Void or Delete
 - **Chart of Accounts opens the register** (v2.22.0) — an account's name opens the bank register (bank and card accounts) or this year's transactions through the period shell (every other account, inactive included); a filter box narrows the chart by number or name, its count announced; the global search finds accounts and opens the same register
 - **Line-level class for every company** (v2.22.0) — the per-line Class cell on bill and journal lines is no longer nonprofit-only, and invoice lines have one too, so one bill can split across two classes; posting always honoured a line's class
 - **Warn when a transaction is saved without a class** (v2.22.0) — a company setting (Settings → Classes, `class_warn_blank`); on, entry forms start with no class chosen and ask before saving a document with none on its header or lines, which would be reported under Uncategorized; payments, transfers and payroll carry no class and are not asked
@@ -131,8 +151,8 @@ The register is the ledger account (v2.10, issue #114). Full guide: [docs/bankin
 
 ## Dashboard
 - Company Snapshot with Total Receivables, Overdue Invoices, Active Customers, Total Payables
-- **AR Aging Bar Chart** — Color-coded stacked bar (Current/30/60/90+ days)
-- **Monthly Revenue Trend** — Bar chart showing last 12 months of invoiced revenue
+- **AR Aging Bar Chart** — Color-coded stacked bar (Current/30/60/90+ days); each segment wide enough to hold it carries its figure (v2.22.2)
+- **Monthly Revenue Trend** — Bar chart showing last 12 months of invoiced revenue, the figure above each bar (v2.22.2)
 - Recent invoices and payments tables
 - Bank balances at a glance
 
@@ -145,18 +165,18 @@ The register is the ledger account (v2.10, issue #114). Full guide: [docs/bankin
 Real-time business intelligence layer that sits on top of the accounting engine. Powered by `AnalyticsEngine` (`app/services/analytics.py`) with 8 aggregation methods and 7 REST endpoints at `/api/analytics/*`. **Fully integrated inline** into the main SPA as a hash-routed page — no separate shell, no full page reload. Click **Analytics** in the sidebar (under Accounting → Reports → Analytics → Tax Reports) to land on `#/analytics`.
 
 **Metrics computed:**
-- **Revenue by Customer** — Paid revenue per customer for the selected period, ranked high-to-low
-- **12-Month Revenue Trend** — Monthly paid-revenue history with proper calendar-month bucketing
-- **Expenses by Category** — Paid-bill expenses grouped by expense account number
+- **Revenue by Customer** — Paid revenue per customer for the selected period, ranked high-to-low: invoices and sales receipts dated in the period and paid in full, before sales tax and in home currency — what the ledger booked to income for each (v2.22.3; it included the tax)
+- **12-Month Revenue Trend** — Monthly income from the ledger (what was credited to income accounts, by posting date), bucketed by calendar month, with a month-by-month table under the chart; each point's figure sits beside it, never across its own line (v2.22.3; it was paid invoices by invoice date)
+- **Expenses by Category** — Everything posted to expense and cost-of-goods accounts in the period, grouped by account and named as the Profit & Loss names it ("6100 - Auto & Truck Expense"): bills when dated (paid or not), expenses, register entries, card charges, payroll and journal entries, as the Profit & Loss counts them (v2.22.3, #281; it was paid bills only, so a bank-fed, journal-entry company saw nothing). Voided postings net to zero. A slice's figure is drawn only where it reads at AA; the table has every figure. An account that nets to a credit for the period (a refund larger than the spending) keeps its row and its place in the totals but has no slice. The screen and the PDF say the basis
 - **A/R Aging** — Open invoice balances bucketed Current / 30 / 60 / 90+ days old, using `invoices.balance_due` so partial payments don't double-count. Table is sorted worst-offender first and includes a TOTAL row.
-- **A/P Aging** — Open bill balances bucketed Current / 30 / 60 / 90+ days old (same treatment as A/R)
+- **A/P Aging** — Open bill balances bucketed Current / 30 / 60 / 90+ days old (same treatment as A/R); as of a date, bills dated after it are left out (v2.22.3, #285). The 1099 Summary and the 1099 forms leave voided bill payments out (v2.22.3, #287)
 - **DSO (Days Sales Outstanding)** — `(open A/R balance ÷ last-30-day paid revenue) × 30`
 - **90-Day Cash Forecast** — 14 weekly cumulative buckets of expected A/R collections vs A/P payments due on-or-before each cutoff. Net column color-coded green/red.
 - **Customer Profitability** — Lifetime paid revenue per customer (first pass; COGS attribution on the roadmap)
 
 **Dashboard UI (`#/analytics`, inline SPA page):**
-- **4 KPI cards** — Revenue, Expenses, DSO, Margin%
-- **Chart.js visualizations** (self-hosted 206 KB UMD bundle at `/static/js/chart.umd.js` — no CDN, LAN-deployable):
+- **4 KPI cards** — Revenue (ledger), Expenses (ledger), DSO, Margin % — revenue, expenses, net income and the margin on one basis, the ledger's for the period (accrual, as the Profit & Loss), so the margin is net income over revenue (v2.22.3; it divided paid-invoice revenue into ledger expenses). The margin shows a dash when there is no revenue, and DSO a dash when no invoice or sales receipt dated in the last 30 days has been paid in full — the figure's denominator, which the card's hover spells out (there is no collection period to measure; it read 0.0). Revenue by customer keeps its paid basis as its own section, and the note under the cards says which is which
+- **Chart.js visualizations** (self-hosted 206 KB UMD bundle at `/static/js/chart.umd.js` — no CDN, LAN-deployable). Every bar, slice and point carries its figure as text on or beside the mark (v2.22.2, `chartFigures()` in utils.js); labels that would collide or fall outside the chart are left off, and the detail table stays:
   - Revenue trend — 12-month line chart with filled area + hover tooltips
   - Expenses by category — doughnut chart with legend
   - A/R aging — horizontal stacked bar chart (one bar per customer, stacks = current/30/60/90)
@@ -185,20 +205,22 @@ Flat CSV with columns `(section, key, subkey, value)` covering 9 sections: perio
 ### AI Insights
 An optional LLM layer sits on top of the analytics snapshot and produces a compact **3 observations / 3 risks / 3 recommendations** executive brief. Nothing is sent until you click the **AI Insights** button — the feature is zero-cost by default.
 
+**What stays local, and what does not** (#294). The company file and the REST API never leave the machine. The brief does: when you click AI Insights, the figures in the prompt go to the provider you configured, over public HTTPS only (private and LAN addresses are refused, see the SSRF boundary below), under that provider's data terms. The same is true of an agent CLI operating the local API from the [AI setup guide](https://www.slowbookspro.com/ai/): the agent's connection to SlowBooks is local, but a cloud-backed CLI's model is not, and whatever the agent reads from the books goes to its provider. A "no accounting data leaves this machine" setup needs a model you run locally, pointed at by the agent, and checked to make no outbound calls; running the CLI process locally is not enough by itself. Local credential storage says nothing about where inference happens.
+
 **Eight providers supported out of the box**, Claude and Grok first:
 
-| Provider | Wire format | Default model | Free tier |
+| Provider | Wire format | Models | Free tier |
 |---|---|---|---|
-| **Anthropic Claude** | `/v1/messages` | `claude-sonnet-5-5` | Paid only |
-| **xAI Grok** | OpenAI-compat | `grok-4-fast` | $25 signup credit |
-| **Groq (LPU Cloud)** | OpenAI-compat | `llama-3.3-70b-versatile` | Generous free tier, no card |
-| **Cloudflare Workers AI** | OpenAI-compat | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 10k neurons/day, no card |
-| **Cloudflare Worker Gateway** (self-hosted) | OpenAI-compat | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Same 10k neurons/day — **your keys stay in *your* Cloudflare account** |
-| **OpenAI** | `/v1/chat/completions` | `gpt-5.4-mini` | Paid only |
-| **Google Gemini** | `generateContent` | `gemini-2.5-flash` | Free Flash tier via AI Studio |
-| **Custom (OpenAI-compatible)** | `/v1/chat/completions` | *you supply it* | Any vendor or gateway that speaks the OpenAI wire format, on the public internet — HTTPS only, private/LAN addresses refused (v2.9, contributed by @jarvis4openclaw) |
+| **Anthropic Claude** | `/v1/messages` | listed from `GET /v1/models` (active models) | Paid only |
+| **xAI Grok** | OpenAI-compat | listed from `GET /v1/language-models` | $25 signup credit |
+| **Groq (LPU Cloud)** | OpenAI-compat | listed from `GET /openai/v1/models` (chat models) | Generous free tier, no card |
+| **Cloudflare Workers AI** | OpenAI-compat | listed from the account's model search (Text Generation) | 10k neurons/day, no card |
+| **Cloudflare Worker Gateway** (self-hosted) | OpenAI-compat | listed from the gateway's `/models` if it has one, else typed | Same 10k neurons/day — **your keys stay in *your* Cloudflare account** |
+| **OpenAI** | `/v1/chat/completions` | listed from `GET /v1/models` (chat models) | Paid only |
+| **Google Gemini** | `generateContent` | listed from `GET /v1beta/models` (`generateContent` models) | Free Flash tier via AI Studio |
+| **Custom (OpenAI-compatible)** | `/v1/chat/completions` | listed from the endpoint's `/models` if it has one, else typed | Any vendor or gateway that speaks the OpenAI wire format, on the public internet — HTTPS only, private/LAN addresses refused (v2.9, contributed by @jarvis4openclaw) |
 
-Each provider's model string is configurable from **Settings → AI Insights** — a curated dropdown per provider with a **Custom…** escape hatch for new model IDs the vendors ship between releases. So renames ("gemini-2.5-flash" → "gemini-3.0-nano") are a Custom-field entry, not a code change. Cloudflare gets an extra field for your account ID since its endpoint is account-scoped. The dedicated **Cloudflare Worker Gateway** provider adds a second field for your Worker URL — see the self-hosted gateway section below.
+**The model picker lists what your provider offers** (v2.22.2, #254). With a key typed or saved, **Settings → AI Insights** asks the provider's own models endpoint (`POST /api/analytics/ai-models` with what the page holds; `GET` for the saved settings) — Save keeps a first key with no model chosen and asks for one from the list — and lists the text models it returns, newest first where the provider says; you choose one, and **Refresh models** asks again. There is no built-in list and no built-in default, so a vendor renaming or retiring a model is never a code change here. **Custom…** still takes a typed model ID, which is also what a gateway without a `/models` endpoint falls back to. A saved model the provider no longer lists is kept and shown as Custom. Cloudflare gets an extra field for your account ID since its endpoint is account-scoped. The dedicated **Cloudflare Worker Gateway** provider adds a second field for your Worker URL — see the self-hosted gateway section below.
 
 ![AI Insights provider configuration](../screenshots/ai-insights-settings.png)
 
@@ -218,6 +240,8 @@ Each provider's model string is configurable from **Settings → AI Insights** �
 **Endpoints:**
 - `GET  /api/analytics/ai-config` — read display config (no secrets)
 - `PUT  /api/analytics/ai-config` — update provider/model/key/account_id (key is encrypted on save)
+- `GET  /api/analytics/ai-models` — the configured provider's models, from the provider (`{provider, provider_label, models: [{id, label}]}`); administrator only; the saved key is sent to its own provider only
+- `POST /api/analytics/ai-models` — the same for what the Settings page holds: `{provider?, api_key?, cloudflare_account_id?, worker_url?, endpoint_url?}` override the saved values and nothing is stored; a typed key lists before it is saved
 - `POST /api/analytics/ai-config/test` — one-word smoke test against the configured provider
 - `POST /api/analytics/ai-insights?period=month|quarter|year[&force=true]` — run the full dashboard analysis; results are cached in-process for 10 minutes per `(provider, model, period)`, unless `force=true`
 
@@ -259,7 +283,7 @@ Beyond the headline insights brief, the analytics page exposes a **curated dropd
 | **Customers & Sales** | Top customers by revenue | `get_sales_by_customer` |
 | | Unpaid invoices summary | `search_invoices` |
 | | A/R aging | `get_aging_report` |
-| **Vendors & Bills** | Expenses by category | `get_expenses_by_category` |
+| **Financial Reports** | Expenses by category (the ledger, by account, v2.22.3) | `get_expenses_by_category` |
 | | Unpaid bills summary | `search_bills` |
 | | A/P aging | `get_aging_report` |
 | **Banking & Cash** | Cash position by account | `list_accounts` + `get_account_balance` |
@@ -299,18 +323,12 @@ curl http://localhost:3001/api/analytics/export.pdf > snapshot.pdf
 - **Webhook Handler** — Idempotent Stripe webhook processes `checkout.session.completed` events with signature verification
 - **Setup Guide** — See [docs/setup-stripe.md](setup-stripe.md)
 
-## QuickBooks Online Integration
-- **OAuth 2.0** — Connect to QuickBooks Online via Intuit's OAuth Authorization Code flow with automatic token refresh
-- **Import from QBO** — Pull accounts, customers, vendors, items, invoices, payments, sales receipts, journal entries, and posted ledger activity from QBO with dependency-ordered import and duplicate detection
-- **Export to QBO** — Push Slowbooks data to QBO with entity type mapping and ID tracking
-- **ID Mapping** — `qbo_mappings` table tracks QBO ID ↔ Slowbooks ID per entity for dedup and re-sync
-- **Setup Guide** — See [docs/setup-qbo.md](setup-qbo.md)
-
-![QuickBooks Online Integration](../screenshots/qbo-integration.png)
-
 ## Communication & Export
 - **Invoice Email** — Send invoices as PDF attachments via SMTP with configurable email settings. Includes "Pay Online" button when Stripe is enabled
 - **CSV Import/Export** — Import customers, vendors, items and the chart of accounts from CSV; export those plus invoices, bills, sales receipts, deposits, classes and jobs
+- **QuickBooks Desktop's timesheets** (v2.23.4) — the Time by Name by Job detail report (or by Job by Name), CSV or Excel, as approved time entries under each employee with the hours, notes, service item, billing status and customer or job label; people not on the Employees list are added from their names and named; imported time is marked as QuickBooks' and never swept into a pay run; the file is checked against QuickBooks' own totals and a second upload posts nothing twice
+- **QuickBooks Desktop's Transaction Detail by Account** (v2.23.4) — every deposit, check, transfer, general journal entry and opening balance as journal entries, checked against QuickBooks' own account totals before anything is written. Interoperability → Import from Report CSV.
+- **Migrate from QuickBooks Online without the API** — Migrate Data takes QuickBooks Online's own Export data zip (the gear → Tools → Export data), or its workbooks, or those saved as CSV: the chart from the Balance Sheet and P&L (typed by section, sub-accounts as Parent:Child under their parents, banks and cards marked), every Journal transaction as a journal entry, the Customer and Vendor lists. A cash-basis Trial Balance is set aside with a note; an accrual one verifies the import. No Intuit developer app or production keys. With QuickBooks Online's A/R Aging Detail report uploaded beside it, the open invoices and unapplied customer payments come across as documents.
 - **Bring your own chart** (#139 / #161) — Chart of Accounts → **Import…** takes a CSV in the export's own columns (Number, Name, Type, optional Parent, Description, Active), any spreadsheet whose header row uses those words, or **hledger's** account list: the output of `hledger accounts`, `hledger accounts --types` (the `; type:` tag wins), or `hledger balance -O csv` (the `total` row is ignored, balances are not imported). The first post is a dry run that shows every row's fate — create, update, skip, deactivate, keep, error — with a reason, and writes nothing; the second post applies exactly that plan. Existing accounts are matched by number, then by name; a file that names a control account (Receivable, Payable, Checking, Sales tax payable, Inventory, Undeposited funds, Retained earnings, Cost of goods sold, or a credit card under liabilities) **renames that control account** rather than creating a twin, so the operator's chart replaces ours and every document still finds its posting account. Rows without a number get the next free one in their type's range (1000s assets … 6000–9999 expenses). hledger paths keep their hierarchy: `assets:cash:petty cash` becomes *Petty cash* under a *Cash* parent (created if the file never lists it), with the full path kept as the description; the top segment (assets, liabilities, equity, revenues, expenses) is the category, not an account; `assets:bank:*` and `; type: C` accounts are marked as bank accounts. A parent segment that names a control account **is** that account: `assets:inventory` is 1300 Inventory and its children hang from it; a `liabilities:credit card` folder is 2100 and the cards inside it are its children, each marked as a card. Re-importing the same file changes nothing. **Replace the seeded chart** additionally deactivates every account the file does not name that has never been posted to — control accounts and accounts with history are always kept. Also on the CSV Import/Export page as an entity type. `POST /api/csv/import/accounts?dry_run=1|0&replace=0|1`
 - **Print Preview** — Browser print dialog for invoices and estimates via dedicated HTML preview endpoints. Native OS print dialog with "Save as PDF" option
 - **Print-Optimized PDF** — Enhanced invoice PDF template; the company logo (Settings → Company Logo) prints on invoices, estimates, statements, letters, donor documents and reports. When a logo is configured, **Show company logo on invoices** is available in Settings and when creating, editing, or viewing an invoice, alongside a logo preview. It controls all invoice PDFs, Print views, and emailed PDF attachments; enabled by default. Changes made from an invoice save immediately for all invoices.
@@ -323,7 +341,7 @@ curl http://localhost:3001/api/analytics/export.pdf > snapshot.pdf
 - **Real inventory tracking** — Items can be marked `track_inventory=True` to hit a perpetual-inventory ledger. Every purchase (bill) and sale (invoice) writes a row to `inventory_movements` and updates `quantity_on_hand` + weighted-average `avg_cost`
 - **Automatic COGS journal entries** — Selling an inventory item posts `DR COGS / CR Inventory Asset` at the current weighted-avg cost. Voids reverse the entry
 - **Weighted-average cost** — Standard perpetual-inventory model: `new_avg = (old_qty × old_avg + received_qty × received_cost) / (old_qty + received_qty)`
-- **Reorder points + low-stock report** — `GET /api/items/low-stock` returns items at or below their reorder point, worst-shortage first
+- **Reorder points + low-stock report** — `GET /api/items/low-stock` returns items at or below their reorder point, worst-shortage first; the Items page counts them in a **To reorder** filter (v2.22.2, #261), listing each with what's on hand, the reorder point and how many short, and marks a short item's quantity in the full list. Off by default, and absent when nothing is short
 - **Inventory valuation** — `GET /api/items/valuation` sums `qty × avg_cost` across all tracked items
 - **Manual adjustments** — `POST /api/items/{id}/adjust` for count corrections, shrinkage, spoilage with an offsetting JE to #5900 (Inventory Adjustments) or COGS
 - **Drill-down reporting** — `GET /api/reports/account-transactions?account_id=X` returns every journal entry hitting an account in the date range, with source-doc links (`/#/invoices/42`, `/#/bills/17`, etc.) so the SPA can jump from a P&L row to the underlying transaction
@@ -339,25 +357,27 @@ curl http://localhost:3001/api/analytics/export.pdf > snapshot.pdf
 - Field-level Fernet encryption for bank routing/account numbers, with zero-downtime key rotation
 - Self-service portal tokens expire on 90-day idle + 1-year hard windows
 - Startup checks fail hard if production config is missing TLS, encryption secret, or HTTPS
+- **Company file encryption** (#290) — a desktop or Server Edition company file can be a SQLCipher file, off by default; an administrator turns it on from Settings with the company's name typed to confirm, the key comes from an operator-set secret, and backups are ciphertext under the same key. PostgreSQL deployments are the database host's job
 
 Canonical list of security measures lives in [SECURITY.md](../SECURITY.md); engineering log of the hardening pass is at [docs/security-hardening.md](security-hardening.md).
 
 ## System & Administration
 - **Dark Mode** — Toggle between QB2003 Blue theme and dark mode (Alt+D or toolbar button). Persists in localStorage
 - **Backup/Restore** — Create, download and restore backups from Settings. Backups are named for their company and listed per company; a restore takes a safety copy first, asks twice for another company's backup, and refuses a newer version's
-- **Multi-Company** — Support for multiple company databases, switchable from UI
+- **Multi-Company** — Each company is its own database. The desktop apps switch between company files from the Companies page; Server Edition on Windows serves every company file from one host, chosen at sign-in and switched from the topbar, each company with its own users and roles (see [server-edition.md](server-edition.md)); a server (Docker / PostgreSQL) serves one database per server, and a second company is a second server pointed at its database (see [operations.md](operations.md), "Several companies on a server")
 - **Global Search** — Unified server-side search across customers, vendors, items, invoices, estimates, and payments
-- **Attachments** — Upload files (PDF, images) to invoices, bills, and other entities with MIME type and extension validation
+- **Attachments** — Upload files (PDF, images) to invoices, bills, expenses, estimates, purchase orders, vendor credits, vendors, customers and (v2.22.3, #281) journal entries — the receipt behind a manual entry, such as an owner paying a business expense personally — with MIME type and extension validation
 - **Bank Rules** — Auto-categorize imported bank transactions with pattern-matching rules
 - **Budgets** — Create and track budgets by account and period with actual-vs-budget comparison
 - **Email Templates** — Customizable email templates for invoices, estimates, and statements
 
 ## UI
+- **Sidebar you can trim** (v2.23.5) — Settings → Sidebar hides the sections and links a company doesn't use; a hidden page still opens by its address
 - Authentic QB2003 "Default Blue" skin with navy/gold color palette (+ dark mode)
 - Splash screen with build info, what's new, and the license notice
 - Windows XP-era toolbar, sidebar navigator with icons, status bar
 - **Type-ahead pickers** (v2.19.0) — customer, vendor, item, account, employee, job and class pickers, and any list of 15 or more, search as you type; "+ New Customer" opens its quick add with the typed name
-- Keyboard shortcuts: `Alt+N` (new invoice), `Alt+P` (payment), `Alt+Q` (quick entry), `Alt+H` (home), `Alt+D` (dark mode), `Ctrl+S` (save modal form), `Ctrl+K` (search), `Escape` (close modal)
+- Keyboard shortcuts: `Alt+N` (new invoice), `Alt+P` (payment), `Alt+B` (enter a bill), `Alt+E` (enter an expense), `Alt+Q` (quick entry), `Alt+H` (home), `Alt+D` (dark mode), `Ctrl+S` (save modal form), `Ctrl+K` (search), `Escape` (close modal). The toolbar button each entry shortcut stands for announces it (title + `aria-keyshortcuts`)
 - **Active / Inactive / All** (v2.20.0) — Customers, Vendors, Items, Employees and Jobs show active records by default, with Make Inactive / Make Active on every row; an open balance or an employee asks first
 - No frameworks — vanilla HTML/CSS/JS single-page app
 - 35+ SPA routes, 34 sidebar nav links
@@ -365,11 +385,12 @@ Canonical list of security measures lives in [SECURITY.md](../SECURITY.md); engi
 ![Splash screen with build info](../screenshots/splash.png)
 
 ## QuickBooks 2003 Pro Interoperability
-- **IIF Export** — Export all Slowbooks data (accounts, customers, vendors, items, invoices, payments, estimates) as .iif files importable into QB2003 via File > Utilities > Import > IIF Files
-- **IIF Import** — Parse and import .iif files exported from QB2003 with duplicate detection and per-row error handling
+- **IIF Export** — Export all Slowbooks data (accounts, classes, customers, vendors, items, estimates, invoices, sales receipts, payments, bills, deposits, and since 2.24.0 checks, card charges, transfers, bill payments and journal entries) as .iif files importable into QB2003 via File > Utilities > Import > IIF Files. An invoice's or sales receipt's TRNS row names the full Customer:Job, and its split rows carry INVITEM, QNTY, PRICE and TAXABLE (quantity negative, price positive, as Intuit's own sample import files have them), so a round trip keeps the job, the items, the quantities and each line's taxable flag (v2.23.0, #199; it wrote the customer alone and no item or quantity); a quantity finer than the hundredth (2.125) comes back as it went out, and one finer than four places is rounded on the way in with a note, its unit price set so that quantity × price still gives the line's amount. Each split row carries its line's own class, with the document's as the fallback (v2.23.1, #308; it wrote the header's on every row). Every amount in the file is in the home currency, so on a document in another currency PRICE is the line's booked home-currency amount divided by its quantity, to the places the quantity needs (four at least), and QNTY × PRICE gives AMOUNT to the cent at any quantity
+- **IIF Import** — Parse and import .iif files exported from QB2003 with duplicate detection and per-row error handling. The importer takes INVOICE, PAYMENT, CASH SALE, ESTIMATE, BILL, DEPOSIT, and since 2.24.0 CHECK, CREDIT CARD, TRANSFER, BILLPMT and GENERAL JOURNAL blocks (the last five as journal-only entries, a block already in the books posting nothing twice; GENERAL JOURNAL blocks post as adjusting entries on request).
 - **Validation** — Pre-flight validation of .iif files before import (checks structure, account types, balanced transactions)
 - **Date Range Filtering** — Export invoices and payments for specific date ranges
 - **Round-Trip Safe** — Export from Slowbooks, re-import into Slowbooks — deduplication prevents double-entry
+- **Import from Report CSV** — QuickBooks Desktop can't export transactions to IIF, so a detail report saved as CSV uploads instead, the report type detected from its columns and rows: Transaction Detail filtered to **Sales Receipt** (a paid sale + payment each), filtered to **Invoice** (v2.23.0, #291: each invoice with its item lines, quantity and price, its sales tax, its Customer:Job and its number; open, partly paid or paid by the report's Open Balance column, with a payment for what was paid, dated the invoice, to Undeposited Funds — without that column every invoice comes in open and the import says how many did, and uploading the report again with the column marks the invoices here that have nothing paid on them paid or partly paid from it; an invoice's header row posts to Accounts Receivable and a receipt's to the deposit account, so one file can hold both), **Deposit Detail** and **Check Detail** (journal entries on the bank account). On all four, the report's Class column is read: the header row's class is the document's and each line's is its own, and a class the report names is created on first sight with a note (v2.23.1, #308) Re-uploads skip what is already here — an invoice is the same document when it is the same customer's under the report's number, as it was numbered here or as the import renumbered it when that number was taken (QB-1031), or, with no number, of the same date and total
 
 Full IIF format reference, account-type mapping, and round-trip examples live in the [QuickBooks 2003 Interop](#quickbooks-2003-pro-iif-interoperability) section below.
 
@@ -384,11 +405,11 @@ Full IIF format reference, account-type mapping, and round-trip examples live in
 
 Slowbooks can exchange data with QuickBooks 2003 Pro via **Intuit Interchange Format (IIF)** — a tab-delimited text format that QB2003 uses for file-based import/export.
 
-![QuickBooks Interop Page](../screenshots/iif-interop.png)
+![Interoperability page](../screenshots/iif-interop.png)
 
 ### Exporting from Slowbooks to QB2003
 
-1. Navigate to **QuickBooks Interop** in the sidebar
+1. Navigate to **Interoperability** in the sidebar
 2. Click **Export All Data** (or export individual sections)
 3. For invoices/payments, optionally set a date range
 4. Save the `.iif` file
@@ -409,7 +430,7 @@ Slowbooks can exchange data with QuickBooks 2003 Pro via **Intuit Interchange Fo
 ### Importing from QB2003 to Slowbooks
 
 1. In QuickBooks 2003: **File > Utilities > Export > Lists to IIF Files**
-2. In Slowbooks: navigate to **QuickBooks Interop**
+2. In Slowbooks: navigate to **Interoperability**
 3. Drag and drop the `.iif` file (or click to browse)
 4. Click **Validate** — checks structure, account types, and balanced transactions
 5. If the file has names typed in ALL CAPS, Validate shows a few of them as they would import and offers **Change ALL-CAPS names to normal capitalization** (`BOB JONES` → `Bob Jones`, `ACME TOOLING, INC.` → `ACME Tooling, Inc.`). It is off unless you tick it: customer, vendor and account names only, item names kept as typed, and names already in your books are left alone (v2.18.1, #195)
@@ -502,7 +523,7 @@ All endpoints under `/api/`. Swagger docs at `/docs`. 300+ routes across 50 rout
 | `/api/estimates` | GET, POST, PUT | Estimate CRUD with line items; a job must be the customer's, header or line (v2.22.0) |
 | `/api/estimates/{id}/convert` | POST | Convert estimate to invoice |
 | `/api/estimates/{id}/print-preview` | GET | Browser print preview (HTML) |
-| `/api/payments` | GET, POST | Record payments with invoice allocation |
+| `/api/payments` | GET, POST | Record payments with invoice allocation; `Idempotency-Key` header makes a POST retry-safe (v2.23.0) |
 | `/api/payments/{id}/void` | POST | Void payment with reversing journal entry (refused while in a deposit) |
 | `/api/payments/{id}/apply` | POST | Apply a payment's unapplied remainder to invoices (`allocations`) |
 | `/api/customers/{id}/credits` | GET | A customer's unapplied payments and open credit memos |
@@ -515,7 +536,7 @@ All endpoints under `/api/`. Swagger docs at `/docs`. 300+ routes across 50 rout
 | `/api/banking/transactions/{id}/candidates · match · unmatch · add · exclude · restore` | GET, POST | Review-queue actions |
 | `/api/banking/accounts/{id}/feed/add-all · auto-match` | POST | Bulk review actions |
 | `/api/banking/entries/{id}/void` | POST | Void a register entry |
-| `/api/banking/reconciliations` | GET, POST, DELETE | Reconciliation sessions over ledger lines (`…/{id}/transactions`, `toggle/{line_id}`, `complete`) |
+| `/api/banking/reconciliations` | GET, POST, DELETE | Reconciliation sessions over ledger lines (`…/{id}/transactions`, `toggle/{line_id}`, `mark-all` `{cleared, through}` (v2.22.2), `complete`) |
 | `/api/transfers` | GET, POST | Transfers between bank/card accounts (`…/{id}/void`) |
 
 ### Accounts Payable
@@ -530,7 +551,7 @@ All endpoints under `/api/`. Swagger docs at `/docs`. 300+ routes across 50 rout
 | `/api/expenses` | GET, POST | A receipt already paid: DR the expense account, CR the bank, cash or card account it came from. No PUT: an expense is voided and entered again |
 | `/api/expenses/{id}` | GET | One expense |
 | `/api/expenses/{id}/void` | POST | Void an expense with a reversing entry; refused once reconciled or in a closed period |
-| `/api/bill-payments` | GET, POST | Pay vendor bills with allocation (a payment pays its own vendor's bills only); `?bill_id=` lists a bill's payments; `class_id`/`job_id` are refused (they were accepted and dropped; v2.22.0) |
+| `/api/bill-payments` | GET, POST | Pay vendor bills with allocation (a payment pays its own vendor's bills only); `?bill_id=` lists a bill's payments; `class_id`/`job_id` are refused (they were accepted and dropped; v2.22.0); `Idempotency-Key` header makes a POST retry-safe (v2.23.0) |
 | `/api/bill-payments/{id}` | GET | One bill payment with what it paid |
 | `/api/credit-memos` | GET, POST | Credit memo CRUD; a job must be the customer's (v2.22.0) |
 | `/api/credit-memos/{id}/apply` | POST | Apply credit to that customer's invoices |
@@ -555,7 +576,7 @@ All endpoints under `/api/`. Swagger docs at `/docs`. 300+ routes across 50 rout
 | `/api/employees/{id}/bank-accounts` | GET, POST, DELETE | ACH direct deposit routing/account numbers (encrypted) |
 | `/api/payroll` | GET, POST | Pay run CRUD |
 | `/api/payroll/{id}/process` | POST | Process pay run (creates balanced journal entries) |
-| `/api/payroll/{id}/nacha` | POST | Generate NACHA ACH file for direct deposit |
+| `/api/payroll/{id}/nacha` | GET, POST | The NACHA ACH file for a processed pay run: GET from the saved Settings → Direct Deposit details; POST with any of them in the body outranking the saved ones. 409 names what is not set up, or that no one on the run has an account |
 
 ### Payroll & HR
 
@@ -568,9 +589,10 @@ All payroll, HR, tax-form, and self-service portal endpoints are documented with
 | `/api/deposits/pending` | GET | Pending deposits in Undeposited Funds |
 | `/api/deposits` | GET, POST | List and create deposits (move funds to bank; `line_ids` are the payments taken) |
 | `/api/deposits/{id}` | GET | One deposit with its payments |
+| `/api/deposits/{id}/pdf · /print-preview` | GET | The deposit slip (v2.22.2): the account, the date, each payment taken and the total; VOID when void |
 | `/api/deposits/{id}/void` | POST | Void a deposit (its payments wait to be deposited again) |
 | `/api/cc-charges` | GET, POST | Credit card charge entry (`card_account_id`, `…/{id}/void`) |
-| `/api/checks/print` | GET | Generate check PDF (3-per-page format) for a bill payment (`bill_payment_id`) |
+| `/api/checks/print` | GET | Generate check PDF (3-per-page format) for a bill payment (`bill_payment_id`), or for a check written in the bank register or as an expense (`transaction_id`; a deposit, card charge, transfer or void is refused with the reason) |
 
 ### Journal Entries
 | Endpoint | Methods | Description |
@@ -609,7 +631,9 @@ All payroll, HR, tax-form, and self-service portal endpoints are documented with
 | `/api/in-kind-gifts` (+`/{id}/void`) | GET, POST | In-kind gift documents |
 | `/api/donors/gifts/{kind}/{id}/acknowledgment/{preview,pdf,email}` | GET, POST | Acknowledgment letters |
 | `/api/donors/{id}/giving-statement/pdf`, `/api/donors/giving-statements/{pdf,batch-email}` | GET, POST | Year-end giving statements |
-| `/api/invoices/{id}/write-off` | POST | Write an open balance off to Bad Debt Expense |
+| `/api/invoices/{id}/write-off` | POST | Write an open balance off to Bad Debt Expense (any company, v2.22.2) |
+| `/api/invoices/write-offs/candidates` | GET | The open balances under `?under=` as of `?as_of_date=`, listed before any is written off (v2.22.2) |
+| `/api/invoices/write-offs` | POST | Write the listed invoices off together, one credit memo each; `{date, under, invoice_ids, memo}` → `{written_off, skipped}` (v2.22.2) |
 | `/api/credit-memos/{id}/void` | POST | Void a credit memo (unwinds applications) |
 | `/api/vendor-credits/{id}/void` | POST | Void a vendor credit (unwinds applications, returns stock) |
 
@@ -623,18 +647,6 @@ All payroll, HR, tax-form, and self-service portal endpoints are documented with
 | `/api/csv/import/{type}` | POST | Import CSV file |
 | `/api/bank-import/preview` | POST | Preview OFX/QFX transactions |
 | `/api/bank-import/import/{id}` | POST | Import OFX/QFX into bank account |
-
-### QuickBooks Online
-| Endpoint | Methods | Description |
-|----------|---------|-------------|
-| `/api/qbo/auth-url` | GET | Generate Intuit OAuth authorization URL |
-| `/api/qbo/callback` | GET | OAuth redirect handler (stores tokens) |
-| `/api/qbo/disconnect` | POST | Clear stored QBO tokens |
-| `/api/qbo/status` | GET | Connection status (never returns raw tokens) |
-| `/api/qbo/import` | POST | Import all entity types from QBO |
-| `/api/qbo/import/{entity}` | POST | Import single entity type |
-| `/api/qbo/export` | POST | Export all entity types to QBO |
-| `/api/qbo/export/{entity}` | POST | Export single entity type |
 
 ### Online Payments
 | Endpoint | Methods | Description |
@@ -655,7 +667,7 @@ All payroll, HR, tax-form, and self-service portal endpoints are documented with
 | `/api/uploads/logo` | GET, POST, DELETE | Company logo: describe, upload, remove (upload and remove: administrator) |
 | `/api/uploads/logo/{id}` | GET | The logo image, from the company's database |
 | `/api/attachments/{type}/{id}` | GET, POST, DELETE | File attachments CRUD |
-| `/api/bank-rules` | GET, POST, PUT, DELETE | Bank transaction categorization rules |
+| `/api/bank-rules` | GET, POST, PUT, DELETE | Bank transaction categorization rules (`…/apply` runs them over the review queue) |
 | `/api/budgets` | GET, POST, PUT, DELETE | Budget management |
 | `/api/email-templates` | GET, POST, PUT, DELETE | Custom email template management |
 | `/health` | GET | Liveness probe (no auth required) |
@@ -699,6 +711,7 @@ All read endpoints accept `?period=month|quarter|year` (or `mtd/qtd/ytd`), or ex
 | `/api/analytics/export.pdf` | GET | Print-ready PDF via WeasyPrint — honors period params |
 | `/api/analytics/ai-config` | GET, PUT | Display config (no raw key) / update provider/model/key/worker_url (key Fernet-encrypted at rest; worker_url validated against SSRF/MITM) |
 | `/api/analytics/ai-config/test` | POST | Smoke-test the configured provider with a one-word prompt |
+| `/api/analytics/ai-models` | GET, POST | The provider's models, listed by the provider (v2.22.2): GET for the saved settings, POST for what the Settings page holds (a key typed and not yet saved); what the picker shows |
 | `/api/analytics/ai-insights` | POST | Run the dashboard through the configured LLM; `?force=true` bypasses 10-min cache |
 | `/api/analytics/ai-query` | POST | Tool-calling Q&A — LLM autonomously calls 16 read-only tools to answer `?question=...` |
 | `/analytics` | GET | Backwards-compat 307 redirect to the SPA hash route `/#/analytics` |
@@ -713,7 +726,7 @@ All read endpoints accept `?period=month|quarter|year` (or `mtd/qtd/ytd`), or ex
   entries. A line without its own job inherits the document's.
 - Job Profitability report and per-job detail from posted ledger lines;
   "No job" bucket keeps totals equal to the P&L.
-- IIF `Customer:Job` and QBO sub-customers import as jobs under the customer.
+- IIF `Customer:Job` imports as a job under the customer.
 - Roadmap (cost codes, committed cost, change orders, progress billing,
   time/burden, WIP): `docs/design/projects.md`.
 - Cost codes (Settings → Cost Codes; CSI MasterFormat loader) with cost

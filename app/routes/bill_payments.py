@@ -5,16 +5,22 @@
 
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import get_db
 from app.models.bills import Bill, BillStatus, BillPayment, BillPaymentAllocation
 from app.models.contacts import Vendor
-from app.models.accounts import Account
 from app.schemas.bills import BillPaymentCreate, BillPaymentResponse
-from app.services.accounting import create_journal_entry, get_ap_account_id
+from app.services.accounting import (
+    create_journal_entry,
+    get_ap_account_id,
+    get_checking_account_id,
+    void_line_memo,
+)
 from app.services.closing_date import check_closing_date
+from app.services import request_keys
+from app.services.audit import _actor
 
 router = APIRouter(prefix="/api/bill-payments", tags=["bill_payments"])
 
@@ -68,8 +74,20 @@ def get_bill_payment(bill_payment_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=BillPaymentResponse, status_code=201)
-def create_bill_payment(data: BillPaymentCreate, db: Session = Depends(get_db)):
+def create_bill_payment(
+    data: BillPaymentCreate,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    response: Response = None,
+):
     check_closing_date(db, data.date)
+    # A retry of a request whose response was lost must not pay the bill
+    # twice (#292): an Idempotency-Key header names the intended payment
+    replay = request_keys.reserve(
+        db, request, "POST /api/bill-payments", data.model_dump(), _actor(db)
+    )
+    if replay is not None and not isinstance(replay, request_keys.Reservation):
+        return replay
 
     vendor = db.query(Vendor).filter(Vendor.id == data.vendor_id).first()
     if not vendor:
@@ -87,6 +105,13 @@ def create_bill_payment(data: BillPaymentCreate, db: Session = Depends(get_db)):
     alloc_total = sum(a.amount for a in data.allocations)
     if alloc_total > data.amount:
         raise HTTPException(status_code=400, detail="Allocations exceed payment amount")
+
+    # The accounts the journal needs, resolved before anything is written:
+    # a missing one is a 409 naming it, with no payment, allocations or
+    # bill balances left behind (#284: the default bank answered None
+    # when 1000 was missing, and the payment committed without a journal).
+    ap_id = get_ap_account_id(db)
+    bank_id = data.pay_from_account_id or get_checking_account_id(db)
 
     payment = BillPayment(
         vendor_id=data.vendor_id,
@@ -164,15 +189,8 @@ def create_bill_payment(data: BillPaymentCreate, db: Session = Depends(get_db)):
         else:
             bill.status = BillStatus.PARTIAL
 
-    # Journal: DR AP, CR Bank
-    ap_id = get_ap_account_id(db)
-    bank_id = data.pay_from_account_id
-    if not bank_id:
-        # Default to first checking account
-        checking = db.query(Account).filter(Account.account_number == "1000").first()
-        bank_id = checking.id if checking else None
-
-    if ap_id and bank_id:
+    # Journal: DR AP, CR Bank — always; the accounts were resolved above
+    if True:
         # Cash paid, in home currency at the payment-date rate; A/P
         # relieved at each bill's BOOKED rate. Unallocated remainder (a
         # vendor prepayment) has no booking rate yet, so it relieves at
@@ -217,10 +235,12 @@ def create_bill_payment(data: BillPaymentCreate, db: Session = Depends(get_db)):
         )
         payment.transaction_id = txn.id
 
-    db.commit()
+    db.flush()
     db.refresh(payment)
     resp = BillPaymentResponse.model_validate(payment)
     resp.vendor_name = vendor.name
+    request_keys.finish(db, replay, 201, resp.model_dump(mode="json"), response)
+    db.commit()
     return resp
 
 
@@ -266,7 +286,7 @@ def void_bill_payment(bill_payment_id: int, db: Session = Depends(get_db)):
                 "account_id": ol.account_id,
                 "debit": ol.credit,
                 "credit": ol.debit,
-                "description": f"VOID: {ol.description or ''}",
+                "description": void_line_memo(ol.description),
             }
             for ol in original_lines
         ]

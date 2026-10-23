@@ -30,8 +30,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # Bound to the loopback interface by default so a known-credential dev
+    # database (POSTGRES_PASSWORD defaults to `bookkeeper`) is never reachable
+    # from the LAN on a routable host. Set POSTGRES_BIND=0.0.0.0 only if
+    # you deliberately need to reach Postgres from another machine — and then
+    # set a real POSTGRES_PASSWORD too. POSTGRES_PORT still picks the host port.
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5433}:5432"
 
   slowbooks:
     build: .
@@ -90,8 +95,11 @@ services:
       SUTA_RATE: ${SUTA_RATE:-0.012}
       # Python 3.13 experimental JIT - uncomment for ~5-10% extra on hot loops
       # PYTHON_JIT: "1"
+    # Loopback by default: `docker compose up` serves http://localhost:3001 on
+    # this host only. To reach the app from another machine, put a TLS proxy in
+    # front (docs/tls-proxy-setup.md) or set APP_BIND=0.0.0.0 deliberately.
     ports:
-      - "${APP_PORT:-3001}:3001"
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3001}:3001"
     volumes:
       - slowbooks_uploads:/app/app/static/uploads
       - slowbooks_backups:/app/backups

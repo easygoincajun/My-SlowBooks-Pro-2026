@@ -42,7 +42,7 @@ const CCChargesPage = {
         // Expense and cost-of-goods accounts (W-L18): a card buys materials too.
         const accounts = PurchaseAccounts.filter(allAccounts);
         const cardOpts = cards.filter(a => a.bank_kind === 'credit_card').map(a =>
-            `<option value="${a.id}" ${a.account_number === '2100' ? 'selected' : ''}>${escapeHtml(a.account_number || '')} - ${escapeHtml(a.name)}</option>`
+            `<option value="${a.id}" ${a.account_number === '2100' ? 'selected' : ''}>${accountLabel(a)}</option>`
         ).join('');
         const classGroup = await classFormGroupHtml();
         const jobGroup = await jobFormGroupHtml(null);

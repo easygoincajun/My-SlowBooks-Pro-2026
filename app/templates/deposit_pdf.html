@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Deposit</title>
+<style>
+    @page { size: letter; margin: 0.6in 0.75in; }
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 10pt; color: #1a1a2e; line-height: 1.4; }
+    .header { display: flex; justify-content: space-between; margin-bottom: 20px; }
+    .company-info { font-size: 9pt; color: #4a4a6a; }
+    .company-name { font-size: 16pt; font-weight: 700; color: #003366; margin-bottom: 4px; }
+    .company-logo { display: block; max-height: 60px; max-width: 200px; margin-bottom: 6px; }
+    .doc-title { text-align: right; }
+    .doc-title h1 { font-size: 22pt; font-weight: 700; color: #003366; margin: 0; letter-spacing: 0.05em; }
+    .doc-title .void { color: #b00020; }
+    .as-of { font-size: 10pt; color: #666; margin-top: 4px; }
+    .deposit-block { margin-bottom: 20px; padding: 12px; background: #f7f9fb; border: 1px solid #e0e0e0; }
+    .deposit-block .row { display: flex; gap: 24px; font-size: 10pt; }
+    .deposit-block .label { font-size: 8pt; color: #666; text-transform: uppercase; letter-spacing: 0.03em; }
+    .deposit-block .value { font-weight: 700; color: #003366; }
+    table.items { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+    table.items th { background: #003366; color: white; padding: 5px 8px; font-size: 8pt; text-transform: uppercase; text-align: left; letter-spacing: 0.03em; white-space: nowrap; }
+    table.items th.r { text-align: right; }
+    table.items td { padding: 5px 8px; font-size: 9pt; border-bottom: 1px solid #e0e0e0; }
+    table.items td.nw { white-space: nowrap; }
+    table.items td.desc { width: 100%; }
+    table.items td.r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    table.items tr:nth-child(even) { background: #f7f9fb; }
+    .summary { float: right; width: 300px; margin-top: 8px; }
+    .summary table { width: 100%; }
+    .summary td { padding: 3px 8px; font-size: 10pt; white-space: nowrap; }
+    .summary td.r { text-align: right; font-variant-numeric: tabular-nums; }
+    .summary .label { font-weight: 700; color: #4a4a6a; }
+    .summary .grand { font-size: 14pt; font-weight: 700; color: #003366; border-top: 2px solid #003366; padding-top: 4px; }
+    .note { clear: both; font-size: 9pt; color: #666; margin-top: 16px; }
+    .footer { position: fixed; bottom: 0; left: 0; right: 0; text-align: center; font-size: 7pt; color: #999; padding: 8px 0; }
+</style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            {% if company_logo_data_uri %}<img class="company-logo" src="{{ company_logo_data_uri }}" alt="">{% endif %}
+            <div class="company-name">{{ company.company_name }}</div>
+            <div class="company-info">
+                {% if company.company_address1 %}{{ company.company_address1 }}<br>{% endif %}
+                {% if company.company_address2 %}{{ company.company_address2 }}<br>{% endif %}
+                {% set company_city = city_line(company.company_city, company.company_state, company.company_zip) %}
+                {% if company_city %}{{ company_city }}<br>{% endif %}
+                {% if company.company_phone %}{{ company.company_phone }}<br>{% endif %}
+                {% if company.company_email %}{{ company.company_email }}{% endif %}
+            </div>
+        </div>
+        <div class="doc-title">
+            <h1>DEPOSIT{% if deposit.voided %} <span class="void">VOID</span>{% endif %}</h1>
+            <div class="as-of">{{ deposit.date | fdate }}</div>
+        </div>
+    </div>
+
+    <div class="deposit-block">
+        <div class="row">
+            <div><div class="label">Deposited to</div><div class="value">{{ deposit.account_name }}</div></div>
+            <div><div class="label">Date</div><div class="value">{{ deposit.date | fdate }}</div></div>
+            {% if deposit.reference %}<div><div class="label">Slip #</div><div class="value">{{ deposit.reference }}</div></div>{% endif %}
+            <div><div class="label">Items</div><div class="value">{{ deposit.payments | length }}</div></div>
+        </div>
+    </div>
+
+    {% if deposit.payments %}
+    <table class="items">
+        <thead><tr>
+            <th>Date</th><th>Received from</th><th>Description</th><th>Check # / Ref</th><th>Method</th><th class="r">Amount</th>
+        </tr></thead>
+        <tbody>
+        {% for p in deposit.payments %}
+            <tr>
+                <td class="nw">{{ p.date | fdate }}</td>
+                <td class="nw">{{ p.received_from }}</td>
+                <td class="desc">{{ p.description }}{% if p.document %} ({{ p.document }}){% endif %}</td>
+                <td class="nw">{{ p.check_number or p.payment_reference or p.reference }}</td>
+                <td class="nw">{{ p.method }}</td>
+                <td class="r">{{ p.amount | currency }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="note">{% if deposit.voided %}This deposit is void: its payments went back to be deposited again.{% else %}This deposit was recorded as an amount, without the list of payments it took.{% endif %}</p>
+    {% endif %}
+
+    <div class="summary">
+        <table>
+            {% set checks = deposit.payments | selectattr('method', 'equalto', 'Check') | list %}
+            {% if checks %}<tr><td class="label">{{ checks | length }} check{{ '' if checks | length == 1 else 's' }}</td><td class="r">{{ checks | sum(attribute='amount') | currency }}</td></tr>{% endif %}
+            {% set cash = deposit.payments | selectattr('method', 'equalto', 'Cash') | list %}
+            {% if cash %}<tr><td class="label">Cash</td><td class="r">{{ cash | sum(attribute='amount') | currency }}</td></tr>{% endif %}
+            <tr><td class="label grand">Total deposit</td><td class="r grand">{{ deposit.amount | currency }}</td></tr>
+        </table>
+    </div>
+
+    <div class="footer">Generated by Slowbooks Pro 2026</div>
+</body>
+</html>

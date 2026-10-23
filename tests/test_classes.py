@@ -229,7 +229,14 @@ def test_iif_bill_resolves_class(client, db_session, seed_accounts):
     assert txn.class_id == cls["id"]
 
 
-def test_iif_bill_unknown_class_errors(db_session, seed_accounts):
+def test_iif_bill_with_a_class_the_books_lack_creates_it_and_says_so(
+    db_session, seed_accounts
+):
+    """A class the file names that the list did not carry is created on
+    first sight, as a customer or a job is, and the result says so; the
+    block was refused instead, so a file whose entities are its classes
+    stopped at the first one (2.23.1, #308)."""
+    from app.models.bills import Bill
     from app.models.contacts import Vendor
     from app.services.iif_import import import_all
 
@@ -237,8 +244,11 @@ def test_iif_bill_unknown_class_errors(db_session, seed_accounts):
     db_session.commit()
     iif = IIF_BILL_WITH_CLASS.replace("Side Gig", "No Such Class")
     result = import_all(db_session, iif)
-    assert result["bills"] == 0
-    assert any("No Such Class" in e["message"] for e in result["errors"])
+    assert result["bills"] == 1, result["errors"]
+    created = db_session.query(TxnClass).filter(TxnClass.name == "No Such Class").one()
+    bill = db_session.query(Bill).filter(Bill.bill_number == "B-CL-1").one()
+    assert bill.class_id == created.id
+    assert any("No Such Class" in w and "created" in w for w in result["warnings"])
 
 
 # ── IIF class list (!CLASS) ──────────────────────────────────────────────

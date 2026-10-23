@@ -39,23 +39,32 @@ def test_blank_account_number_normalizes_to_null():
     assert AccountUpdate(account_number="").account_number is None
 
 
-def test_a_new_account_without_a_number_is_refused_with_a_sentence(client):
-    # ...and the route refuses it, rather than storing a second NULL or
-    # reaching the unique constraint
-    for blank in ("", "   "):
+def test_a_new_account_without_a_number_saves_with_none(client):
+    # A number is optional (#332, 2.23.5): a blank is stored as NULL, which
+    # the unique constraint allows any number of, and two such accounts
+    # live side by side.
+    ids = []
+    for blank in ("", "   ", None):
         r = client.post(
             "/api/accounts",
             json={
-                "name": "No number",
+                "name": f"No number {len(ids)}",
                 "account_type": "expense",
                 "account_number": blank,
             },
         )
-        assert r.status_code == 400, r.text
-        assert "Give the account a number" in r.json()["detail"]
+        assert r.status_code == 201, r.text
+        assert r.json()["account_number"] is None
+        ids.append(r.json()["id"])
+    assert len(set(ids)) == 3
+    bad = client.post(
+        "/api/accounts",
+        json={"name": "Bad", "account_type": "expense", "account_number": "7x7"},
+    )
+    assert bad.status_code == 400 and "not an account number" in bad.json()["detail"]
 
 
-def test_removing_a_number_on_update_is_refused(client):
+def test_removing_a_number_on_update_clears_it(client):
     created = client.post(
         "/api/accounts",
         json={
@@ -68,8 +77,8 @@ def test_removing_a_number_on_update_is_refused(client):
     account_id = created.json()["id"]
 
     updated = client.put(f"/api/accounts/{account_id}", json={"account_number": ""})
-    assert updated.status_code == 400
-    assert client.get(f"/api/accounts/{account_id}").json()["account_number"] == "9998"
+    assert updated.status_code == 200, updated.text
+    assert client.get(f"/api/accounts/{account_id}").json()["account_number"] is None
 
 
 def test_an_imported_account_without_a_number_can_still_be_renamed(client, db_session):

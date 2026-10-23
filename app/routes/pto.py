@@ -293,15 +293,11 @@ def decide_request(
 
     # Approving a request draws the hours down from a matching accrual balance.
     if req.status == PTORequestStatus.APPROVED:
-        accrual = (
-            db.query(PTOAccrual)
-            .join(PTOPolicy, PTOAccrual.policy_id == PTOPolicy.id)
-            .filter(
-                PTOAccrual.employee_id == req.employee_id,
-                PTOPolicy.pto_type == req.pto_type,
-            )
-            .first()
-        )
+        accrual = _bank_for(db, req)
+        # nothing drawn until a bank says otherwise — a cancel then has
+        # nothing to put back
+        req.hours_drawn = Decimal("0")
+        req.dollars_relieved = Decimal("0")
         if accrual:
             hours = Decimal(str(req.hours or 0))
             before = Decimal(str(accrual.balance or 0))
@@ -312,15 +308,84 @@ def decide_request(
             try:
                 # dollars leave the bank for the hours that were actually in
                 # it, valued while the hours are still in the bank
-                pto_liability.relieve_dollars(
+                req.dollars_relieved = pto_liability.relieve_dollars(
                     db, policy, accrual, emp, min(hours, before), req.start_date
                 )
             except ValueError as e:
                 db.rollback()
                 raise HTTPException(status_code=400, detail=str(e))
+            req.hours_drawn = max(Decimal("0"), min(hours, before))
             accrual.balance = max(Decimal("0"), before - hours)
             accrual.used_ytd = (accrual.used_ytd or 0) + hours
 
+    db.commit()
+    db.refresh(req)
+    return PTORequestResponse.model_validate(req)
+
+
+def _bank_for(db: Session, req: PTORequest):
+    """The employee's accrual bank for the request's type, if enrolled."""
+    return (
+        db.query(PTOAccrual)
+        .join(PTOPolicy, PTOAccrual.policy_id == PTOPolicy.id)
+        .filter(
+            PTOAccrual.employee_id == req.employee_id,
+            PTOPolicy.pto_type == req.pto_type,
+        )
+        .first()
+    )
+
+
+def cancel_pto_request(db: Session, req: PTORequest) -> None:
+    """Cancel a pending or approved request. An approved one gives the bank
+    back what the approval took — the hours that were drawn and, when a
+    relief journal was posted, its dollars through a reversing entry. The
+    request stays on the list as cancelled. Raises HTTPException when the
+    request is in no state to cancel; the caller commits."""
+    if req.status == PTORequestStatus.CANCELLED:
+        raise HTTPException(status_code=400, detail="Request already cancelled")
+    if req.status == PTORequestStatus.DENIED:
+        raise HTTPException(
+            status_code=400, detail="A denied request has nothing to cancel"
+        )
+    if req.status == PTORequestStatus.APPROVED:
+        accrual = _bank_for(db, req)
+        if accrual:
+            hours = Decimal(str(req.hours or 0))
+            # approved before the draw was recorded: the request's own hours
+            drawn = (
+                hours if req.hours_drawn is None else Decimal(str(req.hours_drawn or 0))
+            )
+            policy = (
+                db.query(PTOPolicy).filter(PTOPolicy.id == accrual.policy_id).first()
+            )
+            emp = db.query(Employee).filter(Employee.id == req.employee_id).first()
+            if req.dollars_relieved is None:
+                # the relief's dollars weren't kept: value the hours the way
+                # the policy values the bank today
+                dollars = drawn * pto_liability.unit_value(policy, accrual, emp)
+            else:
+                dollars = Decimal(str(req.dollars_relieved or 0))
+            try:
+                pto_liability.restore_dollars(
+                    db, policy, accrual, emp, dollars, req.start_date
+                )
+            except ValueError as e:
+                db.rollback()
+                raise HTTPException(status_code=400, detail=str(e))
+            accrual.balance = Decimal(str(accrual.balance or 0)) + drawn
+            accrual.used_ytd = max(
+                Decimal("0"), Decimal(str(accrual.used_ytd or 0)) - hours
+            )
+    req.status = PTORequestStatus.CANCELLED
+
+
+@router.post("/requests/{request_id}/cancel", response_model=PTORequestResponse)
+def cancel_request(request_id: int, db: Session = Depends(get_db)):
+    req = db.query(PTORequest).filter(PTORequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="PTO request not found")
+    cancel_pto_request(db, req)
     db.commit()
     db.refresh(req)
     return PTORequestResponse.model_validate(req)

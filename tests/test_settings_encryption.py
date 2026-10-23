@@ -1,4 +1,4 @@
-"""At-rest encryption for credential settings: SMTP, payments, QBO,
+"""At-rest encryption for credential settings: SMTP, payments,
 SimpleFIN, closing-date password. Redaction hides them from the API;
 this layer hides them from the database file itself."""
 
@@ -74,15 +74,6 @@ def test_payments_loader_receives_plaintext(db_session):
     db_session.commit()
     cfg = provider_settings(db_session, get_provider("stripe"))
     assert cfg["stripe_secret_key"] == "sk_test_abc123"
-
-
-def test_qbo_roundtrip_encrypted(db_session):
-    from app.services import qbo_service
-
-    qbo_service._set_setting(db_session, "qbo_access_token", "qbo-tok-1")
-    db_session.commit()
-    assert _raw_row(db_session, "qbo_access_token").value.startswith(CIPHERTEXT_PREFIX)
-    assert qbo_service._get_setting(db_session, "qbo_access_token") == "qbo-tok-1"
 
 
 def test_closing_date_password_override_works_encrypted(db_session):

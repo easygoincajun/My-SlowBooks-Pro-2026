@@ -120,6 +120,9 @@ def create_sales_receipt(data: SalesReceiptCreate, db: Session = Depends(get_db)
 
     inv_resp = create_invoice(
         InvoiceCreate(
+            # paid as it is made, so it owes nothing: the credit limit is
+            # not asked of a sales receipt (#256)
+            allow_over_credit_limit=True,
             customer_id=customer_id,
             date=data.date,
             due_date=data.date,

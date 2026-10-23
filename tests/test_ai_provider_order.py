@@ -28,17 +28,11 @@ def test_the_help_text_names_them_first_too():
     assert "access to Anthropic Claude, xAI Grok, Groq," in js
 
 
-def test_claude_starts_on_a_current_model():
-    # a new company starts on Claude, so Claude's default is what most get
+def test_no_provider_ships_a_default_model():
+    # There is no built-in default and no built-in list any more (#254,
+    # 2.22.2): the page lists the provider's models and the company picks.
     spec = PROVIDERS["anthropic"]
-    assert spec.default_model == "claude-sonnet-5-5"
-    # Anthropic's current lineup; Haiku 4.5 is legacy (2.22.1 gate, NEW-49)
-    assert spec.model_choices == (
-        "claude-fable-5-1",
-        "claude-opus-5-5",
-        "claude-sonnet-5-5",
-        "claude-haiku-5-5",
-    )
+    assert not hasattr(spec, "default_model") and not hasattr(spec, "model_choices")
 
 
 def test_the_ai_config_lists_them_in_that_order(client):
