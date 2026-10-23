@@ -1,8 +1,13 @@
 from datetime import date
 from typing import Optional
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator, field_serializer
 
-from app.schemas.common import StrictModel, TaxRateFloat, validate_non_negative_line
+from app.schemas.common import (
+    StrictModel,
+    TaxRateFloat,
+    validate_non_negative_line,
+    quantity_text,
+)
 
 
 class RecurringLineCreate(StrictModel):
@@ -28,6 +33,10 @@ class RecurringLineResponse(BaseModel):
     is_taxable: bool = True
     line_order: int = 0
     model_config = {"from_attributes": True}
+
+    @field_serializer("quantity")
+    def _quantity(self, value):
+        return quantity_text(value)
 
 
 class RecurringCreate(StrictModel):

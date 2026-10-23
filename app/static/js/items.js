@@ -3,17 +3,38 @@
  * accounts. We skipped the hierarchy. Life is too short.
  */
 const ItemsPage = {
+    // "To reorder" (#261): the items at or under their reorder point, which
+    // GET /api/items/low-stock has always returned and no page showed. Off
+    // by default, and not drawn at all when nothing is short, so a company
+    // that doesn't track stock sees nothing new.
+    _reorderOnly: false,
+
+    toggleReorder() {
+        ItemsPage._reorderOnly = !ItemsPage._reorderOnly;
+        App.navigate(location.hash || '#/items');
+    },
+
     async render() {
-        const items = await API.get(`/items${ActiveLists.query('items')}`);
-        ActiveLists.remember('items', items);
+        const all = await API.get(`/items${ActiveLists.query('items')}`);
+        ActiveLists.remember('items', all);
+        let low = [];
+        try { low = await API.get('/items/low-stock'); } catch (e) { low = []; }
+        const lowById = Object.fromEntries(low.map(l => [l.id, l]));
+        const reorderOnly = ItemsPage._reorderOnly && low.length > 0;
+        const items = reorderOnly ? all.filter(i => lowById[i.id]) : all;
+        const reorderBtn = low.length
+            ? `<button type="button" class="btn btn-sm ${reorderOnly ? 'btn-primary' : 'btn-secondary'}" aria-pressed="${reorderOnly}" onclick="ItemsPage.toggleReorder()" title="Items at or under their reorder point">To reorder (${low.length})</button>`
+            : '';
         let html = `
             <div class="page-header">
                 <h2>Items & Services</h2>
                 <button class="btn btn-primary" onclick="ItemsPage.showForm()">+ New Item</button>
             </div>
-            <div class="toolbar">${ActiveLists.pickerHtml('items')}</div>`;
+            <div class="toolbar">${ActiveLists.pickerHtml('items')} ${reorderBtn}</div>`;
 
-        if (items.length === 0 && ActiveLists.emptyText('items')) {
+        if (reorderOnly && items.length === 0) {
+            html += `<div class="empty-state"><p>Nothing to reorder in this list.</p></div>`;
+        } else if (items.length === 0 && ActiveLists.emptyText('items')) {
             html += `<div class="empty-state"><p>${ActiveLists.emptyText('items')}</p></div>`;
         } else if (items.length === 0) {
             html += `<div class="empty-state">
@@ -25,12 +46,16 @@ const ItemsPage = {
                 <thead><tr>
                     <th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th>
                     <th scope="col" class="amount">Rate</th><th scope="col" class="amount">Cost</th>
-                    <th scope="col" class="amount">Qty on Hand</th><th scope="col">Actions</th>
+                    <th scope="col" class="amount">Qty on Hand</th>${reorderOnly ? '<th scope="col" class="amount">Reorder point</th><th scope="col" class="amount">Short by</th>' : ''}<th scope="col">Actions</th>
                 </tr></thead><tbody>`;
             for (const item of items) {
+                const short = lowById[item.id];
                 const qtyCell = item.track_inventory
-                    ? `<strong>${Number(item.quantity_on_hand || 0).toLocaleString()}</strong>`
+                    ? `<strong>${Number(item.quantity_on_hand || 0).toLocaleString()}</strong>${short && !reorderOnly ? ' <span style="color:var(--text-danger); font-weight:700;" title="At or under the reorder point">↓</span>' : ''}`
                     : `<span style="color:var(--text-muted)">—</span>`;
+                const reorderCells = reorderOnly
+                    ? `<td class="amount">${Number(short.reorder_point || 0).toLocaleString()}</td><td class="amount" style="color:var(--text-danger); font-weight:700;">${Number(short.shortage || 0).toLocaleString()}</td>`
+                    : '';
                 const adjustBtn = item.track_inventory
                     ? `<button class="btn btn-sm btn-secondary" onclick="ItemsPage.showAdjust(${item.id})" title="Adjust quantity on hand">Adjust</button>
                        <button class="btn btn-sm btn-secondary" onclick="ItemsPage.showMovements(${item.id})" title="Inventory movement history">History</button>`
@@ -44,7 +69,7 @@ const ItemsPage = {
                     <td>${escapeHtml(item.description) || ''}</td>
                     <td class="amount">${formatCurrency(item.rate)}</td>
                     <td class="amount">${formatCurrency(item.cost)}</td>
-                    <td class="amount">${qtyCell}</td>
+                    <td class="amount">${qtyCell}</td>${reorderCells}
                     <td class="actions">
                         <button class="btn btn-sm btn-secondary" onclick="ItemsPage.showForm(${item.id})">Edit</button>
                         ${ActiveLists.buttonHtml('items', item)}

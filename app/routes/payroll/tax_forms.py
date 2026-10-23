@@ -7,7 +7,7 @@ from app.routes.payroll._router import router
 from app.models.payroll import Employee
 from app.services.document_audit import (
     audit_footer_context,
-    compute_doc_hash,
+    form_content_hash,
     record_doc_audit,
 )
 from app.services.payroll_documents import employer_block
@@ -203,7 +203,7 @@ def _hash_and_audit(
 ) -> dict:
     """Hash the (company, data) pair, write the audit row, return the
     footer-context dict the templates expect."""
-    content_hash = compute_doc_hash({"company": company, "data": data})
+    content_hash = form_content_hash(company, data)
     audit = record_doc_audit(db, doc_type, doc_key, content_hash)
     return audit_footer_context(audit)
 

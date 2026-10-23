@@ -16,6 +16,14 @@ function zeroTotal(question) {
   return err;
 }
 
+// the server's other question (#256): past the customer's credit limit
+function creditLimit() {
+  const err = new Error("Salt & Pine's credit limit is $500.00. With this invoice they would owe $550.00.");
+  err.status = 409;
+  err.detail = { code: 'credit_limit', message: err.message, question: err.message + ' Save it anyway?' };
+  return err;
+}
+
 const ctx = {
   console,
   window: {},
@@ -52,10 +60,38 @@ const S = ctx.SalesLines, P = ctx.InvoicesPage;
   answer = true;
   let result = await S.sendAllowingZero(async (allow) => {
     sent.push(allow);
-    if (!allow) throw zeroTotal('This invoice adds up to $0.00. Duplicate it anyway?');
+    if (!allow.allow_zero_total) throw zeroTotal('This invoice adds up to $0.00. Duplicate it anyway?');
     return 'INV-2';
   });
   out.yes = { asked: asked.splice(0), sent, result };
+
+  // the credit limit: the same shape, the flag the server named
+  sent = [];
+  result = await S.sendAllowingZero(async (flags) => {
+    sent.push(flags);
+    if (!flags.allow_over_credit_limit) throw creditLimit();
+    return 'INV-3';
+  });
+  out.creditLimit = { asked: asked.splice(0), sent, result };
+
+  // both questions in one save: each asked once, both flags granted
+  sent = [];
+  result = await S.sendAllowingZero(async (flags) => {
+    sent.push(flags);
+    if (!flags.allow_zero_total) throw zeroTotal('This invoice adds up to $0.00. Save it anyway?');
+    if (!flags.allow_over_credit_limit) throw creditLimit();
+    return 'INV-4';
+  });
+  out.both = { asked: asked.splice(0), sent, result };
+
+  // a flag already granted that the server still refuses: not asked again
+  sent = [];
+  try {
+    await S.sendAllowingZero(async (flags) => { sent.push(flags); throw creditLimit(); }, { allow_over_credit_limit: true });
+    out.stubborn = { asked: asked.splice(0), error: null };
+  } catch (e) {
+    out.stubborn = { asked: asked.splice(0), sent, error: e.detail.code };
+  }
 
   // no
   sent = [];

@@ -60,8 +60,12 @@ def upgrade() -> None:
             )
         )
     with op.batch_alter_table("customers") as batch_op:
-        batch_op.add_column(sa.Column("donor_type", sa.String(length=20), nullable=True))
-        batch_op.add_column(sa.Column("salutation", sa.String(length=100), nullable=True))
+        batch_op.add_column(
+            sa.Column("donor_type", sa.String(length=20), nullable=True)
+        )
+        batch_op.add_column(
+            sa.Column("salutation", sa.String(length=100), nullable=True)
+        )
         batch_op.add_column(
             sa.Column(
                 "send_year_end_statement",
@@ -118,10 +122,16 @@ def upgrade() -> None:
         sa.Column("fair_value", sa.Numeric(12, 2), nullable=False, server_default="0"),
         sa.Column("amount", sa.Numeric(12, 2), nullable=False, server_default="0"),
         sa.Column(
-            "debit_account_id", sa.Integer(), sa.ForeignKey("accounts.id"), nullable=False
+            "debit_account_id",
+            sa.Integer(),
+            sa.ForeignKey("accounts.id"),
+            nullable=False,
         ),
         sa.Column(
-            "credit_account_id", sa.Integer(), sa.ForeignKey("accounts.id"), nullable=False
+            "credit_account_id",
+            sa.Integer(),
+            sa.ForeignKey("accounts.id"),
+            nullable=False,
         ),
         sa.Column("class_id", sa.Integer(), sa.ForeignKey("classes.id"), nullable=True),
         sa.Column("job_id", sa.Integer(), sa.ForeignKey("jobs.id"), nullable=True),
@@ -130,9 +140,7 @@ def upgrade() -> None:
 
     # Backfill: an invoice whose posting says "Recurring Invoice #..." and
     # whose customer has exactly one template came from that template.
-    op.execute(
-        sa.text(
-            """
+    op.execute(sa.text("""
             UPDATE invoices SET recurring_invoice_id = (
                 SELECT r.id FROM recurring_invoices r
                 WHERE r.customer_id = invoices.customer_id
@@ -145,9 +153,7 @@ def upgrade() -> None:
                 WHERE t.source_type = 'invoice' AND t.source_id = invoices.id
                   AND t.description LIKE 'Recurring Invoice #%'
               )
-            """
-        )
-    )
+            """))
 
 
 def downgrade() -> None:
@@ -161,9 +167,7 @@ def downgrade() -> None:
         batch_op.drop_column("is_write_off")
     with op.batch_alter_table("invoices") as batch_op:
         batch_op.drop_index("ix_invoices_recurring_invoice_id")
-        batch_op.drop_constraint(
-            "fk_invoices_recurring_invoice_id", type_="foreignkey"
-        )
+        batch_op.drop_constraint("fk_invoices_recurring_invoice_id", type_="foreignkey")
         batch_op.drop_column("recurring_invoice_id")
         batch_op.drop_column("is_pledge")
         batch_op.drop_column("fair_value_description")

@@ -33,7 +33,7 @@ _set = set_setting
 
 # Settings keys whose values are credentials / secrets — never echo the
 # plaintext value back via GET. Anyone with a session would otherwise be
-# able to scrape every stored Stripe/QBO/SMTP credential and the closing-
+# able to scrape every stored Stripe/SMTP credential and the closing-
 # period override password. Empty values still report as empty so the UI
 # can render an unconfigured state; non-empty values report SECRET_PLACEHOLDER
 # so the operator can tell the value is set without exposing it.

@@ -7,7 +7,9 @@
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from app.models.transactions import Transaction, TransactionLine
 from app.models.accounts import Account, AccountType
@@ -126,6 +128,27 @@ def _cost_type_of(db: Session, cost_code_id) -> str | None:
     return code.cost_type if code else None
 
 
+# The split memo column's width (String(300)). A reversal prefixes "VOID: "
+# to the original memo, so a memo of 295-300 characters came out 301-306 and
+# PostgreSQL refused the row at commit: the void answered 500 and the entry
+# could never be voided. A void is system-generated, so its memo is cut to fit
+# rather than refused; the original line keeps its full text.
+LINE_MEMO_MAX = TransactionLine.__table__.c.description.type.length
+
+
+def fit_line_memo(text: str | None) -> str | None:
+    """A memo the app copies onto a split from somewhere wider (a prefix
+    plus a document's own text), cut to the column's width. The document
+    keeps its full text; only the posted split's copy is shortened."""
+    return text[:LINE_MEMO_MAX] if text else text
+
+
+def void_line_memo(description: str | None) -> str:
+    """The memo for a reversing line: "VOID: " + the original, cut to the
+    column's width so voiding never fails on the length of a memo."""
+    return fit_line_memo(f"VOID: {description or ''}")
+
+
 def reversing_lines(lines) -> list[dict]:
     """Mirror-image line dicts for a void: debit and credit swapped, the
     description prefixed VOID:, and every dimension (job, class, cost code,
@@ -137,7 +160,7 @@ def reversing_lines(lines) -> list[dict]:
             "account_id": ol.account_id,
             "debit": ol.credit,
             "credit": ol.debit,
-            "description": f"VOID: {ol.description or ''}",
+            "description": void_line_memo(ol.description),
             "job_id": ol.job_id,
             "class_id": ol.class_id,
             "cost_code_id": ol.cost_code_id,
@@ -146,6 +169,56 @@ def reversing_lines(lines) -> list[dict]:
         }
         for ol in lines
     ]
+
+
+def apply_balance_deltas(db: Session, deltas: dict) -> None:
+    """Apply per-account balance changes with an atomic SQL update.
+
+    `deltas` maps account_id -> signed Decimal already in the account's
+    natural direction (debit-normal accounts get debit-credit, the rest
+    credit-debit). A single `UPDATE accounts SET balance = balance + delta`
+    per account is what keeps the stored balance correct under concurrency:
+    the old read-modify-write in Python (`account.balance += delta`) lets two
+    sessions posting to the same account on Postgres both read the same
+    starting balance and one overwrite the other, silently dropping an update
+    — the journal lines stayed right, but Account.balance drifted. The
+    database does the add, so each posting's delta lands even when they race.
+
+    Deltas are aggregated per account by the caller and applied here in
+    ascending account-id order, so two transactions touching the same set of
+    accounts take the row locks in the same order and a single call cannot
+    deadlock with another. That holds per call, not per transaction: an
+    edit's reversal followed by its repost in one transaction can still
+    contend with a concurrent edit of the same accounts, which the database
+    resolves by failing one of them. COALESCE guards a NULL balance (the
+    column is nullable). Behaviour is identical on SQLite, which runs the
+    same expression serially.
+
+    A pending `account.balance = x` assignment is flushed first so the UPDATE
+    adds to it rather than the expire below discarding it. In-session Account
+    objects are then expired, looked up by key rather than by walking the
+    identity map (a migration committing mid-bundle can hold tens of
+    thousands of objects), so a read later in the same request/session (e.g.
+    an API response that returns Account.balance) reflects the new value
+    instead of a stale Python copy.
+    """
+    pending = {aid: d for aid, d in deltas.items() if d != 0}
+    if not pending:
+        return
+    db.flush()
+    for account_id in sorted(pending):
+        db.execute(
+            update(Account)
+            .where(Account.id == account_id)
+            .values(balance=func.coalesce(Account.balance, 0) + pending[account_id])
+            .execution_options(synchronize_session=False)
+        )
+    # synchronize_session=False leaves loaded objects untouched, so expire the
+    # ones we changed: their balance reloads from the row on next access.
+    for account_id in pending:
+        obj = db.identity_map.get(identity_key(Account, account_id))
+        if obj is not None:
+            db.expire(obj, ["balance"])
 
 
 def create_journal_entry(
@@ -161,6 +234,8 @@ def create_journal_entry(
     job_id: int = None,
     *,
     existing_transaction: Transaction = None,
+    is_adjusting: bool = False,
+    posted_by: str = None,
 ) -> Transaction:
     """Create a balanced journal entry.
 
@@ -186,17 +261,25 @@ def create_journal_entry(
 
         check_closing_date(db, txn_date)
 
+    # Every amount in cents before anything is checked or written: the
+    # columns hold two decimals, so a journal that balanced on sub-cent
+    # values could be stored a cent out (#286) — the stored precision is
+    # the one that has to balance.
+    lines = [
+        {**line, "debit": _q(line.get("debit", 0)), "credit": _q(line.get("credit", 0))}
+        for line in lines
+    ]
+
     # Validate individual lines before summing
     for i, line in enumerate(lines):
-        debit = Decimal(str(line.get("debit", 0)))
-        credit = Decimal(str(line.get("credit", 0)))
+        debit, credit = line["debit"], line["credit"]
         if debit < 0 or credit < 0:
             raise DataProblem(f"Line {i+1}: debit and credit must be non-negative")
         if debit > 0 and credit > 0:
             raise DataProblem(f"Line {i+1}: a line cannot have both debit and credit")
 
-    total_debit = sum(Decimal(str(line.get("debit", 0))) for line in lines)
-    total_credit = sum(Decimal(str(line.get("credit", 0))) for line in lines)
+    total_debit = sum((line["debit"] for line in lines), Decimal("0"))
+    total_credit = sum((line["credit"] for line in lines), Decimal("0"))
 
     if total_debit != total_credit:
         # The sentence a person reads when they save an unbalanced entry
@@ -224,6 +307,9 @@ def create_journal_entry(
         reference=reference,
         class_id=class_id,
         job_id=job_id,
+        # an accountant's adjustment, and who posted the entry (#340, #341)
+        is_adjusting=bool(is_adjusting),
+        posted_by=posted_by,
     )
     txn = existing_transaction
     if txn is None:
@@ -237,6 +323,9 @@ def create_journal_entry(
     from app.services.classes_service import default_function_of
 
     fn_cache: dict = {}
+    # Aggregate per account, then apply as one atomic SQL update each so a
+    # concurrent poster to the same account can't clobber our delta.
+    balance_deltas: dict = {}
     for line_data in lines:
         debit = Decimal(str(line_data.get("debit", 0)))
         credit = Decimal(str(line_data.get("credit", 0)))
@@ -265,16 +354,21 @@ def create_journal_entry(
         )
         db.add(txn_line)
 
-        # Update account balance
+        # Accumulate the balance change in the account's natural direction;
+        # the atomic update is applied once per account after the loop.
         account = (
             db.query(Account).filter(Account.id == line_data["account_id"]).first()
         )
         if account:
             if account.account_type.value in ("asset", "expense", "cogs"):
-                account.balance += debit - credit
+                delta = debit - credit
             else:
-                account.balance += credit - debit
+                delta = credit - debit
+            balance_deltas[account.id] = (
+                balance_deltas.get(account.id, Decimal("0")) + delta
+            )
 
+    apply_balance_deltas(db, balance_deltas)
     return txn
 
 
@@ -308,6 +402,15 @@ def get_undeposited_funds_id(db: Session) -> int:
 def get_ap_account_id(db: Session) -> int:
     """Accounts Payable (2000). Raises MissingControlAccount."""
     return control_accounts.resolve(db, "2000")
+
+
+def get_checking_account_id(db: Session) -> int:
+    """Checking (1000), the default bank for a bill payment that names none.
+    Raises MissingControlAccount — a 409 naming the account — rather than
+    letting the payment post without a bank (#284: the default lookup
+    answered None when 1000 was missing, and the payment, its allocations
+    and the bills' balances were committed with no journal behind them)."""
+    return control_accounts.resolve(db, "1000")
 
 
 def get_cc_account_id(db: Session) -> int:

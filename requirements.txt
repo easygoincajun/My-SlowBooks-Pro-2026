@@ -10,6 +10,11 @@ starlette>=1.0.1,<2.0
 # Database
 sqlalchemy>=2.0.40,<2.1  # 2.1 made postgresql:// mean psycopg (v3), which is not installed: every fresh Docker image failed to import (2026-09-25). Move deliberately, with the gate.
 alembic>=1.16.0,<2.0
+# The encrypted company file (#290). sqlcipher3, not sqlcipher3-binary (that
+# one ships Linux wheels only): wheels for Windows, macOS and Linux, CPython
+# 3.9 to 3.14, with SQLCipher linked into the extension, nothing to carry
+# separately. Capped like the rest; move with the gate.
+sqlcipher3>=0.6.3,<0.7
 psycopg2-binary==2.9.12  # 2.9.10+ ships Python 3.13 wheels; 2.9.9 forces source build on slim images
 
 # Validation + settings
@@ -36,11 +41,6 @@ python-dateutil>=2.9.0,<3.0
 
 # Third-party integrations
 stripe>=8.0.0,<16.0  # core Checkout/Webhook APIs stable across majors; verified by provider tests
-python-quickbooks>=0.9.0,<1.0
-intuit-oauth>=1.2.0,<2.0
-# Explicit pyjwt pin — intuit-oauth's transitive dep was at 2.7.0 (two CVEs).
-# 2.10.0+ has PYSEC-2026-120 fixed.
-pyjwt>=2.10.0,<3.0
 
 # Crypto / HTTP / JSON
 # Cap raised from <47.0 to <49.0 to pull cryptography>=48.0.1 (GHSA-537c-gmf6-5ccf).
@@ -58,3 +58,8 @@ httpx>=0.27.0,<1.0
 argon2-cffi>=23.1.0,<26.0
 itsdangerous>=2.1.0,<3.0  # Starlette SessionMiddleware signer
 slowapi>=0.1.9,<1.0
+redis>=6.4.0,<8.0  # RATE_LIMIT_STORAGE_URI=redis://... imports the client at startup; capped like the rest, inside limits' redis extra
+
+# QuickBooks Online's Export data bundle is .xlsx workbooks; the migration
+# route reads a sheet as CSV through openpyxl (pure Python). Capped like the rest.
+openpyxl>=3.1,<3.2

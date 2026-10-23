@@ -13,7 +13,8 @@ required** (Docker remains an optional path for Linux servers).
 [Windows installer](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/releases/latest/download/SlowBooksPro-Setup-x64.exe) ·
 [macOS DMG](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/releases/latest/download/SlowBooksPro-macos-arm64.dmg) ·
 [Docker / Linux](#quick-start) ·
-[slowbookspro.com](https://www.slowbookspro.com)
+[slowbookspro.com](https://www.slowbookspro.com) ·
+[🐢 Support SlowBooks Pro](https://ko-fi.com/Y7G628VSJ3)
 
 ![Slowbooks Pro 2026 Edition and Server Edition](screenshots/hero-abouts.png)
 
@@ -54,102 +55,17 @@ Details, known gaps and how to report a barrier:
 
 ## What's New
 
-**v2.22 — Connected.** Every report view has an address, so a report, a
-class's P&L or a drill-down can be bookmarked, pasted, reloaded and left
-with Back (#237). P&L by Class scrolls sideways with the Account column
-frozen, jumps to a class, chooses its columns, and saves as PDF, CSV and a
-saved report (#231–#233); a class's P&L is a report of its own and P&L by
-Job sits on the same grid (#235, #242). Classes have a page, with every
-line tagged to the class (#234); the General Ledger shows and filters by
-class (#236); the Chart of Accounts opens the register (#240). Every report
-row goes somewhere and the customer and vendor pages open their reports
-(#238, #239); the drill-down re-dates in place and every posting links to
-its document (#241); the per-line Class cell for every company, with a
-warning for a transaction saved without one (#243). And from the gate: a
-← Back in the toolbar (⌘[ / Alt+←), Tab reaching every control in a
-dialog on a Mac, a job that is always its customer's, and a closed report
-that stays closed. 2.22.1 brings Claude's request up to Anthropic's current
-API, with no temperature, which Claude Sonnet 5.5 refuses, and room for its
-thinking, tested against a live key on Anthropic's current models; a bill's
-class, job or tax rate can be changed through the API without resending its
-lines; and a saved AI key goes only to the provider it was entered for.
+**v2.26 — Direct deposit from the page, and last year beside this one.** A processed pay run makes its direct deposit
+(ACH) file from the page, with the bank's numbers kept under Settings →
+Direct Deposit (discussion #211); the Profit & Loss and Balance Sheet
+compare to last year, with $ and % change on screen and in the PDF and CSV
+(#347); and a security pass: a session ends when its user is deactivated,
+demoted or has a new password, account balances update atomically, a
+reverse proxy's real client address reaches the rate limits and the audit
+log, and hostile input is refused with a 422. An import's whole error list
+is shown and saved as a file. The Mac app now needs macOS 15 or later.
 
-**v2.21 — Three things you'd reach for.** Click a vendor for its own
-page, with its bills, payments, credits and what's owed (#223). Edit a
-posted bill, the way an invoice is edited, with the ledger following and a
-bill never going below what's been paid (#225). An account in the General
-Ledger opens its register (#224).
-
-**v2.20 — Tidy lists, classes in detail.** Customers, Vendors, Items,
-Employees and Jobs show active records by default, with Inactive and All a
-click away and Make Inactive on every row (#210, asked for by Ryan of
-Cimarron Site Services). P&L by Class lists every account with a column per
-class, and any amount opens the transactions behind it (#213). 2.20.1
-shows the release notes once per version instead of on every start, and
-unlinks the sign-in and setup screens, both from @stevenmirabito.
-
-**v2.19 — Type to find it.** The pickers search as you type, as QuickBooks'
-do: a customer, vendor, item, account, employee, job or class picker, or any
-long list, narrows to what matches ("6500" finds 6500 Rent or Lease), and
-"+ New Customer" opens its quick add with the name you typed. Screen readers
-hear the picker's name, the number of matches and the highlighted one.
-
-**v2.18 — Around the ledger.** Two of the QA agents each ran a brand-new
-company for a day through the screens and checked every figure against the
-ledger; this release fixes all sixty-eight things they found around it.
-Pay Sales Tax works, supplier tax is part of a purchase's cost instead of
-reducing the tax owed, Schedule C keeps expenses in expenses, customer and
-vendor balances show what is owed, a customer's leftover payment can be
-applied later, and every aging report ties to the balance sheet. Time
-tracking works end to end, tax forms open in the Mac app, foreign-currency
-invoices can be paid from the screen, and backups are kept and restored per
-company. It also brings @Sciumo's QuickBooks Online import of journal
-entries and posted ledger activity, with a live import log (#192), a switch
-for the company logo on invoices, and **Fetch older history** for SimpleFIN
-bank feeds — up to a year where the provider keeps it (#181). Tax rates take
-four decimal places (8.875%), and the payment screens see every open invoice
-and bill, not just the newest 500 (#191). Each company now keeps its logo,
-attachments and employee documents in its own company file: companies on
-one desktop shared them, and a server published them without a sign-in.
-2.18.1 imports QuickBooks names without the quote marks QuickBooks puts
-around a name with a comma, offers to bring ALL-CAPS names in as normal
-capitalization (#195, @TheLocalW), imports the lines QuickBooks posts to a
-sub-account, and keeps the permit form's format note off its boxes (#194,
-@cnbarry1). 2.18.2 gives every form field a name a screen reader can say
-(#198), says so when an import comes back with errors (#197), and lists
-Claude and Grok first among the AI providers, with Claude on Sonnet 5.5
-(#200).
-
-**v2.17 — Your ledger, in a spreadsheet.** Trial Balance and General Ledger
-save as a CSV and a printable PDF, and Profit & Loss and Balance Sheet gain
-the CSV — amounts as plain numbers, ready to sum. The general ledger carries
-a balance brought forward, a running balance and a period total that ties to
-the trial balance. Bank feeds accept a setup token from any SimpleFIN
-provider. Asked for by @cnbarry1 (#179, #181). 2.17.1 makes AI analysis
-work again with OpenAI's current models (#185, @Sciumo); 2.17.2 stops an
-invoice edit from stripping its job costing (#187, @Bit-Sage); 2.17.3 makes
-Pay Bills pay each vendor separately and keeps every payment on its own
-customer's or vendor's documents (#189, @Bit-Sage).
-
-**v2.16 — The year at a glance.** Two new overview cards, both opt-in under
-Customize: **P&L: Year to Date** with cumulative net by month, and a
-**Balance Sheet Trend** over the last twelve month-ends that balances at
-every point and agrees with the report. Contributed by @jarvis4openclaw
-(#166). The chart of accounts import offers a CSV template. 2.16.1 fixes
-Wave's full export importing no journals after a passing dry run (#169);
-2.16.2 stops charging tax to non-taxable customers, widens every money
-column for large-denomination currencies (#173), and puts the estimate and
-job-cost forms right (#174, #176); 2.16.3 lets a fresh Docker image start again.
-
-Full history, with the reasoning behind each change, in
-**[CHANGELOG.md](CHANGELOG.md)**; the same entries with the test count
-per release at [slowbookspro.com/changelog](https://www.slowbookspro.com/changelog/).
-
-![Nonprofit mode on macOS and Windows: the Company Snapshot in donor words, the Statement of Functional Expenses, the Statement of Activities compared to prior year, Releases from Restriction, the Report Center in dark theme, and a Pledge Report PDF](screenshots/nonprofit-grid.png)
-
-*Nonprofit mode: one switch in Settings, and a church, a club or a PTO sees its own words on every screen and every printed page.*
-
----
+Patch releases and everything before 2.26 are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Wait — it does *that*?
 
@@ -164,9 +80,15 @@ against any of eight providers (Anthropic Claude and xAI Grok first, then
 Groq, Cloudflare Workers AI, OpenAI, Google Gemini, a Cloudflare Worker you
 host yourself, or any OpenAI-compatible endpoint you name) — keys encrypted at rest with versioned, rotatable ciphertext.
 And the whole app is agent-operable: every install serves a
-self-documenting local REST API (555 operations in v2.22) — built for Claude
+self-documenting local REST API (587 operations in v2.26.0) — built for Claude
 Code and Grok first, and any agentic CLI works; the
 [AI setup guide](https://www.slowbookspro.com/ai/) has the paste-prompt.
+What stays on your machine is the company file and the API. A cloud-backed
+CLI's model does not: what the agent reads from your books goes to its
+provider under that provider's terms, and only a model you run locally, and
+have checked makes no outbound calls, keeps all of it home. AI Insights has
+the same shape — it sends the figures it is given to the provider you chose,
+over public HTTPS only.
 
 **One-click reseller-permit verification.** Per-state format validation
 (WA/CA/TX), one click opens the state's official lookup, and the
@@ -217,9 +139,10 @@ Full catalog in **[docs/features.md](docs/features.md)**. Highlights:
   [PayPal](docs/setup-paypal.md), [Square](docs/setup-square.md) behind
   one abstraction, desktop-mode recording included
 - **Interop & migration** — QuickBooks IIF round-trip incl. sales
-  receipts ([docs/migrate-from-quickbooks.md](docs/migrate-from-quickbooks.md)),
-  [QBO OAuth sync](docs/setup-qbo.md), Migrate Data for Xero / MYOB /
-  Sage 50 / Wave / Zoho Books / GnuCash, Opening Balances wizard
+  receipts, and QuickBooks Online from its own Export data zip with no
+  Intuit developer app ([docs/migrate-from-quickbooks.md](docs/migrate-from-quickbooks.md)),
+  Migrate Data for Xero / MYOB / Sage 50 / Wave / Zoho Books / GnuCash,
+  Opening Balances wizard
 - **Fixed assets** — register, depreciation runs, disposal with
   gain/loss, reconciliation report
 - **Nonprofit mode** — your own words on every screen and document; funds
@@ -263,7 +186,7 @@ startup task, and machine-wide data location handled. Details in
 
 Download **[SlowBooksPro-macos-arm64.dmg](https://github.com/VonHoltenCodes/SlowBooks-Pro-2026/releases/latest/download/SlowBooksPro-macos-arm64.dmg)**,
 drag **SlowBooks Pro** to Applications, launch. Signed and notarized with
-the project's Apple Developer ID on every release; macOS 14+, Apple
+the project's Apple Developer ID on every release; macOS 15+, Apple
 Silicon. Intel Macs: Docker.
 
 ### Docker (Linux servers, Intel Mac)
@@ -305,16 +228,18 @@ Production checklist: **[docs/release-checklist.md](docs/release-checklist.md)**
 | [docs/release-checklist.md](docs/release-checklist.md) | Production deployment checklist |
 | [docs/tls-proxy-setup.md](docs/tls-proxy-setup.md) | Real certs in front of Slowbooks (Caddy, nginx, Traefik) |
 | [docs/cloud-hosting.md](docs/cloud-hosting.md) | Your own books on a cloud server: VPS, Docker, Caddy, backups off the box, what it does and does not give you |
+| [docs/working-with-your-accountant.md](docs/working-with-your-accountant.md) | The Accountant role, adjusting entries, the package, the IIF round trip and the Accountant's Copy |
 | [docs/security-hardening.md](docs/security-hardening.md) | Security pass — what changed, why, how it's tested |
+| [docs/company-file-encryption.md](docs/company-file-encryption.md) | Encrypting the company file: the recovery key, who unlocks it, backups and restores |
 | [docs/hipaa-compliance.md](docs/hipaa-compliance.md) | HIPAA mapping — honest gap list included |
 | [docs/wiring-audit.md](docs/wiring-audit.md) | Frontend ↔ backend drift audit methodology |
 | [docs/banking.md](docs/banking.md) | The register is the ledger: entries, feeds as a review queue, transfers, reconciliation |
 | [docs/nonprofit-module.md](docs/nonprofit-module.md) | Nonprofit mode: funds, restrictions, functional expenses, donor documents |
 | [docs/accessibility.md](docs/accessibility.md) | WCAG 2.1 AA conformance, known gaps, how to report a barrier |
-| [docs/migrate-from-quickbooks.md](docs/migrate-from-quickbooks.md) | QuickBooks Desktop (IIF) and Online migration, sales receipts included |
+| [docs/migrate-from-quickbooks.md](docs/migrate-from-quickbooks.md) | QuickBooks Desktop (IIF) and QuickBooks Online (its Export data zip, no Intuit app) migration, sales receipts included |
 | [docs/state-withholding.md](docs/state-withholding.md) | State income-tax withholding tables and their sources |
 | [docs/setup-bank-feeds.md](docs/setup-bank-feeds.md) | SimpleFIN bank feeds |
-| [docs/setup-qbo.md](docs/setup-qbo.md) · [Stripe](docs/setup-stripe.md) · [PayPal](docs/setup-paypal.md) · [Square](docs/setup-square.md) | Integrations |
+| [Stripe](docs/setup-stripe.md) · [PayPal](docs/setup-paypal.md) · [Square](docs/setup-square.md) | Payment integrations |
 | [docs/migrate-from-myob.md](docs/migrate-from-myob.md) | MYOB migration walkthrough |
 | [SECURITY.md](SECURITY.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) | Policy, contributing, history |
 

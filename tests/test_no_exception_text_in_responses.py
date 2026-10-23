@@ -11,23 +11,6 @@ def _boom(*a, **kw):
     raise RuntimeError(SECRET)
 
 
-def test_qbo_import_and_export_do_not_echo_exception_text(client, monkeypatch, caplog):
-    from app.routes import qbo as route
-    from app.services import qbo_export, qbo_import, qbo_service
-
-    monkeypatch.setattr(qbo_service, "is_connected", lambda db: True)
-    monkeypatch.setattr(qbo_import, "import_all", _boom)
-    monkeypatch.setattr(qbo_export, "export_all", _boom)
-    monkeypatch.setitem(route._IMPORT_ENTITY_MAP, "customers", _boom)
-    with caplog.at_level("ERROR"):
-        for path in ("/api/qbo/import", "/api/qbo/import/customers", "/api/qbo/export"):
-            r = client.post(path)
-            assert r.status_code == 500, (path, r.text)
-            assert "secret" not in r.text and "4242" not in r.text, (path, r.text)
-            assert "server log" in r.text, (path, r.text)
-    assert "secret/path.db" in caplog.text  # logged, not served
-
-
 def test_iif_import_does_not_echo_exception_text(client, monkeypatch, caplog):
     from app.routes import iif as route
 
@@ -190,26 +173,7 @@ def test_safe_message_shapes(caplog):
     assert "secret/path.db" in caplog.text and "Traceback" in caplog.text
 
 
-def test_qbo_auth_url_and_export_entity_and_test_email_do_not_echo(client, monkeypatch):
-    from app.routes import qbo as route
-    from app.services import qbo_service
-
-    monkeypatch.setattr(qbo_service, "get_auth_url", _boom)
-    r = (
-        client.get("/api/qbo/auth-url")
-        if any(
-            getattr(x, "path", "") == "/api/qbo/auth-url" for x in route.router.routes
-        )
-        else None
-    )
-    if r is not None:
-        assert r.status_code == 400 and "secret" not in r.text, r.text
-    monkeypatch.setattr(qbo_service, "is_connected", lambda db: True)
-    monkeypatch.setitem(route._EXPORT_ENTITY_MAP, "customers", _boom)
-    r = client.post("/api/qbo/export/customers")
-    assert (
-        r.status_code == 500 and "secret" not in r.text and "server log" in r.text
-    ), r.text
+def test_test_email_does_not_echo_exception_text(client, monkeypatch):
     from app.routes import settings as settings_route
 
     monkeypatch.setattr(settings_route, "send_email", _boom, raising=False)

@@ -98,24 +98,32 @@ DEFAULT_SETTINGS = {
     # access_url embeds basic-auth creds — listed in SECRET_KEYS.
     "simplefin_access_url": "",
     "simplefin_account_map": "{}",  # JSON {simplefin id: bank_account_id}
+    # JSON [simplefin id, ...]: feeds whose bank connection reports amounts
+    # with the opposite sign (deposits negative); imported flipped
+    "simplefin_reversed": "[]",
     "simplefin_accounts_cache": "[]",  # last-seen bridge accounts, for the UI
     "simplefin_last_sync": "",
-    # QuickBooks Online Integration
-    "qbo_enabled": "false",
-    "qbo_client_id": "",
-    "qbo_client_secret": "",
-    "qbo_redirect_uri": "http://localhost:3001/api/qbo/callback",
-    "qbo_environment": "sandbox",
-    "qbo_access_token": "",
-    "qbo_refresh_token": "",
-    "qbo_realm_id": "",
-    "qbo_token_expires_at": "",
-    "qbo_oauth_state": "",
     # Class tracking (#243): "true" starts every entry form with no class
     # chosen and asks before a transaction is saved without one (it would
     # be reported under Uncategorized); "false" starts the picker on
     # Uncategorized and asks nothing.
     "class_warn_blank": "false",
+    # Sidebar items a company doesn't use, hidden from the menu (#334): a
+    # JSON list of nav-link pages ("payroll", "hr-onboarding", …) and nav
+    # sections ("section:Payroll & HR"). The pages stay reachable by
+    # address. Empty = everything shows.
+    "hidden_menu": "[]",
+    # Direct deposit (discussion #211): what the bank needs at the top of
+    # an ACH file, saved once so a processed pay run downloads its file
+    # from the page. The bank's routing number is the file's destination
+    # and the originating DFI; the two 10-character identifiers are the
+    # bank's to assign (usually "1" + EIN) and fall back to the EIN; the
+    # company account funds the credits and is encrypted at rest.
+    "ach_bank_routing": "",
+    "ach_bank_name": "",
+    "ach_immediate_origin": "",
+    "ach_company_id": "",
+    "ach_company_account": "",
     # Phase 10: Late Fee Automation
     "late_fee_enabled": "false",
     "late_fee_rate": "1.5",

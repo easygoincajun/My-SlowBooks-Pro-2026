@@ -57,10 +57,13 @@ jobs:
         with:
           msystem: MINGW64
           update: true
+          # ntldd comes from the UCRT64 repo: MSYS2 ships mingw-w64-ntldd for
+          # ucrt64/clang64/mingw32 only (the mingw64 ntldd-git package is
+          # gone, 2026-10-19), and the tool reads any PE whatever repo built it
           install: >-
             mingw-w64-x86_64-pango
             mingw-w64-x86_64-fontconfig
-            mingw-w64-x86_64-ntldd-git
+            mingw-w64-ucrt-x86_64-ntldd
 
       - name: Stage WeasyPrint native DLLs
         shell: msys2 {0}
@@ -90,7 +93,7 @@ jobs:
             cp "/mingw64/bin/$lib.dll" . 2>/dev/null || true
           done
           for _ in 1 2 3; do  # iterate until the closure stops growing
-            deps=$( (for d in *.dll; do ntldd -R "$d" 2>/dev/null || true; done) \
+            deps=$( (for d in *.dll; do /ucrt64/bin/ntldd -R "$d" 2>/dev/null || true; done) \
               | tr '\\' '/' \
               | grep -Eio '[a-z]:/[a-z0-9_./+-]*/mingw64/bin/[a-z0-9_.+-]+\.dll' \
               | sort -u || true)
@@ -121,6 +124,12 @@ jobs:
           # Prove the environment holds one version of each distribution
           # before PyInstaller copies its metadata into the bundle.
           python -c "import importlib.metadata as m, collections, sys; c = collections.Counter(d.metadata['Name'].lower() for d in m.distributions()); dup = {k: v for k, v in c.items() if v > 1}; print('duplicate distributions:', dup or 'none'); sys.exit(1 if dup else 0)"
+
+      - name: The encrypted-file driver's wheel installed (issue #290)
+        # The smoke test below is the proof that counts (the module inside
+        # the frozen bundle); this names the wheel in the log either way.
+        shell: pwsh
+        run: python -c "import sqlcipher3; print('sqlcipher', sqlcipher3.connect(':memory:').execute('PRAGMA cipher_version').fetchone()[0])"
 
       - name: Build the .ico from the icon asset
         shell: pwsh

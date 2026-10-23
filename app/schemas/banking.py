@@ -63,22 +63,37 @@ class LegacyBalancePost(StrictModel):
     date: dt_date
 
 
+class BankSplit(StrictModel):
+    """One line of a split register entry (#330): the account it posts to
+    and its share of the amount, with the entry's sign (money out
+    negative), and its own memo."""
+
+    category_account_id: int
+    amount: Decimal
+    description: Optional[str] = None
+
+
 class BankTransactionCreate(StrictModel):
     """A register entry: posts a journal entry. amount > 0 debits the bank
     or card account (money in / card payment), amount < 0 credits it
     (money out / card charge). `account_id` is the ledger account;
-    `bank_account_id` (the feed) is accepted for older callers."""
+    `bank_account_id` (the feed) is accepted for older callers. With
+    `splits`, the other side is several accounts whose amounts add up to
+    `amount` (a check that pays several things; a loan payment that is
+    principal and interest); `category_account_id` is then the first
+    split's account, kept for older callers."""
 
     account_id: Optional[int] = None
     bank_account_id: Optional[int] = None
     date: dt_date
     amount: Decimal
-    category_account_id: int
+    category_account_id: Optional[int] = None
     payee: Optional[str] = None
     description: Optional[str] = None
     check_number: Optional[str] = None
     class_id: Optional[int] = None
     job_id: Optional[int] = None
+    splits: Optional[list[BankSplit]] = None
 
 
 class BankEntryResponse(BaseModel):

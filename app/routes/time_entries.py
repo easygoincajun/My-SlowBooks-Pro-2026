@@ -11,6 +11,7 @@ from app.schemas.common import StrictModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
+from app.routes._helpers import reject_null_updates
 from app.models.payroll import Employee
 from app.models.time_entries import TimeEntry, TimeEntryStatus
 from app.schemas.time_entries import (
@@ -23,6 +24,17 @@ from app.services.overtime import classify_period
 from app.services.safe_errors import safe_message
 
 router = APIRouter(prefix="/api/time-entries", tags=["time-entries"])
+
+
+def _acting_user(db: Session) -> str:
+    """Who is approving, as the audit log names them.
+
+    get_db stamps the signed-in principal on the Session's info dict — the
+    same name every audit row for this request carries. In desktop
+    single-user mode a session may have no username, so get_db falls back
+    to "operator"; we fall back the same way here so the approver on the
+    entry and the audit trail never disagree."""
+    return db.info.get("acting_username") or "operator"
 
 
 def _resp(entry: TimeEntry) -> TimeEntryResponse:
@@ -123,12 +135,30 @@ def update_time_entry(
             status_code=400,
             detail="Time entry is locked to a pay run and cannot be edited",
         )
-    fields = data.model_dump(exclude_unset=True)
+    # Already posted to its job as labor cost: editing the hours or
+    # the job here would leave the job's posted cost out of step with the
+    # entry behind it. Reject the edit, mirroring the pay-run lock above.
+    if entry.job_cost_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Time entry is costed to a job and cannot be edited",
+        )
+    fields = reject_null_updates(TimeEntry, data.model_dump(exclude_unset=True))
+    # Status is not a plain field to overwrite: a straight PUT to
+    # "approved" sidestepped /submit and /approve (and the approver the
+    # approve route records). The field is still accepted so a client can
+    # round-trip the whole entry, but only to resend the current status —
+    # any real change must go through /submit, /approve or /reject.
     if "status" in fields:
-        try:
-            fields["status"] = TimeEntryStatus(fields["status"])
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid status")
+        requested = fields.pop("status")
+        if requested != entry.status.value:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Status cannot be changed here. Use submit, approve or "
+                    "reject to move a time entry through its workflow."
+                ),
+            )
     for key, val in fields.items():
         setattr(entry, key, val)
     db.commit()
@@ -145,6 +175,14 @@ def delete_time_entry(entry_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=400,
             detail="Time entry is locked to a pay run and cannot be deleted",
+        )
+    # Posted to its job as labor cost: deleting it would orphan the
+    # job's posted cost. Reject or reverse by rejecting the entry first
+    # (which voids the job cost), the same as the pay-run lock above.
+    if entry.job_cost_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Time entry is costed to a job and cannot be deleted",
         )
     db.delete(entry)
     db.commit()
@@ -170,7 +208,10 @@ def approve_time_entry(
     if not entry:
         raise HTTPException(status_code=404, detail="Time entry not found")
     entry.status = TimeEntryStatus.APPROVED
-    entry.approved_by = data.approved_by
+    # The approver is the signed-in principal, not whatever the body claimed
+    # . data.approved_by is still accepted for backward compatibility
+    # but ignored, so a caller cannot stamp an approval in someone else's name.
+    entry.approved_by = _acting_user(db)
     entry.approved_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(entry)
@@ -251,8 +292,10 @@ def pay_period_summary(
     """Hours-by-employee summary for an upcoming pay period.
 
     The hours are approved entries that haven't been swept into a pay run
-    yet (pay_run_id IS NULL) — same filter the pay-run create flow applies
-    when `use_time_entries=true`. `pending_count` / `pending_hours` are the
+    yet (pay_run_id IS NULL) and were entered here — same filter the
+    pay-run create flow applies when `use_time_entries=true`; time imported
+    from QuickBooks (source set) is history it never pays, so the form
+    never shows it (2.23.4 gate, W-11 / NEW-131). `pending_count` / `pending_hours` are the
     entries in the period still waiting for approval (draft or submitted),
     which that flow will not pay. The SPA uses this to pre-fill / preview
     the "Calculate Payroll" form and to warn before a run leaves time unpaid.
@@ -272,6 +315,7 @@ def pay_period_summary(
                 ]
             ),
             TimeEntry.pay_run_id.is_(None),
+            TimeEntry.source.is_(None),
             TimeEntry.date >= period_start,
             TimeEntry.date <= period_end,
         )

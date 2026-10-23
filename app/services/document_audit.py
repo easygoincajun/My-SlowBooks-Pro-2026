@@ -44,16 +44,27 @@ def compute_doc_hash(payload: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def form_content_hash(company: dict, data: dict) -> str:
+    """The hash a tax form carries: over the employer block and the form's
+    figures together. The forms write it through here and the Form history
+    page's Check re-figures it through here, so the two can never drift."""
+    return compute_doc_hash({"company": company, "data": data})
+
+
 def record_doc_audit(
     db: Session, doc_type: str, doc_key: str, content_hash: str
 ) -> DocumentAudit:
     """Insert one DocumentAudit row and return it. The caller passes the
     same string into the PDF footer so the row and the printed page are
-    bound together by id + hash."""
+    bound together by id + hash. The row names who generated it: the
+    signed-in user, as the audit log would record them."""
+    from app.services.audit import _actor
+
     audit = DocumentAudit(
         doc_type=doc_type,
         doc_key=doc_key,
         content_hash=content_hash,
+        username=_actor(db),
     )
     db.add(audit)
     db.commit()

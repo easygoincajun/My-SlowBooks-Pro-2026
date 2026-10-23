@@ -87,12 +87,19 @@ hiddenimports = (
         "webview.platforms.cocoa",
         # alembic.ini logging config and desktop SQLite dialect
         "logging.config",
+        # The .xlsx reader behind the QuickBooks Online export import, imported
+        # lazily in app/routes/migration.py.
+        "openpyxl",
         "sqlalchemy.dialects.sqlite",
         # WeasyPrint is imported lazily since #121 (so the suite runs on a
         # machine without the native stack). PyInstaller's scanner does walk
         # function-level imports, but the PDF engine is not something to
         # leave to "usually" — name it, so its hook always fires.
         "weasyprint",
+        # The encrypted company file's driver (#290), imported lazily in
+        # app/services/company_file.py; the smoke test reads its version
+        # through the bundle.
+        "sqlcipher3",
     ]
 )
 
@@ -233,7 +240,11 @@ app = BUNDLE(
         # a local build reads the checkout. The workflow refuses a bundle
         # whose CFBundleVersion is just the short version.
         "CFBundleVersion": _bundle_version(),
-        "LSMinimumSystemVersion": "14.0",
+        # The real floor is the bundled Homebrew libraries' (pango, cairo,
+        # glib for WeasyPrint): Homebrew builds them for the runner's macOS,
+        # and macos.yml refuses a bundle whose libraries need a newer macOS
+        # than this says. macos-15 runners since 2.26.0 (#376).
+        "LSMinimumSystemVersion": "15.0",
         "LSArchitecturePriority": ["arm64"],
         "NSHighResolutionCapable": True,
         # The app runs a local web server for its own UI

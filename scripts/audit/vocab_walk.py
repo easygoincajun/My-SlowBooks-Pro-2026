@@ -80,7 +80,6 @@ SKIP_PREFIX = (
     "/api/companies",
     "/api/ai",
     "/api/simplefin",
-    "/api/qbo",
     "/api/updates",
     "/api/system/update",
 )

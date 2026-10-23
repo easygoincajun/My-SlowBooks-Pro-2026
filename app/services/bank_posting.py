@@ -184,17 +184,53 @@ def post_bank_entry(
     class_id: int | None = None,
     job_id: int | None = None,
     source_id: int | None = None,
+    splits: list | None = None,
 ) -> Transaction:
     """A register entry. amount < 0: DR category / CR account (money out,
     or a card charge). amount > 0: DR account / CR category (money in, or a
     card payment). A category that is itself a bank/card account is a
-    transfer."""
+    transfer. With `splits` ([(account, amount, memo), …] adding up to
+    `amount`), the other side is several lines (#330)."""
     amount = _q(amount)
     if amount == 0:
         raise HTTPException(status_code=400, detail="Amount must not be zero")
     if category.id == account.id:
         raise HTTPException(
             status_code=400, detail="Category must differ from the account itself"
+        )
+    if splits:
+        line_desc = memo or payee or None
+        lines = []
+        for cat, part, part_memo in splits:
+            part = _q(part)
+            if part == 0:
+                continue
+            lines.append(
+                {
+                    "account_id": cat.id,
+                    "debit": -part if amount < 0 else Decimal("0"),
+                    "credit": part if amount > 0 else Decimal("0"),
+                    "description": part_memo or line_desc,
+                }
+            )
+        lines.append(
+            {
+                "account_id": account.id,
+                "debit": amount if amount > 0 else Decimal("0"),
+                "credit": -amount if amount < 0 else Decimal("0"),
+                "description": line_desc,
+            }
+        )
+        return create_journal_entry(
+            db,
+            txn_date,
+            payee or memo or "Bank entry",
+            lines,
+            source_type="bank_entry",
+            source_id=source_id,
+            reference=reference or "",
+            class_id=class_id,
+            job_id=job_id,
         )
     if category.bank_kind:
         if amount < 0:

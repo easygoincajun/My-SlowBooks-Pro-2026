@@ -36,3 +36,4 @@ class ExpenseResponse(BaseModel):
     reference: str = ""
     memo: str = ""
     status: str = "recorded"  # "recorded" | "void"
+    printable: bool = False  # paid from a bank account and not void: Print Check

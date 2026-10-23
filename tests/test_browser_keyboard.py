@@ -33,6 +33,7 @@ Skipped, as one module, where playwright or its Chromium is not installed.
 """
 
 import re
+import sys
 
 import pytest
 
@@ -56,8 +57,10 @@ from tests.test_dialog_contrast import (  # noqa: E402,F401  (the dialogs)
     nonprofit,
 )
 from tests.test_theme_contrast import (  # noqa: E402,F401  (the fixtures)
+    HOST_PLATFORM,
     REDIRECTS,
     _open,
+    _platform,
     _theme,
     _visit,
     browser_fixture,
@@ -396,6 +399,26 @@ def test_the_alt_shortcuts_go_by_the_keys_position_and_cmd_k_finds(
         page.wait_for_function(MODAL_SHOWN)
         assert page.evaluate(TITLE).startswith("New Invoice")
         page.evaluate("() => closeModal()")
+        page.wait_for_function(f"() => !({MODAL_SHOWN})()")
+        # Option-B ("∫") enters a bill, Option-E (a dead key) an expense (#264)
+        page.evaluate(KEY, ["∫", "KeyB", {"altKey": True}])
+        page.wait_for_function(MODAL_SHOWN)
+        assert page.evaluate(TITLE) == "Enter Bill"
+        page.evaluate("() => closeModal()")
+        page.wait_for_function(f"() => !({MODAL_SHOWN})()")
+        page.evaluate(KEY, ["Dead", "KeyE", {"altKey": True}])
+        page.wait_for_function(MODAL_SHOWN)
+        assert page.evaluate(TITLE) == "Enter Expense"
+        page.evaluate("() => closeModal()")
+        page.wait_for_function(f"() => !({MODAL_SHOWN})()")
+        # the toolbar button says so: a screen reader hears Alt+B on Enter Bill
+        _visit(page, handled, "#/bills")
+        said = page.evaluate(
+            """() => { const b = [...document.querySelectorAll('#page-content button')]
+                .find(b => b.textContent.trim() === '+ Enter Bill');
+                return b && { keys: b.getAttribute('aria-keyshortcuts'), title: b.title }; }"""
+        )
+        assert said == {"keys": "Alt+B", "title": "Enter Bill (Alt+B)"}, said
         # ⌘K finds, as Ctrl+K does
         page.evaluate("() => document.body.focus()")
         page.evaluate(KEY, ["k", "KeyK", {"metaKey": True}])
@@ -544,11 +567,12 @@ def test_no_dialog_opens_with_focus_on_void_or_delete(browser, company, books):
     confirms = []
     page.on("dialog", lambda d: (confirms.append(d.message), d.dismiss()))
     try:
-        # the three the gate named open on Void: the dialog itself takes
-        # focus, named by its title, and Return there does nothing
+        # two of the three the gate named open on Void (the third, the
+        # journal entry's view, has a file input first since 2.22.3, below):
+        # the dialog itself takes focus, named by its title, and Return
+        # there does nothing
         _visit(page, handled, "#/journal")
         for call in (
-            f"JournalPage.view({books['journal']})",
             f"DepositsPage.view({books['deposit']})",
             f"JobCostsPage.view({books['job_cost']})",
         ):
@@ -579,6 +603,17 @@ def test_no_dialog_opens_with_focus_on_void_or_delete(browser, company, books):
         page.wait_for_function(MODAL_SHOWN)
         settle(page, handled)
         assert page.evaluate(FOCUSED)["id"] != "modal"
+        # the journal entry's view (#281): its Attachments block, the same
+        # as an expense's, puts the file input ahead of Void, so the view
+        # opens there, as the expense's does — harmless, and Void is still
+        # never the first stop
+        page.evaluate("() => closeModal()")
+        page.evaluate(f"async () => {{ await JournalPage.view({books['journal']}); }}")
+        page.wait_for_function(MODAL_SHOWN)
+        settle(page, handled)
+        at = page.evaluate(FOCUSED)
+        assert at["id"] == "journal-attach-file" and not at["destructive"], at
+        assert page.locator("#modal-body [data-destructive]").count() == 1
         # and every dialog the app opens (the last of them as a read-only
         # sign-in sees it, which is how the sweep leaves the page)
         focused, unopened = _opens_safely(page, handled, books, groups)
@@ -1699,17 +1734,21 @@ def test_the_dialog_itself_and_a_field_take_focus_without_the_ring(
     browser, company, books
 ):
     """The ring is a control's. The dialog itself (tabindex −1), which
-    takes focus when its first control is Void (NEW-32), is a place and
-    draws none, whether the keyboard or a script put focus there; the next
-    Tab lands on a control with the ring. A field keeps its own focus
-    style, the blue border and pale ground, with no ring by keyboard and
-    none on a click into a box (review of NEW-43)."""
+    takes focus when its first control is Void (NEW-32; the deposit's view
+    here — the journal entry's opens on its file input since 2.22.3), is a
+    place and draws none, whether the keyboard or a script put focus there;
+    the next Tab lands on a control with the ring. A field keeps its own
+    focus style, the blue border and pale ground, with no ring by keyboard
+    and none on a click into a box (review of NEW-43)."""
     page, handled = _open(browser, company)
     try:
         _no_splash(page)
         _visit(page, handled, "#/journal")
         _open_dialog(
-            page, handled, f"JournalPage.view({books['journal']})", "#modal-body button"
+            page,
+            handled,
+            f"DepositsPage.view({books['deposit']})",
+            "#modal-body button",
         )
         assert page.evaluate(FOCUSED)["id"] == "modal"
         opened = page.evaluate(RING)
@@ -2098,7 +2137,8 @@ def test_a_sidebar_link_draws_the_ring_on_all_four_sides_as_painted(
     try:
         _no_splash(page)
         _sidebar(page, handled, "#/customers")
-        page.focus('#sidebar a[href="#/customers"]')
+        # the menu's own Customers link, not the Open group's (#336) above it
+        page.focus('#sidebar .nav-link[data-page="customers"]')
         page.keyboard.press("Shift+Tab")
         for href in ("#/", "#/customers", "#/jobs"):
             at = page.evaluate("() => document.activeElement.getAttribute('href')")
@@ -2482,10 +2522,9 @@ def test_a_link_in_running_text_has_the_halo_where_the_gate_reads_its_ground(
     page, handled = _open(browser, company)
     try:
         _no_splash(page)
-        for route, link in (
-            ("#/banking", 'a[href="https://bridge.simplefin.org"]'),
-            ("#/settings", 'a[href="https://developer.intuit.com"]'),
-        ):
+        # (Settings' developer.intuit.com link left with the QuickBooks
+        # Online connector in 2.23.2)
+        for route, link in (("#/banking", 'a[href="https://bridge.simplefin.org"]'),):
             _visit(page, handled, route)
             _keyed(page, f"document.querySelector('#page-content {link}')")
             _both_themes(page, (route, link), GOLD)
@@ -3230,10 +3269,13 @@ def test_a_click_that_opens_elsewhere_notes_nothing_and_steals_nothing(
     page, handled = _open(browser, company)
     try:
         _no_splash(page)
+        # the browser opens the tab, with its own host's key (⌘ on a Mac,
+        # Ctrl elsewhere): the page is told the platform it really is
+        _platform(page, HOST_PLATFORM)
         _visit(page, handled, "#/accounts")
         link = '#page-content a[data-row-key^="account:"]'
         key = page.get_attribute(link, "data-row-key")
-        for held in ("Control", "Shift"):
+        for held in ("ControlOrMeta", "Shift"):
             with page.context.expect_page() as opened:
                 page.click(link, modifiers=[held])
             opened.value.close()
@@ -3255,12 +3297,13 @@ def test_a_click_that_opens_elsewhere_notes_nothing_and_steals_nothing(
         page.close()
     page, handled = _open_at(browser, company, f"#/customers/{books['customer']}")
     try:
+        _platform(page, HOST_PLATFORM)
         report = '#modal-body a[data-row-key="report:ar-aging"]'
         page.wait_for_selector(report)
         settle(page, handled)
         here = page.evaluate("location.hash")
         with page.context.expect_page() as opened:
-            page.click(report, modifiers=["Control"])
+            page.click(report, modifiers=["ControlOrMeta"])
         opened.value.close()
         assert page.evaluate("location.hash") == here
         assert page.evaluate(NOTED) is None
@@ -3363,7 +3406,9 @@ def test_every_report_center_card_is_reached_and_opened_by_the_keyboard(
         _no_splash(page)
         _visit(page, handled, "#/reports")
         cards = page.evaluate(CARD_LIST)
-        assert len(cards) == 19, cards
+        assert (
+            len(cards) == 23
+        ), cards  # 2.24.0: four accountant's cards (#341–#343, #337)
         for c in cards:
             view = c["key"].split(":", 1)[1]
             assert c["href"] == f"#/reports/{view}", c
@@ -4044,6 +4089,12 @@ def test_the_new_tab_modifier_is_the_platforms_own(browser, company, books):
                 assert got is bool(opens.get(held)), (platform, held, got)
         page.evaluate("""() => Object.defineProperty(Navigator.prototype, 'platform',
                 { get: () => 'Linux x86_64', configurable: true })""")
+        if sys.platform == "darwin":
+            # the browser's own answer to ⌘-click on a Mac is a new tab, and
+            # to Ctrl-click the context menu: no key follows the link in
+            # place here, so the Super-click below is the Linux and Windows
+            # browsers' to show
+            return
         # a Super-click on Linux: the link is followed here, and noted
         link = '#page-content a[data-row-key^="account:"]'
         key = page.get_attribute(link, "data-row-key")
@@ -4386,5 +4437,66 @@ def test_the_search_shortcut_does_nothing_over_a_dialog(browser, company, books)
         page.evaluate("() => closeModal()")
         page.keyboard.press("Control+KeyK")
         assert page.evaluate("() => document.activeElement.id") == "global-search"
+    finally:
+        page.close()
+
+
+# ── #266: skip links inside the long forms and on the chart ───────────────
+
+SKIP_IN_MODAL = "() => document.querySelector('#modal-body a.skip-link--inline')"
+ACTIVE = """() => { const a = document.activeElement;
+    return { tag: a.tagName.toLowerCase(), id: a.id, cls: a.className, inLines: !!a.closest('#inv-lines, #bill-lines, #je-lines'),
+             ring: a.matches(':focus-visible') }; }"""
+
+
+def test_the_long_forms_skip_to_their_lines_and_the_chart_to_its_filter(
+    browser, company, books
+):
+    page, handled = _open(browser, company)
+    try:
+        for route, call, ready in (
+            ("#/invoices", "InvoicesPage.showForm()", "#inv-lines tr"),
+            ("#/bills", "BillsPage.showForm()", "#bill-lines tr"),
+            ("#/journal", "JournalPage.showForm()", "#je-lines tr"),
+        ):
+            _visit(page, handled, route)
+            _open_dialog(page, handled, call, ready)
+            # the form is a landmark named by the dialog's title
+            assert (
+                page.evaluate(
+                    "() => document.querySelector('#modal-body form').getAttribute('aria-labelledby')"
+                )
+                == "modal-title"
+            )
+            # it opens on its first field, not on the skip link
+            was = page.evaluate(ACTIVE)
+            assert "skip-link" not in was["cls"] and was["tag"] != "body", was
+            # Shift+Tab from there reaches the skip link, shown in place
+            page.keyboard.press("Shift+Tab")
+            now = page.evaluate(ACTIVE)
+            assert "skip-link--inline" in now["cls"], now
+            assert page.evaluate(
+                "() => { const a = document.activeElement; const r = a.getBoundingClientRect(); return r.width > 20 && r.height > 10; }"
+            )
+            # Enter lands on the first line's first box, with the ring
+            page.keyboard.press("Enter")
+            landed = page.evaluate(ACTIVE)
+            assert landed["inLines"] and landed["tag"] in ("input", "select"), landed
+            assert landed["ring"], landed
+            page.evaluate("() => closeModal()")
+            page.wait_for_function(f"() => !({MODAL_SHOWN})()")
+
+        # the chart: a navigation landmark, and its skip link lands on the filter
+        _visit(page, handled, "#/accounts")
+        assert page.evaluate(
+            "() => document.querySelector('#page-content nav[aria-labelledby=\"accounts-heading\"] table') !== null"
+        )
+        page.evaluate(
+            "() => document.querySelector('#page-content a.skip-link--inline').focus()"
+        )
+        assert "skip-link--inline" in page.evaluate(ACTIVE)["cls"]
+        page.keyboard.press("Enter")
+        landed = page.evaluate(ACTIVE)
+        assert landed["id"] == "accounts-filter" and landed["ring"], landed
     finally:
         page.close()

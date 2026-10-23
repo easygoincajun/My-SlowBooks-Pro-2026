@@ -112,7 +112,7 @@ Then open `.env` and set the rest by hand:
 | `POSTGRES_USER`, `POSTGRES_DB` | `bookkeeper` is fine for both |
 | `APP_DEBUG` | `false` |
 | `FORCE_HTTPS` | `true` |
-| `TRUST_PROXY_HEADERS` | `true` — the app is behind a proxy you control, so the client address and scheme come from the proxy's headers. Leave it `false` anywhere the app is reachable without a proxy |
+| `FORWARDED_ALLOW_IPS` | the proxy's address or CIDR (for the compose network, e.g. `172.18.0.0/16`). uvicorn then takes the client address and scheme from the proxy's `X-Forwarded-*` headers, and the login audit trail and rate limiter see the real client. Never `*` or `0.0.0.0/0` |
 | `CORS_ALLOW_ORIGINS` | `https://books.example.com`, your real name, no wildcard |
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `14400` (four hours) is the default; shorter is fine |
 | `EMPLOYER_EIN`, `EMPLOYER_STATE`, `SUTA_RATE` | yours, if you run payroll |

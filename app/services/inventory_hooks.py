@@ -6,7 +6,7 @@
 #
 # Callers: invoices.create/update/void/duplicate, estimates.convert_to_invoice,
 # credit_memos.create, recurring_service.generate_due_invoices, iif_import,
-# qbo_import, bills.create/void.
+# bills.create/void.
 #
 # Design rule: all helpers are NO-OPS if track_inventory=False on the item,
 # so they're safe to call unconditionally for every line.

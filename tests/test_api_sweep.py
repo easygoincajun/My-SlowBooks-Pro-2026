@@ -2,7 +2,7 @@
 
 Walks the app's route table. Parameter-free GETs must return 2xx (or a
 documented 4xx). Single-id GETs are tried with id 1 on seeded books and
-may 404 but never 500. Endpoints that reach the network (QBO, SimpleFIN,
+may 404 but never 500. Endpoints that reach the network (SimpleFIN,
 payment providers, update check) or need a live provider are skipped by
 name — their own tests stub them.
 """
@@ -14,7 +14,7 @@ import pytest
 from app.main import app
 
 SKIP = re.compile(
-    r"qbo|simplefin|update-check|stripe|paypal|square|checkout|webhook|portal|"
+    r"simplefin|update-check|stripe|paypal|square|checkout|webhook|portal|"
     r"/api/auth/|/backups/|/download|/pdf|/print|/preview|/export|/email|"
     r"/companies|/system/|/ocr/intake/|/analytics/",
 )

@@ -68,10 +68,15 @@ def _payroll_fernet():
 
 
 def upgrade() -> None:
-    op.add_column("employees", sa.Column("portal_token_hash", sa.String(64), nullable=True))
+    op.add_column(
+        "employees", sa.Column("portal_token_hash", sa.String(64), nullable=True)
+    )
     op.add_column("employees", sa.Column("portal_token_enc", sa.Text(), nullable=True))
     op.create_index(
-        "ix_employees_portal_token_hash", "employees", ["portal_token_hash"], unique=True
+        "ix_employees_portal_token_hash",
+        "employees",
+        ["portal_token_hash"],
+        unique=True,
     )
 
     bind = op.get_bind()
@@ -86,7 +91,9 @@ def upgrade() -> None:
         enc = None
         if fernet is not None:
             try:
-                enc = _VERSION_PREFIX + fernet.encrypt(token.encode("utf-8")).decode("ascii")
+                enc = _VERSION_PREFIX + fernet.encrypt(token.encode("utf-8")).decode(
+                    "ascii"
+                )
             except Exception:
                 enc = None
         bind.execute(
@@ -121,7 +128,9 @@ def downgrade() -> None:
             except Exception:
                 token = None
         bind.execute(
-            _employees.update().where(_employees.c.id == row.id).values(portal_token=token)
+            _employees.update()
+            .where(_employees.c.id == row.id)
+            .values(portal_token=token)
         )
     op.drop_index("ix_employees_portal_token_hash", table_name="employees")
     op.drop_column("employees", "portal_token_enc")

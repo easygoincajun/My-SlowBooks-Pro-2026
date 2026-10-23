@@ -1,7 +1,7 @@
 """The browser-side suites written for node's own test runner.
 
 tests/js/*_probe.js print JSON for a pytest test to read. The *.test.cjs
-files (#192: the invoice logo option, the QBO import log) use node:test
+files (#192: the invoice logo option, the journal's void) use node:test
 and assert for themselves, and nothing ran them: CI runs pytest, and no
 pytest test named them. Each one runs here with `node --test`, and a
 failing case, or an error thrown after a case ended, fails the build.
@@ -22,7 +22,7 @@ def test_the_node_suites_are_collected():
     assert {
         "invoice_logo_controls.test.cjs",
         "invoice_logo_option.test.cjs",
-        "qbo_import_log.test.cjs",
+        "journal_void.test.cjs",
     } <= names
 
 

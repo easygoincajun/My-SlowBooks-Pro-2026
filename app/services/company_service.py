@@ -33,13 +33,14 @@ from app.config import DATABASE_URL
 logger = logging.getLogger(__name__)
 
 # Strict pattern for Postgres database names: alphanumeric, underscores,
-# hyphens only.
-_VALID_DB_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,62}$")
+# hyphens only. Applied with re.fullmatch (no ^...$) so a trailing "\n" can't
+# slip past -- Python's `$` matches just before a final newline.
+_VALID_DB_NAME = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{0,62}")
 
 # Strict allow-list for company .db filenames. Same trust-boundary shape as
-# backup_service._BACKUP_FILENAME_RE: safe character class, known extension,
+# backup_service._BACKUP_STEM_RE: safe character class, known extension,
 # NO path separators, NO ".." — validated before any path is constructed.
-_COMPANY_FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}\.db$")
+_COMPANY_FILENAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\.db")
 
 
 def _is_sqlite() -> bool:
@@ -91,7 +92,7 @@ def safe_company_filename(filename: str) -> str | None:
         return None
     if base.startswith(".") or ".." in base:
         return None
-    if not _COMPANY_FILENAME_RE.match(base):
+    if not _COMPANY_FILENAME_RE.fullmatch(base):
         return None
     return base
 
@@ -171,10 +172,14 @@ def _write_manifest(data: dict) -> None:
 
 
 def _current_company_file() -> str | None:
-    """Basename of the SQLite file the running app is connected to, if any."""
-    if not DATABASE_URL.startswith("sqlite:///"):
+    """Basename of the SQLite file the running app is connected to, if any:
+    on a Server Edition server, the company this request works in (#358)."""
+    from app.database import another_company_url
+
+    url = another_company_url() or DATABASE_URL
+    if not url.startswith("sqlite:///"):
         return None
-    raw = DATABASE_URL[len("sqlite:///") :]
+    raw = url[len("sqlite:///") :]
     if not raw or raw == ":memory:":
         return None
     return os.path.basename(raw)
@@ -489,7 +494,7 @@ def create_company(
         return {"success": False, "error": "Database name is required"}
 
     # Validate database_name to prevent SQL injection
-    if not _VALID_DB_NAME.match(database_name):
+    if not _VALID_DB_NAME.fullmatch(database_name):
         return {
             "success": False,
             "error": "Invalid database name. Use only letters, numbers, underscores, and hyphens.",

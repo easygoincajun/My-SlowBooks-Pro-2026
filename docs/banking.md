@@ -61,6 +61,14 @@ job_id?}` → the journal entry. `GET /api/banking/check-register?account_id=`
 is the register (`start_date`/`end_date` optional; an opening balance is
 carried in for a range).
 
+A check written here, or an Expense paid from a bank account, prints from
+its register row (Print Check) and from the expense's view: `GET
+/api/checks/print?transaction_id=` renders the same 3-per-page voucher
+as a bill payment's check, the reference as the check number and each
+split line on the stub. The register marks the rows that print
+(`printable`): money out of a bank account, not a card, not void. A bill
+payment's check prints from its bill.
+
 ## Transfers
 
 **Transfer** on the Banking page or a register: date, amount, from, to.

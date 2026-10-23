@@ -9,8 +9,9 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String
+from sqlalchemy import Date, Boolean, Column, DateTime, Integer, String
 
+from sqlalchemy import false as sa_false
 from app.database import Base
 
 
@@ -21,7 +22,10 @@ def _utcnow() -> datetime:
 ROLE_ADMIN = "admin"
 ROLE_BOOKKEEPER = "bookkeeper"
 ROLE_READONLY = "readonly"
-VALID_ROLES = (ROLE_ADMIN, ROLE_BOOKKEEPER, ROLE_READONLY)
+# An outside accountant's sign-in (#340): reads everything, the audit log
+# included, and writes journal entries only (posts them, voids its own).
+ROLE_ACCOUNTANT = "accountant"
+VALID_ROLES = (ROLE_ADMIN, ROLE_BOOKKEEPER, ROLE_ACCOUNTANT, ROLE_READONLY)
 
 
 class User(Base):
@@ -36,3 +40,15 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     last_login_at = Column(DateTime, nullable=True)
+    # An invited sign-in (#345): the one-time password must be replaced at
+    # the first sign-in, and the sign-in can end on a day.
+    must_change_password = Column(
+        Boolean, nullable=False, default=False, server_default=sa_false()
+    )
+    expires_on = Column(Date, nullable=True)
+    # Revocable sessions: a sign-in records this number; every request
+    # re-reads the row and signs the session out when the two differ. Bumped
+    # on deactivation, a role change, and a password change/reset, so those
+    # end the user's existing sessions at once instead of waiting for the
+    # idle timeout — the signed cookie is no longer trusted on its own.
+    session_version = Column(Integer, nullable=False, default=0, server_default="0")

@@ -1,15 +1,13 @@
-"""Sales receipts — the one-screen invoice+payment endpoint and QBO import.
+"""Sales receipts — the one-screen invoice+payment endpoint.
 
 A sales receipt is stored as an Invoice flagged is_sales_receipt plus a
 Payment for the full total. These tests pin: both documents and their
 journal entries post atomically, validation rejects inputs that would
 strand a half-written receipt, the list filter separates receipts from
-regular invoices, and the QBO SalesReceipt importer produces the same
-document pair with id-mapped dedup.
+regular invoices, and a receipt prints as a receipt.
 """
 
 from decimal import Decimal
-from types import SimpleNamespace
 
 
 def _post_receipt(client, customer_id, **overrides):
@@ -169,125 +167,6 @@ def test_list_filter_separates_receipts_from_invoices(
 
 
 # ---------------------------------------------------------------------------
-# QBO SalesReceipt import
-# ---------------------------------------------------------------------------
-
-
-def _fake_qbo_receipt(**overrides):
-    receipt = SimpleNamespace(
-        Id="SR-77",
-        SyncToken="0",
-        DocNumber="SR-1001",
-        CustomerRef=SimpleNamespace(value="99", name="Walkup Wanda"),
-        TotalAmt=108.75,
-        TxnDate="2026-04-01",
-        TxnTaxDetail=SimpleNamespace(TotalTax=8.75),
-        DepositToAccountRef=None,
-        PaymentMethodRef={"name": "Cash"},
-        PaymentRefNum="REG-1",
-        CustomerMemo={"value": "counter sale"},
-        Line=[
-            SimpleNamespace(
-                DetailType="SalesItemLineDetail",
-                SalesItemLineDetail=SimpleNamespace(
-                    ItemRef=None, Qty=1, UnitPrice=100.00
-                ),
-                Amount=100.00,
-                Description="Widget",
-            )
-        ],
-    )
-    for key, val in overrides.items():
-        setattr(receipt, key, val)
-    return receipt
-
-
-def _wire_fake_qbo(monkeypatch, receipts):
-    from app.services import qbo_import
-    import quickbooks.objects.salesreceipt as sr_mod
-
-    monkeypatch.setattr(qbo_import, "get_qbo_client", lambda db: None)
-    monkeypatch.setattr(
-        sr_mod.SalesReceipt,
-        "all",
-        classmethod(
-            lambda cls, qb=None, start_position=1, max_results=100: list(receipts)[
-                start_position - 1 : start_position - 1 + max_results
-            ]
-        ),
-    )
-
-
-def test_qbo_import_sales_receipts(db_session, seed_accounts, monkeypatch):
-    from app.models.contacts import Customer
-    from app.models.invoices import Invoice, InvoiceStatus
-    from app.models.payments import Payment, PaymentAllocation
-    from app.services import qbo_import
-    from app.services.qbo_common import get_mapping_by_qbo_id
-
-    db_session.add(Customer(name="Walkup Wanda", is_active=True))
-    db_session.commit()
-
-    _wire_fake_qbo(monkeypatch, [_fake_qbo_receipt()])
-    result = qbo_import.import_sales_receipts(db_session)
-    db_session.commit()
-    assert result["imported"] == 1, result
-    assert result["errors"] == []
-
-    invoice = db_session.query(Invoice).filter_by(invoice_number="SR-1001").first()
-    assert invoice is not None
-    assert invoice.is_sales_receipt is True
-    assert invoice.status == InvoiceStatus.PAID
-    assert invoice.subtotal == Decimal("100.00")
-    assert invoice.tax_amount == Decimal("8.75")
-    assert invoice.total == Decimal("108.75")
-    assert invoice.balance_due == Decimal("0")
-    assert len(invoice.lines) == 1
-    assert invoice.lines[0].description == "Widget"
-
-    payment = db_session.query(Payment).first()
-    assert payment.amount == Decimal("108.75")
-    assert payment.method == "Cash"
-    assert payment.reference == "REG-1"
-    alloc = db_session.query(PaymentAllocation).first()
-    assert alloc.invoice_id == invoice.id
-
-    assert get_mapping_by_qbo_id(db_session, "sales_receipt", "SR-77") is not None
-
-
-def test_qbo_import_sales_receipts_dedups_on_rerun(
-    db_session, seed_accounts, monkeypatch
-):
-    from app.models.contacts import Customer
-    from app.models.invoices import Invoice
-    from app.services import qbo_import
-
-    db_session.add(Customer(name="Walkup Wanda", is_active=True))
-    db_session.commit()
-
-    _wire_fake_qbo(monkeypatch, [_fake_qbo_receipt()])
-    assert qbo_import.import_sales_receipts(db_session)["imported"] == 1
-    db_session.commit()
-    assert qbo_import.import_sales_receipts(db_session)["imported"] == 0
-    db_session.commit()
-    assert db_session.query(Invoice).count() == 1
-
-
-def test_qbo_import_sales_receipt_without_customer_reports_error(
-    db_session, seed_accounts, monkeypatch
-):
-    from app.services import qbo_import
-
-    _wire_fake_qbo(
-        monkeypatch,
-        [_fake_qbo_receipt(CustomerRef=SimpleNamespace(value="1", name="Nobody"))],
-    )
-    result = qbo_import.import_sales_receipts(db_session)
-    assert result["imported"] == 0
-    assert result["errors"] and "Customer not found" in result["errors"][0]["message"]
-
-
-# ---------------------------------------------------------------------------
 # PDF / print artifact (#60): a receipt must not render as an invoice
 # ---------------------------------------------------------------------------
 
@@ -360,65 +239,3 @@ def test_pdf_template_prints_name_via_customer_relationship(
     html = _jinja_env.get_template("invoice_pdf.html").render(inv=inv, company={})
     assert "Test Customer" in html
     assert "SALES RECEIPT" in html
-
-
-def test_qbo_sales_receipt_lines_keep_their_item_quantity_and_rate(
-    db_session, seed_accounts, monkeypatch
-):
-    """The QBO SDK types an Invoice's line details but not a SalesReceipt's:
-    those stay plain dicts, and the import read them as attributes, so every
-    receipt line came in with no item, quantity 1 and rate 0.00 (only its
-    amount), and a tracked item's stock never moved. The test receipts above
-    are SimpleNamespaces, which is why none of them saw it."""
-    from quickbooks.objects.salesreceipt import SalesReceipt as QBOSalesReceipt
-
-    from app.models.contacts import Customer
-    from app.models.invoices import Invoice
-    from app.models.items import Item, ItemType
-    from app.models.qbo_mapping import QBOMapping
-    from app.services import qbo_import
-
-    customer = Customer(name="Walkup Wanda", is_active=True)
-    widget = Item(
-        name="Widget",
-        item_type=ItemType.PRODUCT,
-        rate=Decimal("25"),
-        track_inventory=True,
-        quantity_on_hand=Decimal("10"),
-        avg_cost=Decimal("4"),
-    )
-    db_session.add_all([customer, widget])
-    db_session.flush()
-    db_session.add(QBOMapping(entity_type="item", qbo_id="7", slowbooks_id=widget.id))
-    db_session.commit()
-    receipt = QBOSalesReceipt.from_json(
-        {
-            "Id": "132",
-            "DocNumber": "SR-9",
-            "TxnDate": "2026-08-03",
-            "TotalAmt": 50,
-            "CustomerRef": {"value": "99", "name": "Walkup Wanda"},
-            "Line": [
-                {
-                    "Id": "1",
-                    "Amount": 50,
-                    "DetailType": "SalesItemLineDetail",
-                    "SalesItemLineDetail": {
-                        "ItemRef": {"value": "7", "name": "Widget"},
-                        "Qty": 2,
-                        "UnitPrice": 25,
-                    },
-                }
-            ],
-        }
-    )
-    _wire_fake_qbo(monkeypatch, [receipt])
-    assert qbo_import.import_sales_receipts(db_session)["errors"] == []
-    [line] = db_session.query(Invoice).one().lines
-    assert (line.item_id, line.quantity, line.rate, line.amount) == (
-        widget.id,
-        Decimal("2"),
-        Decimal("25"),
-        Decimal("50"),
-    )
-    assert widget.quantity_on_hand == Decimal("8")

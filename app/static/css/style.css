@@ -31,6 +31,30 @@
     outline-offset: 2px;
     box-shadow: 0 0 0 8px var(--focus-halo);
 }
+/* A form's or page's own skip link (#266): out of the way until the
+   keyboard reaches it, then shown where it sits, above what it skips. */
+.skip-link--inline {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    top: auto;
+    left: auto;
+    font-size: 12px;
+}
+.skip-link--inline:focus {
+    position: static;
+    display: inline-block;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    margin: 0 0 8px;
+    padding: 6px 12px;
+    box-shadow: 0 0 0 4px var(--focus-halo);
+}
 
 /* Focus is visible on every control (WCAG 2.4.7). Links and buttons had
    no focus style of their own and relied on the browser's ring, which
@@ -126,11 +150,15 @@
     /* The A/R aging bands, for the bar and the key beside each label, so
        the two stay matched. A key is a graphic: 3:1 on the card (WCAG
        1.4.11). Gold #cc9933 was 2.57 and orange #f97316 2.80 (macbase1
-       NEW-11); these are 3.13 and 3.11. */
-    --aging-current:  var(--success);   /* 3.57 */
-    --aging-30:       #b88a2e;
-    --aging-60:       #f36706;
-    --aging-90:       var(--danger);    /* 5.14 */
+       NEW-11); the gold is 3.13. A slice wide enough prints its figure in
+       ink or white, whichever reads better, at 4.5:1 or more: orange
+       #f36706 (3.11 on the card) took ink at 5.53, black on a bright
+       orange that the arithmetic clears and the eye does not (2.23.4 gate,
+       NEW-129); this deeper orange is 5.17 on the card and takes white. */
+    --aging-current:  var(--success);   /* 3.57; its figure in ink, 4.82 */
+    --aging-30:       #b88a2e;          /* 3.13; ink, 5.49 */
+    --aging-60:       #c2410c;          /* 5.17; white, 5.17 */
+    --aging-90:       var(--danger);    /* 5.14; white */
     /* Red and amber for words, as --text-success is green for them: the
        pages wrote #a4242b, #c0392b, #a8761f and #b45309 in by hand, which
        the dark theme could not change (2.22:1 and 4.09 there) */
@@ -141,12 +169,14 @@
     --qb-teal:        #76a4a4;
     /* Green and orange are text (report amounts, import results) and the
        success toast's ground: #339966 was 3.57:1 on white and #cc6633 3.81.
-       The green is 5.54:1 on white, 5.25 on a striped row and 4.96 on a
-       totals row's tint; #2b8055 was 4.36 there, under AA (2.22.1 gate,
-       NEW-50: Analytics' A/P aging TOTAL), and 4.0 on a hovered one, where
-       this is 4.55. The orange is 4.82 on white. */
-    --qb-green:       #277650;
-    --qb-green-dark:  #2d7d56;
+       2.23.1 (#308's release): the green is a leaf green, no longer the
+       teal-leaning #277650 the QuickBooks palette gave it, and carries
+       SlowBooks' own name. It is 5.91:1 on white, 5.60 on a striped
+       row, 5.30 on a totals row's tint and 4.86 on a hovered one
+       (AA's 4.5 everywhere a figure sits), and white reads on it at
+       5.91 for the toast. The orange is 4.82 on white. */
+    --sb-green:       #257321;
+    --sb-green-dark:  #21651d;
     --qb-gold:        #cc9933;
     /* The keyboard's ring (NEW-43): a deeper gold than the brand's, so it
        clears 3:1 against what it sits on (WCAG 1.4.11): 3.9:1 on white,
@@ -259,6 +289,12 @@ body {
 }
 .topbar-company:empty { display: none; }
 .topbar-company:empty + .tb-sep { display: none; }
+/* Several companies on one server (#358): the switch sits beside the name */
+.tb-company-switch {
+    font-size: 12px;
+    max-width: 200px;
+    margin-right: 6px;
+}
 
 .topbar-brand {
     font-size: 13px;
@@ -496,6 +532,27 @@ body {
     border-left-color: var(--focus-halo);
 }
 
+/* Open screens (#336): the session's working set, at the top of the menu.
+   Each row is a link back and an × that closes it; the one showing is
+   marked as the active page link is. */
+.open-screens { list-style: none; }
+.open-screens__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding-right: 10px; }
+/* full colour, no opacity: the sidebar's text colour meets AA on the navy
+   and a faded × did not (4.1:1) */
+.open-screens__clear {
+    background: none; border: 0; padding: 0 2px; font: inherit; font-size: 9px; letter-spacing: 0.04em;
+    text-transform: none; color: var(--text-on-navy); cursor: pointer;
+}
+.open-screens__clear:hover { text-decoration: underline; }
+.open-screens__list { list-style: none; margin: 0; padding: 0; }
+.open-screens__item { display: flex; align-items: stretch; }
+.open-screens__link { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; padding-right: 4px; }
+.open-screens__close {
+    flex: 0 0 auto; width: 22px; margin-right: 6px; background: none; border: 0; border-radius: 3px;
+    color: var(--text-on-navy); font-size: 14px; line-height: 1; cursor: pointer;
+}
+.open-screens__close:hover { color: #ffffff; background: rgba(255,255,255,0.12); }
+
 .nav-icon {
     width: 16px;
     text-align: center;
@@ -720,7 +777,7 @@ body {
 
 /* A disabled button looks it: dimmed, a not-allowed cursor, and no hover
    (the hover rules above skip :disabled). Disabled buttons looked enabled
-   and did nothing when clicked: the QBO page's Import with no connection,
+   and did nothing when clicked: an Import with no connection,
    Restore before its tick (macbase1 NEW-15, 2.18.0 gate). WCAG exempts an
    inactive control from contrast. */
 .btn:disabled {
@@ -823,6 +880,9 @@ td.amount, th.amount {
     font-family: var(--font-mono);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+    /* an amount is one piece: a negative balance in a narrowed column broke
+       after its minus sign and read as positive (2.23.5 round 3, NEW-147) */
+    white-space: nowrap;
 }
 
 /* ========================================================================
@@ -1011,6 +1071,24 @@ input:is([type="checkbox"], [type="radio"], [type="file"]):focus-visible {
 .badge-pending { background: #fef3c7; color: #92400e; border: 1px solid #fbbf24; }
 .badge-accepted{ background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
 .badge-rejected{ background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+/* PTO request vocabulary — approved / denied had no rule either */
+.badge-approved{ background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+.badge-denied  { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+.badge-cancelled{background: #e8ecf0; color: #4a5568; border: 1px solid #c8ccd4; }
+/* The dashboard aging legend's swatches: a coloured square, not a "■"
+   character (text at 3.1:1, read aloud as "black square" — NEW-62) */
+.aging-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: -1px; }
+/* Analytics' expenses table is the doughnut's legend: a swatch per row */
+.chart-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: -1px; margin-right: 2px; }
+/* Form history: Check's answer carries a mark and the time (NEW-67) */
+.audit-status--ok { color: var(--text-success); }
+.audit-status--changed { color: var(--text-danger); }
+.audit-status .audit-mark { font-weight: 700; }
+.audit-status .audit-checked-at { color: var(--text-muted); font-size: 11px; }
+/* a header kept for the accessibility tree only (the portal has its own copy) */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* Form history: the row a footer hash was found on */
+#audit-rows tr[data-found] td { background: #fef3c7; }
 .badge-converted{background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
 .badge-product { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
 .badge-service { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
@@ -1031,6 +1109,17 @@ input:is([type="checkbox"], [type="radio"], [type="file"]):focus-visible {
     padding-top: 40px;
     z-index: 200;
 }
+/* A dialog with an address of its own (a report view, a document) is a
+   screen, not a form: the sidebar stays above its overlay, so the Open
+   group's links and × buttons, and the menu, work over it (W-22 /
+   NEW-159). A plain form's overlay still covers everything. */
+body.dialog-addressed #sidebar {
+    position: relative;
+    z-index: 201;
+}
+/* The class is set only while the dialog sits clear of the sidebar (App.syncBack
+   measures it): a wide grid that reaches over the sidebar keeps the overlay
+   whole, so the raised sidebar never covers the dialog's edge. */
 
 
 /* A bare <a> had no rule anywhere, so the user agent picked the colour and
@@ -1096,6 +1185,12 @@ a:hover { text-decoration: underline; }
     overflow-x: auto;
     padding-right: 8px;
     padding-bottom: 8px;
+    /* Room under the box for a classic horizontal bar (17px on macOS and
+       Windows), whether or not the engine counted the bar in the box's
+       height: WebKit drew the bill form's and the job cost entry's bar
+       over the top half of "+ Add Line" below (2.23.1 gate, NEW-104). The
+       button's own 8px above it make 20 together. */
+    margin-bottom: 12px;
 }
 /* Only the job cost entry's grid is wider than the dialog (its Bill? and
    remove columns); the estimate's fits, and a floor on every scrolling grid
@@ -1303,7 +1398,7 @@ a:hover { text-decoration: underline; }
     border: 1px solid rgba(0,0,0,0.2);
 }
 
-.toast-success { background: var(--qb-green); }
+.toast-success { background: var(--sb-green); }
 .toast-error   { background: var(--qb-red); }
 .toast-info    { background: var(--qb-blue); }
 
@@ -1800,77 +1895,6 @@ tr.clickable { cursor: pointer; }
     border-bottom: 1px solid var(--panel-border);
 }
 
-/* QBO imports: keep the live log inside the import controls' column. */
-.qbo-sections { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.qbo-sections > .iif-section { min-width: 0; }
-.qbo-import-log {
-    --qbo-log-warning: #9a4b12;
-    width: 100%;
-    box-sizing: border-box;
-    margin-top: 12px;
-    border: 1px solid var(--panel-border);
-    background: var(--panel-bg);
-    font: 10px/1.5 var(--font-mono);
-    color: var(--text-primary);
-}
-.qbo-log-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 7px 9px;
-    background: var(--form-bg);
-    border-bottom: 1px solid var(--panel-border);
-}
-.qbo-log-heading > strong { font-size: 11px; }
-.qbo-log-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
-.qbo-log-controls .btn { padding: 2px 5px; font-size: 10px; }
-.qbo-log-controls .btn[hidden] { display: none; }
-.qbo-run-status { font-weight: 700; color: var(--text-secondary); }
-.qbo-status-running { color: var(--text-link); }
-.qbo-status-complete { color: var(--text-success); }
-.qbo-status-warning { color: var(--qbo-log-warning); }
-.qbo-status-error { color: var(--danger); }
-.qbo-run-detail, .qbo-run-activity { padding: 5px 9px; overflow-wrap: anywhere; }
-.qbo-run-activity { color: var(--text-secondary); border-bottom: 1px solid var(--panel-border); }
-.qbo-run-counts { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 0 9px; }
-.qbo-run-counts strong { font-variant-numeric: tabular-nums; }
-.qbo-log-scroll { height: 320px; overflow: auto; overscroll-behavior: contain; }
-.qbo-log-table { width: 100%; min-width: 480px; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: inherit; }
-.qbo-log-table th, .qbo-log-table td {
-    padding: 4px 5px;
-    font-size: inherit;
-    vertical-align: top;
-    text-align: left;
-    overflow-wrap: anywhere;
-    border-bottom: 1px solid var(--panel-border);
-}
-.qbo-log-table th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: var(--form-bg);
-    color: var(--text-secondary);
-    font-weight: 700;
-}
-.qbo-log-table td:first-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.qbo-col-ts { width: 87px; }
-.qbo-col-code, .qbo-col-item, .qbo-col-action { width: 56px; }
-.qbo-log-code, .qbo-log-item-label { display: block; color: var(--text-secondary); }
-.qbo-log-level { font-weight: 700; }
-.qbo-log-error .qbo-log-level { color: var(--danger); }
-.qbo-log-warning .qbo-log-level { color: var(--qbo-log-warning); }
-.qbo-log-error td:first-child { border-left: 2px solid var(--danger); }
-.qbo-log-warning td:first-child { border-left: 2px solid var(--qbo-log-warning); }
-.qbo-log-empty { padding: 18px 10px; color: var(--text-secondary); text-align: center; }
-.qbo-errors-only #qbo-log-rows > tr:not(.qbo-log-error) { display: none; }
-#qbo-errors-filter[aria-pressed="true"] { color: var(--danger); font-weight: 700; border-color: var(--danger); }
-.qbo-log-error .qbo-log-code { color: var(--danger); }
-[data-theme="dark"] .qbo-import-log { --qbo-log-warning: var(--qb-orange); }
-@media (max-width: 800px) {
-    .qbo-sections { grid-template-columns: minmax(0, 1fr); }
-}
-
 .iif-export-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1939,6 +1963,26 @@ tr.clickable { cursor: pointer; }
     color: var(--qb-blue);
 }
 
+/* The per-line Class box on every form (Nonprofit.classCellHtml): the bill
+   form's cell squeezed it to 73 px, so "North LLC" read "North LL"; the
+   journal form's was 124 (2.23.1 gate, NEW-99). */
+td > select[class$="-fund"] { min-width: 124px; }
+/* The bill form's line table has the most columns (Item, Account, Description,
+   Cost Code, Class, Function, Qty, Rate, Amount, ✕): the 124 px Class box took
+   its room from Account (77 → 58 px, "6000 - A…" → "600…") and Item (84 → 51)
+   on a company with cost codes (2.23.1 gate, NEW-103). The table scrolls
+   sideways in its container, as the job cost entry's does, and each box keeps
+   a width that shows its name. The widths sit on the visible type-ahead
+   picker (cbx--<class>, mirrored from the select by combobox.js), not on the
+   1px select behind it, and on the plain Description, Qty and Rate boxes,
+   which the wider pickers squeezed next (round 3's W-5 / NEW-103). */
+.bill-lines-table .cbx--line-item { min-width: 110px; }
+.bill-lines-table .cbx--line-account { min-width: 200px; }
+.bill-lines-table .cbx--line-cost-code { min-width: 110px; }
+.bill-lines-table .line-desc { min-width: 140px; }
+.bill-lines-table .line-qty { min-width: 64px; }
+.bill-lines-table .line-rate { min-width: 84px; }
+
 .iif-file-info {
     display: flex;
     align-items: center;
@@ -1992,13 +2036,20 @@ tr.clickable { cursor: pointer; }
     border-bottom: none;
 }
 
+/* The file's transaction blocks, accounted for in one sentence on a line of
+   its own: as a label and a count across the row it wrapped, the count's
+   "3:" beside "the" reading as a superscript (2.23.1 gate, NEW-106). */
+.iif-results .result-row--line {
+    display: block;
+}
+
 .iif-results .result-count {
     font-weight: 700;
     font-family: var(--font-mono);
 }
 
 .iif-validation-ok {
-    color: var(--qb-green);
+    color: var(--sb-green);
     font-weight: 700;
 }
 
@@ -2143,7 +2194,7 @@ tr.clickable { cursor: pointer; }
     line-height: 1.1;
 }
 
-.analytics-kpi-value.kpi-green  { color: var(--qb-green); }
+.analytics-kpi-value.kpi-green  { color: var(--sb-green); }
 .analytics-kpi-value.kpi-red    { color: var(--qb-red); }
 .analytics-kpi-value.kpi-blue   { color: var(--qb-blue); }
 .analytics-kpi-value.kpi-purple { color: #a855f7; }
@@ -2167,7 +2218,7 @@ tr.clickable { cursor: pointer; }
 
 .analytics-two-col {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); /* a card never grows past its column */
     gap: 12px;
 }
 
@@ -2204,7 +2255,7 @@ tr.clickable { cursor: pointer; }
 
 .analytics-error strong { display: block; margin-bottom: 4px; }
 
-.amount.green { color: var(--qb-green); }
+.amount.green { color: var(--sb-green); }
 .amount.red   { color: var(--qb-red); }
 .amount.amber { color: var(--qb-orange); }
 

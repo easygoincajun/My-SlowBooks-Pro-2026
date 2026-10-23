@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.routes._helpers import clamp_pagination
 from app.routes.payroll._router import router
+from app.services.direct_deposit import pays_by_direct_deposit
 from app.routes.payroll.ytd import _ytd_supplemental, employee_ytd
 from app.models.payroll import (
     PayRun,
@@ -40,6 +41,7 @@ def _with_employee_names(run: PayRun) -> PayRunResponse:
     for stub_resp, stub in zip(resp.stubs, run.stubs):
         if stub.employee:
             stub_resp.employee_name = stub.employee.full_name
+            stub_resp.direct_deposit = pays_by_direct_deposit(stub.employee)
     return resp
 
 
@@ -48,7 +50,11 @@ def list_pay_runs(skip: int = 0, limit: int = 200, db: Session = Depends(get_db)
     skip, limit = clamp_pagination(skip, limit, max_limit=500)
     runs = (
         db.query(PayRun)
-        .options(joinedload(PayRun.stubs).joinedload(PayStub.employee))
+        .options(
+            joinedload(PayRun.stubs)
+            .joinedload(PayStub.employee)
+            .selectinload(Employee.bank_accounts)
+        )
         .order_by(PayRun.pay_date.desc(), PayRun.id.desc())
         .offset(skip)
         .limit(limit)
@@ -61,7 +67,11 @@ def list_pay_runs(skip: int = 0, limit: int = 200, db: Session = Depends(get_db)
 def get_pay_run(run_id: int, db: Session = Depends(get_db)):
     run = (
         db.query(PayRun)
-        .options(joinedload(PayRun.stubs).joinedload(PayStub.employee))
+        .options(
+            joinedload(PayRun.stubs)
+            .joinedload(PayStub.employee)
+            .selectinload(Employee.bank_accounts)
+        )
         .filter(PayRun.id == run_id)
         .first()
     )
@@ -112,6 +122,31 @@ def _last_regular_gross(db: Session, employee_id: int, before: date) -> Decimal:
     return Decimal(str(stub.gross_pay)) if stub else Decimal("0")
 
 
+def _imported_time(db: Session, employee_id: int, start: date, end: date):
+    """(count, hours) of the employee's time in the period that came from
+    QuickBooks (source set): approved history a pay run never pays."""
+    rows = (
+        db.query(TimeEntry)
+        .filter(
+            TimeEntry.employee_id == employee_id,
+            TimeEntry.source.isnot(None),
+            TimeEntry.date >= start,
+            TimeEntry.date <= end,
+        )
+        .all()
+    )
+    hours = sum(
+        (
+            Decimal(str(te.hours_regular or 0))
+            + Decimal(str(te.hours_overtime or 0))
+            + Decimal(str(te.hours_doubletime or 0))
+            for te in rows
+        ),
+        Decimal("0"),
+    )
+    return len(rows), float(hours)
+
+
 def _unapproved_time(db: Session, employee_id: int, start: date, end: date):
     """(count, hours) of the employee's time entries in the period that are
     still waiting for approval — draft or submitted, not yet paid."""
@@ -121,6 +156,9 @@ def _unapproved_time(db: Session, employee_id: int, start: date, end: date):
             TimeEntry.employee_id == employee_id,
             TimeEntry.status.in_([TimeEntryStatus.DRAFT, TimeEntryStatus.SUBMITTED]),
             TimeEntry.pay_run_id.is_(None),
+            TimeEntry.source.is_(
+                None
+            ),  # time imported from QuickBooks is history, never paid here (#323)
             TimeEntry.date >= start,
             TimeEntry.date <= end,
         )
@@ -220,6 +258,7 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
                         TimeEntry.employee_id == emp.id,
                         TimeEntry.status == TimeEntryStatus.APPROVED,
                         TimeEntry.pay_run_id.is_(None),
+                        TimeEntry.source.is_(None),  # imported history (#323)
                         TimeEntry.date >= data.period_start,
                         TimeEntry.date <= data.period_end,
                     )
@@ -263,11 +302,25 @@ def create_pay_run(data: PayRunCreate, db: Session = Depends(get_db)):
                         f"or leave {name} out of this run."
                     )
                 else:
-                    refused.append(
-                        f"{name} has no approved time from {period}. Log and "
-                        f"approve it under Time Entries, or leave {name} out "
-                        "of this run."
+                    imported = _imported_time(
+                        db, emp.id, data.period_start, data.period_end
                     )
+                    if imported[0]:
+                        # the only approved time there is QuickBooks' history,
+                        # which a pay run never pays (2.23.4 gate, NEW-131)
+                        refused.append(
+                            f"{name} has no time to pay from {period}: the "
+                            f"{_entries(imported[0])} there ({imported[1]} hours) "
+                            "came from QuickBooks, which paid them, and a pay "
+                            "run never pays imported time. Log and approve "
+                            f"time here, or leave {name} out of this run."
+                        )
+                    else:
+                        refused.append(
+                            f"{name} has no approved time from {period}. Log and "
+                            f"approve it under Time Entries, or leave {name} out "
+                            "of this run."
+                        )
             else:
                 refused.append(
                     f"{name} would be paid $0.00. Enter hours or an amount, "
@@ -630,16 +683,34 @@ def process_pay_run(run_id: int, db: Session = Depends(get_db)):
                 }
             )
 
-    for amount, acct, desc in [
-        (total_fed, fed, "Federal income tax withheld"),
-        (total_state, state_wh, "State income tax withheld"),
-        (total_ss, ss_acct, "Social Security payable"),
-        (total_medicare, medicare_acct, "Medicare payable"),
-        (total_futa, futa_acct, "FUTA payable"),
-        (total_suta, suta_acct, "SUTA payable"),
-        (total_other, other_acct, "Other payroll deductions payable"),
-        (total_net, bank, "Net payroll"),
-    ]:
+    payables = [
+        (total_fed, fed, "Federal income tax withheld", "2310"),
+        (total_state, state_wh, "State income tax withheld", "2320"),
+        (total_ss, ss_acct, "Social Security payable", "2330"),
+        (total_medicare, medicare_acct, "Medicare payable", "2340"),
+        (total_futa, futa_acct, "FUTA payable", "2350"),
+        (total_suta, suta_acct, "SUTA payable", "2360"),
+        (total_other, other_acct, "Other payroll deductions payable", "2370"),
+        (total_net, bank, "Net payroll", "1000"),
+    ]
+    # A withholding with nowhere to post used to be left out, and the entry
+    # then failed to balance as a 500 (2.23.5 round 2, W-16 / NEW-139: the
+    # seeded cleanup had taken 2300 and 2310–2390). Say which account is
+    # missing instead.
+    missing = [
+        f"{number} ({desc})"
+        for amount, acct, desc, number in payables
+        if amount and amount > 0 and not acct
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail="This pay run has nowhere to post "
+            + ", ".join(missing)
+            + ": add that account under Chart of Accounts (or 2300 Payroll "
+            "Liabilities, which stands in for any of them), then process again.",
+        )
+    for amount, acct, desc, _number in payables:
         if amount and amount > 0 and acct:
             lines.append(
                 {
@@ -651,14 +722,21 @@ def process_pay_run(run_id: int, db: Session = Depends(get_db)):
             )
 
     if lines:
-        txn = create_journal_entry(
-            db,
-            run.pay_date,
-            f"Payroll {run.period_start} - {run.period_end}",
-            lines,
-            source_type="payroll",
-            source_id=run.id,
-        )
+        try:
+            txn = create_journal_entry(
+                db,
+                run.pay_date,
+                f"Payroll {run.period_start} - {run.period_end}",
+                lines,
+                source_type="payroll",
+                source_id=run.id,
+            )
+        except ValueError as e:
+            # a journal the ledger refuses is a problem with the data, said
+            # in a sentence, never a bare 500
+            raise HTTPException(
+                status_code=400, detail="This pay run could not be posted: " + str(e)
+            )
         run.transaction_id = txn.id
 
     # Job costing seam: when the labor cost type distributes actual burden,

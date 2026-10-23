@@ -83,4 +83,5 @@ class PTORequestResponse(BaseModel):
     status: str
     approver_id: Optional[int] = None
     notes: Optional[str] = None
+    hours_drawn: Optional[float] = None  # what approval took from the bank
     model_config = {"from_attributes": True}

@@ -32,6 +32,20 @@ CI (`.github/workflows/ci.yml`): lint → pytest (Linux) + pytest on Windows + p
 
 Windows installer: `gh workflow run windows.yml --repo easygoincajun/My-SlowBooks-Pro-2026 --ref main` (PyInstaller bundle → smoke test → Inno Setup). Signing steps run only when an `AZURE_CLIENT_ID` secret exists; on this fork the build is unsigned. The installer keeps upstream's `AppId`, so it installs over the official app and shares its data folder (`%LOCALAPPDATA%\SlowBooksPro`).
 
+## Syncing upstream
+
+The fork takes each upstream **release** (tag), never upstream's `main` in progress, by merging it. Never rebase or force-push `main`. `.github/workflows/upstream-watch.yml` opens an issue "Upstream vX.Y.Z released: sync it into the fork" when one is out.
+
+1. `git fetch upstream --tags`, then `git switch -c sync/upstream-vX.Y.Z main` and `git merge --no-ff --no-commit vX.Y.Z`.
+2. Resolve conflicts: upstream's code is the base, with the fork's behavior re-applied on top (backup folder/schedule, "+ New Item", sales tax agencies, the CRM importer, the unsigned Windows build). Where upstream changed the same behavior differently, ask; don't guess. Check the cleanly merged files too: a new upstream feature can break a fork one without a textual conflict (v2.26.0's encrypted company files vs. Restore from File).
+3. Version: upstream's plus a fork build number, `X.Y.Z.1` (then `.2`, … for fork-only releases) in `app/__init__.py`. That makes the fork build newer than the upstream release it carries. `whats-new.json` keys stay three-part (a test enforces it).
+4. Reinstall requirements (upstream adds dependencies), run the full test suite and the lint gate, and open a PR to the fork's `main`.
+5. After merging, tag `vX.Y.Z.1` and run `windows.yml` on the tag. The tag must equal `__version__`, and the release gets the installer.
+
+The desktop update check (`app/routes/system.py`) reads **this fork's** latest GitHub release, never upstream's manifest: the official installer shares the AppId and would install over the fork, dropping its features.
+
+This checkout lives in OneDrive, which turns some `.git` files (`FETCH_HEAD`, `COMMIT_EDITMSG`) into cloud placeholders that Git can't overwrite ("Permission denied"). Delete the file and retry. `core.fileMode` is false locally, so OneDrive's executable-bit changes don't show as edits.
+
 ## Architecture
 
 **Backend layers** (`app/`): `models/` (SQLAlchemy) → `schemas/` (Pydantic, `StrictModel` from `schemas/common.py`) → `services/` (business logic) → `routes/` (`APIRouter`, each registered in `app/main.py`). Posting to the ledger goes through `services/accounting.py` (`create_journal_entry`, `get_*_account_id` for control accounts; an item without an income account posts to the default income account).

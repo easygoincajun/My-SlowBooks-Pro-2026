@@ -36,6 +36,11 @@ _ENTITY_TYPE_DIRS = {
     "vendor_credit": "vendor_credit",
     "vendor": "vendor",
     "customer": "customer",
+    # A manual journal entry is sometimes the only right record of a real
+    # transaction (an owner paying a business expense personally, credited
+    # to equity — an Expense can only be paid from an asset or liability),
+    # and its receipt belongs in the company file with it (#281).
+    "journal_entry": "journal_entry",
 }
 
 # Whitelist of MIME types we accept for attachments. An attachment is served

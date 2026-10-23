@@ -1,0 +1,39 @@
+Sutehk Realty Group,
+Balance Sheet,
+All Dates,
+,
+,Total
+ASSETS,
+   Current Assets,
+      Bank Accounts,
+         Operating Account,=4010.00
+         Escrow,=500.00
+      Total Bank Accounts,=4510.00
+      Accounts Receivable,
+         Accounts Receivable (A/R),=-250.00
+      Total Accounts Receivable,=-250.00
+      Other Current Assets,
+         Undeposited Funds,=1000.00
+      Total Other Current Assets,=1000.00
+   Total Current Assets,=5260.00
+TOTAL ASSETS,=5260.00
+LIABILITIES AND EQUITY,
+   Liabilities,
+      Current Liabilities,
+         Credit Cards,
+            Company Visa,=120.00
+         Total Credit Cards,=120.00
+         Other Current Liabilities,
+            Escrow Held,=500.00
+         Total Other Current Liabilities,=500.00
+      Total Current Liabilities,=620.00
+   Total Liabilities,=620.00
+   Equity,
+      Opening Balance Equity,=1000.00
+      Retained Earnings,
+      Net Income,=3640.00
+   Total Equity,=4640.00
+TOTAL LIABILITIES AND EQUITY,=5260.00
+,
+,
+"Wednesday, Oct 14, 2026 05:00:00 PM GMT-7 - Cash Basis",

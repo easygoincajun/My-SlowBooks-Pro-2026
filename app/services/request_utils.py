@@ -9,16 +9,13 @@ from fastapi import Request
 
 
 def client_ip(request: Request) -> str:
-    """Best-effort client IP. Honors X-Forwarded-For ONLY when the deployment
-    declares it runs behind a trusted proxy (TRUST_PROXY_HEADERS) — otherwise
-    XFF is client-spoofable and would let an attacker forge the audited IP.
-    Direct deploys fall back to the socket peer."""
-    from app.config import TRUST_PROXY_HEADERS
+    """The client address as uvicorn reports it, for the audit tables.
 
-    fwd = request.headers.get("x-forwarded-for", "") if TRUST_PROXY_HEADERS else ""
-    if fwd:
-        # Take the first hop — that's the client (proxies append to the right).
-        return fwd.split(",")[0].strip()[:45]
+    Deliberately reads request.client only. uvicorn already rewrites it from
+    X-Forwarded-For when the socket peer is in FORWARDED_ALLOW_IPS, and
+    ignores the header otherwise, so trust is decided in one place; reading
+    the header here again would let a client forge the audited address on
+    any deploy that is reachable without a proxy. 45 chars fits IPv6."""
     client = request.client
     return (client.host if client else "")[:45]
 

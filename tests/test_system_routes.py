@@ -140,3 +140,60 @@ def test_version_comparison():
     assert not system_routes.is_newer("2.1.0", "2.1.0")
     assert not system_routes.is_newer("2.0.9", "2.1.0")
     assert not system_routes.is_newer("", "2.1.0")
+
+
+# This fork's builds read its own GitHub releases, never the upstream
+# manifest: the upstream installer installs over the fork (same AppId).
+
+
+def test_the_check_asks_this_forks_releases():
+    assert system_routes.LATEST_URL == (
+        "https://api.github.com/repos/easygoincajun/My-SlowBooks-Pro-2026/releases/latest"
+    )
+
+
+def test_a_github_release_offers_its_installer(client, monkeypatch):
+    monkeypatch.setenv("SLOWBOOKS_DESKTOP", "1")
+    monkeypatch.setenv("SLOWBOOKS_UPDATE_CHECK", "1")
+    page = (
+        "https://github.com/easygoincajun/My-SlowBooks-Pro-2026/releases/tag/v99.0.0.1"
+    )
+    exe = "https://github.com/easygoincajun/My-SlowBooks-Pro-2026/releases/download/v99.0.0.1/SlowBooksPro-Setup.exe"
+    _mock_manifest(
+        monkeypatch,
+        payload={
+            "tag_name": "v99.0.0.1",
+            "html_url": page,
+            "assets": [
+                {"name": "SHA256SUMS.txt", "browser_download_url": page + "/sums"},
+                {"name": "SlowBooksPro-Setup.exe", "browser_download_url": exe},
+            ],
+        },
+    )
+    body = client.get("/api/system/update-check").json()
+    assert body == {
+        "update_available": True,
+        "latest_version": "99.0.0.1",
+        "download_url": exe,
+        "notes_url": page,
+    }
+
+
+def test_a_release_without_an_installer_offers_its_page():
+    assert (
+        system_routes.manifest(
+            {
+                "tag_name": "v2.27.0.1",
+                "html_url": "https://example.test/r",
+                "assets": [],
+            }
+        )["download_url"]
+        == "https://example.test/r"
+    )
+
+
+def test_the_upstream_release_a_fork_build_carries_is_not_newer():
+    # 2.26.0.1 carries upstream 2.26.0: that release is no update for it
+    assert not system_routes.is_newer("2.26.0", "2.26.0.1")
+    assert system_routes.is_newer("2.26.0.2", "2.26.0.1")
+    assert system_routes.is_newer("2.27.0.1", "2.26.0.1")

@@ -35,13 +35,6 @@ _PUBLIC_JUSTIFIED = [
         re.compile(r"^/api/payments/[^/]+/create-checkout-session$"),
         "payment_token capability + rate limit",
     ),
-    (
-        re.compile(r"^/api/qbo/callback$"),
-        "Intuit's OAuth redirect is a cross-site top-level navigation, so a "
-        "SameSite=Strict session cookie is never attached; the route "
-        "carries its own CSRF check instead (handle_callback() rejects any "
-        "`state` that doesn't match the value get_auth_url() stored)",
-    ),
 ]
 
 

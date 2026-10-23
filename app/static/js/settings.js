@@ -30,9 +30,6 @@ const SettingsPage = {
         paypal_client_secret: 'the PayPal client secret, under Online Payments',
         square_access_token: 'the Square access token, under Online Payments',
         square_webhook_signature_key: 'the Square webhook signature key, under Online Payments',
-        qbo_client_secret: 'the QuickBooks Online client secret, under QuickBooks Online',
-        qbo_access_token: 'the QuickBooks Online connection: connect again on the QuickBooks Online page',
-        qbo_refresh_token: 'the QuickBooks Online connection: connect again on the QuickBooks Online page',
         simplefin_access_url: 'the SimpleFIN bank feed: connect again on Banking',
         closing_date_password: 'the closing-date password, under Closing Date',
         ai_api_key: 'the AI Insights API key, under AI Insights',
@@ -79,6 +76,7 @@ const SettingsPage = {
         setTimeout(() => {
             SettingsPage.loadBackups();
             SettingsPage.loadSalesTaxAgencies();
+            SettingsPage.loadCompanyFile();
             SettingsPage.loadLegacyFiles();
             SettingsPage.loadEmailTemplates();
             SettingsPage.loadAiConfig();
@@ -288,6 +286,28 @@ const SettingsPage = {
                         Send Test Email</button>
                 </div>
 
+                <div class="settings-section" role="group" aria-labelledby="settings-h-direct-deposit">
+                    <h3 id="settings-h-direct-deposit">Direct Deposit (ACH)</h3>
+                    <div style="font-size:10px; color:var(--text-muted); margin-bottom:8px;">
+                        What the bank prints on its ACH origination agreement. With these saved, a processed
+                        pay run has a <strong>Direct deposit file</strong> button; upload the file to the bank.
+                        Employees' own accounts are entered on the employee, under Direct Deposit.
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group"><label>Bank Routing Number</label>
+                            <input name="ach_bank_routing" inputmode="numeric" maxlength="9" value="${escapeHtml(s.ach_bank_routing || '')}" placeholder="9 digits"></div>
+                        <div class="form-group"><label>Bank Name</label>
+                            <input name="ach_bank_name" maxlength="23" value="${escapeHtml(s.ach_bank_name || '')}"></div>
+                        <div class="form-group"><label>Company Account Number</label>
+                            <input name="ach_company_account" type="password" inputmode="numeric" maxlength="17" value="${escapeHtml(s.ach_company_account || '')}" autocomplete="off">
+                            <div style="font-size:10px; color:var(--text-muted); margin-top:4px;">The account the net pay is paid from. Stored encrypted.</div></div>
+                        <div class="form-group"><label>Immediate Origin</label>
+                            <input name="ach_immediate_origin" maxlength="10" value="${escapeHtml(s.ach_immediate_origin || '')}" placeholder="1 + EIN unless the bank says otherwise"></div>
+                        <div class="form-group"><label>Company Identification</label>
+                            <input name="ach_company_id" maxlength="10" value="${escapeHtml(s.ach_company_id || '')}" placeholder="1 + EIN unless the bank says otherwise"></div>
+                    </div>
+                </div>
+
                 <div class="settings-section" role="group" aria-labelledby="settings-h-online-payments">
                     <h3 id="settings-h-online-payments">Online Payments</h3>
                     <div style="font-size:10px; color:var(--text-muted); margin-bottom:8px;">
@@ -349,33 +369,6 @@ const SettingsPage = {
                         <div class="form-group"><label>Webhook Notification URL</label>
                             <input name="square_notification_url" value="${escapeHtml(s.square_notification_url || '')}"
                                 placeholder="Exact URL registered in the Square dashboard"></div>
-                    </div>
-                </div>
-
-                <div class="settings-section" role="group" aria-labelledby="settings-h-quickbooks-online">
-                    <h3 id="settings-h-quickbooks-online">QuickBooks Online</h3>
-                    <div style="font-size:10px; color:var(--text-muted); margin-bottom:8px;">
-                        Configure your Intuit Developer app credentials for QBO integration.
-                        Get these from <a href="https://developer.intuit.com" target="_blank" style="color:var(--text-link);">developer.intuit.com</a>.
-                    </div>
-                    <div class="form-grid">
-                        <div class="form-group"><label>Enable QBO Integration</label>
-                            <select name="qbo_enabled">
-                                <option value="false" ${s.qbo_enabled !== 'true' ? 'selected' : ''}>Disabled</option>
-                                <option value="true" ${s.qbo_enabled === 'true' ? 'selected' : ''}>Enabled</option>
-                            </select></div>
-                        <div class="form-group"><label>Environment</label>
-                            <select name="qbo_environment">
-                                <option value="sandbox" ${s.qbo_environment !== 'production' ? 'selected' : ''}>Sandbox</option>
-                                <option value="production" ${s.qbo_environment === 'production' ? 'selected' : ''}>Production</option>
-                            </select></div>
-                        <div class="form-group"><label>Client ID</label>
-                            <input name="qbo_client_id" value="${escapeHtml(s.qbo_client_id || '')}" placeholder="ABo8gw..."></div>
-                        <div class="form-group"><label>Client Secret</label>
-                            <input name="qbo_client_secret" type="password" value="${escapeHtml(s.qbo_client_secret || '')}" placeholder="tJCdgW..."></div>
-                        <div class="form-group full-width"><label>Redirect URI</label>
-                            <input name="qbo_redirect_uri" value="${escapeHtml(s.qbo_redirect_uri || 'http://localhost:8000/api/qbo/callback')}"
-                                placeholder="http://localhost:8000/api/qbo/callback"></div>
                     </div>
                 </div>
 
@@ -445,6 +438,17 @@ const SettingsPage = {
                         <button type="button" class="btn btn-sm btn-secondary" onclick="SettingsPage.seedTemplates()">Seed Default Templates</button>
                     </div>
                     <div id="email-template-list"></div>
+                </div>
+
+                <div class="settings-section" role="group" aria-labelledby="settings-h-menu">
+                    <h3 id="settings-h-menu">Sidebar</h3>
+                    <div style="font-size:10px; color:var(--text-muted); margin-bottom:8px;">
+                        Hide the menu items this company doesn't use (payroll done elsewhere, no inventory, …).
+                        A hidden page still opens by its address, and this page keeps the list.
+                    </div>
+                    <div id="hidden-menu-choices" style="columns:2; font-size:12px; margin-bottom:12px;">
+                        ${SettingsPage._hiddenMenuChoices(s.hidden_menu)}
+                    </div>
                 </div>
 
                 <div class="settings-section" role="group" aria-labelledby="settings-h-classes">
@@ -572,6 +576,12 @@ const SettingsPage = {
                     <div id="backup-list"></div>
                 </div>
 
+                <div class="settings-section" id="settings-company-file" data-admin hidden role="group" aria-labelledby="settings-h-company-file">
+                    <h3 id="settings-h-company-file">Company File Encryption</h3>
+                    <div id="company-file-status" style="font-size:11px; color:var(--text-muted); margin-bottom:8px;"></div>
+                    <div id="company-file-actions" style="display:flex; gap:8px;" data-admin data-write></div>
+                </div>
+
                 ${SettingsPage._isAdmin() ? '<div class="settings-section" id="settings-legacy-files" data-admin hidden></div>' : ''}
 
                 <div class="settings-section" id="settings-users" data-admin style="display:none;" role="group" aria-labelledby="settings-h-users-server-edition">
@@ -593,11 +603,13 @@ const SettingsPage = {
                         <div class="form-group"><label>Role</label>
                             <select id="user-new-role">
                                 <option value="bookkeeper">Bookkeeper — daily books, no admin</option>
+                                <option value="accountant">Accountant — reads everything, posts journal entries</option>
                                 <option value="readonly">Read-only — reports and lookups</option>
                                 <option value="admin">Admin — everything</option>
                             </select></div>
                     </div>
                     <button type="button" class="btn btn-primary" onclick="SettingsPage.createUser()">Add User</button>
+                    <button type="button" class="btn btn-secondary" onclick="SettingsPage.showInvite()">Invite your accountant…</button>
                 </div>
 
                 <div class="settings-section" id="settings-api-tokens" data-admin style="display:none;" role="group" aria-labelledby="settings-h-api-tokens-agents-integrations">
@@ -624,6 +636,7 @@ const SettingsPage = {
                         <div class="form-group"><label>Role</label>
                             <select id="token-new-role">
                                 <option value="readonly">Read-only — reports and lookups</option>
+                                <option value="accountant">Accountant — reads everything, posts journal entries</option>
                                 <option value="bookkeeper">Bookkeeper — daily books, no admin</option>
                                 <option value="admin">Admin — everything except identity management</option>
                             </select></div>
@@ -729,6 +742,249 @@ const SettingsPage = {
     },
 
     // ------------------------------------------------------------------
+    // Company File Encryption (#290) — administrators only; the server
+    // enforces the same rule, this avoids a useless 403. The switch asks
+    // for the company's name typed, the way a restore asks before it
+    // replaces the books.
+    // ------------------------------------------------------------------
+    async loadCompanyFile() {
+        const section = $('#settings-company-file');
+        if (!section || !SettingsPage._isAdmin()) return;
+        let st;
+        try {
+            st = await API.get('/company-file/encryption');
+        } catch (e) {
+            return; // non-admin or pre-upgrade server: section stays hidden
+        }
+        SettingsPage._companyFile = st;
+        const status = $('#company-file-status');
+        const actions = $('#company-file-actions');
+        actions.innerHTML = '';
+        if (st.engine === 'postgresql') {
+            status.textContent = 'This company runs on PostgreSQL. Encrypting it at rest is the database host\'s job: '
+                + 'PostgreSQL\'s own disk encryption, or the volume it sits on.';
+        } else if (!st.supported) {
+            status.textContent = 'This build cannot encrypt the company file.';
+        } else if (st.encrypted) {
+            const ring = st.keyring;
+            let keyWords;
+            if (st.key_source === 'secret') keyWords = 'The key comes from COMPANY_FILE_ENCRYPTION_SECRET.';
+            else if (ring) {
+                const who = ring.admins.length ? ring.admins.map(escapeHtml).join(', ') : 'nobody yet';
+                keyWords = `An administrator's sign-in unlocks it (${who}${ring.stale.length ? `; ${ring.stale.map(escapeHtml).join(', ')} at their next sign-in` : ''}), `
+                    + `and so does the recovery key${ring.recovery_made_at ? ` made ${SettingsPage._when(ring.recovery_made_at)}` : ''}. `
+                    + 'Keep the recovery key where the backups are not: it opens the file, and every backup of it, if every administrator\'s password is lost.';
+            } else keyWords = 'The key comes from the launcher.';
+            // backups made before Turn on stay plain SQLite in the same list
+            // (NEW-158 / W-25): say so, and how many, from the list itself
+            // (loadBackups may not have run yet)
+            let backups = [];
+            try { backups = await API.get('/backups'); } catch (e) { backups = []; }
+            SettingsPage._backups = backups;
+            const plain = backups.filter(b => b.encrypted === false).length;
+            const backupWords = plain
+                ? `Backups made while it is on are encrypted; ${plain} backup${plain === 1 ? '' : 's'} in the list below ${plain === 1 ? 'was' : 'were'} made before and ${plain === 1 ? 'is' : 'are'} plain SQLite, readable with no key: delete ${plain === 1 ? 'it' : 'them'} once a newer backup exists. `
+                : 'Backups made while it is on are encrypted. ';
+            status.innerHTML = `<strong>On.</strong> ${escapeHtml(st.file)} is encrypted on disk (SQLCipher ${escapeHtml(st.cipher_version || '')}). `
+                + backupWords + keyWords;
+            actions.innerHTML = (ring ? '<button type="button" class="btn btn-secondary" onclick="SettingsPage.confirmRecoveryKey()">New recovery key…</button> ' : '')
+                + '<button type="button" class="btn btn-secondary" onclick="SettingsPage.confirmEncryption(false)">Turn off…</button>';
+        } else {
+            status.innerHTML = `<strong>Off.</strong> ${escapeHtml(st.file)} is a plain SQLite file: anyone with the file can read the books. `
+                + (st.can_turn_on
+                    ? (st.desktop_key
+                        ? 'Turning it on makes a recovery key, shown once, and your sign-in unlocks the books from then on.'
+                        : 'A key is set, so encryption can be turned on.')
+                    : 'To turn it on, set COMPANY_FILE_ENCRYPTION_SECRET where SlowBooks Pro starts, then start it again.');
+            actions.innerHTML = `<button type="button" class="btn btn-primary" ${st.can_turn_on ? '' : 'disabled'} onclick="SettingsPage.confirmEncryption(true)">Turn on…</button>`;
+        }
+        section.hidden = false;
+        // the list marks the plain backups once the state is known
+        SettingsPage.loadBackups();
+    },
+
+    async _companyNameNow() {
+        // The company as it is now, not the shell's copy from when the
+        // window opened (a rename since would name it wrong).
+        let company = (App.settings && App.settings.company_name) || '';
+        try {
+            const now = await API.get('/settings');
+            if (now && now.company_name) company = now.company_name;
+        } catch (e) { /* the shell's copy will do */ }
+        return company;
+    },
+
+    _nameConfirmField(company) {
+        return `<div class="form-group">
+                    <label for="encryption-company-name">Company name</label>
+                    <input type="text" id="encryption-company-name" name="company_name" autocomplete="off" required
+                        placeholder="${escapeHtml(company)}"
+                        oninput="SettingsPage._encryptionFormCheck(this.form)">
+                </div>`;
+    },
+
+    // Submit opens once the name matches and, where the form asks for it,
+    // the password is typed.
+    _encryptionFormCheck(form) {
+        const named = form.company_name.value.trim().toLowerCase() === SettingsPage._encryptionName;
+        const pw = form.querySelector('[name=password]');
+        form.querySelector('button[type=submit]').disabled = !(named && (!pw || pw.value.length > 0));
+    },
+
+    async confirmEncryption(enable) {
+        const company = await SettingsPage._companyNameNow();
+        SettingsPage._encryptionName = company.trim().toLowerCase();
+        const st = SettingsPage._companyFile || {};
+        const desktopKey = enable && st.desktop_key;
+        // Turn off proves the administrator the way Turn on does (the
+        // agents' question, round 1): the password is asked when a person
+        // is signed in
+        const asksPassword = desktopKey || (!enable && App.username);
+        const what = enable
+            ? `<p style="margin:0 0 8px;"><strong>This rewrites the company file encrypted.</strong> From then on the file, and every backup
+                of it, opens only with the key; without the key the books are unreadable, including to SlowBooks Pro.</p>`
+              + (desktopKey
+                ? `<p style="margin:0 0 8px;">SlowBooks Pro makes a <strong>recovery key</strong> and shows it once: write it down or save the file,
+                    and keep it where the backups are not. Your sign-in unlocks the books from then on; every other administrator's does
+                    after their next sign-in.</p>`
+                : '')
+            : `<p style="margin:0 0 8px;"><strong>This rewrites the company file as plain SQLite.</strong> Anyone with the file can read
+                the books again${st.keyring ? ', and the recovery key is retired' : ''}.</p>`;
+        if (enable && desktopKey) {
+            // where the text file lands: a Save panel on the desktop, else the
+            // browser's download; never a synced Documents folder unasked
+        }
+        openModal(enable ? 'Turn on company file encryption' : 'Turn off company file encryption', `
+            <form id="encryption-form" onsubmit="SettingsPage.changeEncryption(event, ${enable})">
+                ${what}
+                <p style="margin:0 0 8px;">Nobody else should be using the company while this runs. Type the company's name to confirm.</p>
+                ${SettingsPage._nameConfirmField(company)}
+                ${asksPassword ? `<div class="form-group">
+                    <label for="encryption-password">Your password</label>
+                    <input type="password" id="encryption-password" name="password" autocomplete="current-password" required
+                        oninput="SettingsPage._encryptionFormCheck(this.form)">
+                    ${desktopKey ? '<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">The key is wrapped for it, so your sign-in unlocks the books.</div>' : ''}
+                </div>` : ''}
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn ${enable ? 'btn-primary' : 'btn-danger'}" disabled>${enable ? 'Encrypt the company file' : 'Remove the encryption'}</button>
+                </div>
+            </form>`);
+    },
+
+    async changeEncryption(e, enable) {
+        e.preventDefault();
+        const form = e.target;
+        const btn = form.querySelector('button[type=submit]');
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = enable ? 'Encrypting…' : 'Rewriting…';
+        const body = { enabled: enable, company_name: form.company_name.value };
+        if (form.password) body.password = form.password.value;
+        try {
+            const result = await API.post('/company-file/encryption', body);
+            closeModal();
+            if (result.recovery_key) SettingsPage.showRecoveryKey(result, 'The company file is encrypted.');
+            else toast(result.encrypted ? 'The company file is encrypted.' : 'The company file is plain SQLite again.');
+            SettingsPage.loadCompanyFile();
+        } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = label;
+        }
+    },
+
+    // The recovery key, the one time it is shown (#290): copied, or saved
+    // as a text file (through the desktop bridge where there is one).
+    showRecoveryKey(result, lead) {
+        SettingsPage._recoveryFile = result.recovery_file || result.recovery_key;
+        openModal('Your recovery key', `
+            <p style="margin:0 0 8px;">${escapeHtml(lead)} <strong>This recovery key is shown once.</strong> It opens the company file,
+                and every backup of it, if every administrator's password is lost. Anyone holding it can read the books, so keep it
+                where the backups are not: a safe, a password manager, a sealed envelope.</p>
+            <p style="margin:0 0 12px; font-family:var(--mono, monospace); font-size:16px; letter-spacing:0.04em; text-align:center;
+                padding:10px; border:1px solid var(--gray-200); border-radius:4px; user-select:all;" id="recovery-key-words">${escapeHtml(result.recovery_key)}</p>
+            <div class="form-actions" style="justify-content:space-between;">
+                <div>
+                    <button type="button" class="btn btn-secondary" onclick="SettingsPage.copyRecoveryKey()">Copy</button>
+                    <button type="button" class="btn btn-secondary" onclick="SettingsPage.saveRecoveryKey()">Save as a text file</button>
+                </div>
+                <button type="button" class="btn btn-primary" onclick="closeModal()">I have kept it</button>
+            </div>`);
+    },
+
+    async copyRecoveryKey() {
+        const words = ($('#recovery-key-words') || {}).textContent || '';
+        await copyToClipboard(words, 'Recovery key');
+    },
+
+    async saveRecoveryKey() {
+        const company = ((App.settings && App.settings.company_name) || 'company').replace(/[^A-Za-z0-9 _-]+/g, '').trim() || 'company';
+        const name = `${company} recovery key.txt`;
+        const text = SettingsPage._recoveryFile || '';
+        // On the desktop the file goes where the person chooses, through a
+        // Save panel: the Reports folder every export lands in is synced to
+        // a cloud on many machines, and a recovery key should not be
+        // (macbase1 and skytech, round 1).
+        const api = window.pywebview && window.pywebview.api;
+        if (api && api.save_secret_file) {
+            const r = await api.save_secret_file(name, text);
+            if (r && r.success) toast(`Saved to ${r.path}`);
+            else if (r && r.cancelled) toast('Not saved: the key is still on screen.');
+            else toast(`Could not save the file: ${(r && r.error) || 'unknown error'}`, 'error');
+            return;
+        }
+        const blob = new Blob([text], { type: 'text/plain' });
+        if (window.SlowbooksDesktop && await window.SlowbooksDesktop.saveFile(blob, name)) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+    },
+
+    async confirmRecoveryKey() {
+        const company = await SettingsPage._companyNameNow();
+        SettingsPage._encryptionName = company.trim().toLowerCase();
+        openModal('Make a new recovery key', `
+            <form id="encryption-form" onsubmit="SettingsPage.newRecoveryKey(event)">
+                <p style="margin:0 0 8px;"><strong>This retires the recovery key you have.</strong> The company file is re-keyed under the
+                    new one and shown once; your sign-in unlocks it at once, every other administrator's after their next sign-in.
+                    Backups made before today open with the old recovery key only.</p>
+                <p style="margin:0 0 8px;">Nobody else should be using the company while this runs. Type the company's name and your password to confirm.</p>
+                ${SettingsPage._nameConfirmField(company)}
+                <div class="form-group">
+                    <label for="encryption-password">Your password</label>
+                    <input type="password" id="encryption-password" name="password" autocomplete="current-password" required
+                        oninput="SettingsPage._encryptionFormCheck(this.form)">
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" disabled>Make a new recovery key</button>
+                </div>
+            </form>`);
+    },
+
+    async newRecoveryKey(e) {
+        e.preventDefault();
+        const form = e.target;
+        const btn = form.querySelector('button[type=submit]');
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Re-keying…';
+        try {
+            const result = await API.post('/company-file/encryption/recovery-key', { company_name: form.company_name.value, password: form.password.value });
+            closeModal();
+            SettingsPage.showRecoveryKey(result, 'The company file is re-keyed.');
+            SettingsPage.loadCompanyFile();
+        } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+            btn.textContent = label;
+        }
+    },
+
+    // ------------------------------------------------------------------
     // Users (Server Edition) — section is visible to admins only; the
     // backend enforces the same rule, this just avoids a useless 403.
     // ------------------------------------------------------------------
@@ -745,11 +1001,16 @@ const SettingsPage = {
                 <td>${escapeHtml(u.display_name)}</td>
                 <td>
                     <select onchange="SettingsPage.updateUser(${u.id}, {role: this.value})">
-                        ${['admin', 'bookkeeper', 'readonly'].map(r =>
+                        ${['admin', 'bookkeeper', 'accountant', 'readonly'].map(r =>
                             `<option value="${r}" ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
                     </select>
                 </td>
-                <td>${u.last_login_at ? formatDate(u.last_login_at) : '—'}</td>
+                <td>${u.last_login_at ? formatDate(u.last_login_at) : '—'}${u.must_change_password ? '<div style="font-size:10px; color:var(--gray-500);">one-time password, not yet replaced</div>' : ''}</td>
+                <td>${u.expires_on
+                    ? `<input type="date" value="${escapeHtml(u.expires_on)}" aria-label="Day ${escapeHtml(u.username)}'s sign-in ends" style="font-size:11px; padding:2px 4px;"
+                        onchange="SettingsPage.updateUser(${u.id}, {expires_on: this.value || null})">${u.ended ? '<div style="font-size:10px; color:var(--danger);">ended</div>' : ''}`
+                    : `<span style="color:var(--text-muted);">none</span> <button type="button" class="btn btn-sm btn-secondary" aria-label="Set a day ${escapeHtml(u.username)}'s sign-in ends"
+                        onclick="SettingsPage.askEndDate(${u.id}, '${escapeHtml(u.username)}')">Set…</button>`}</td>
                 <td>${u.is_active
                     ? `<button type="button" class="btn btn-sm btn-secondary" onclick="SettingsPage.updateUser(${u.id}, {is_active: false})">Deactivate</button>`
                     : `<button type="button" class="btn btn-sm btn-secondary" onclick="SettingsPage.updateUser(${u.id}, {is_active: true})">Reactivate</button>`}
@@ -757,7 +1018,7 @@ const SettingsPage = {
                 </td>
             </tr>`).join('');
             $('#users-list').innerHTML = `<div class="table-container"><table>
-                <thead><tr><th scope="col">Username</th><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Last login</th><th scope="col"></th></tr></thead>
+                <thead><tr><th scope="col">Username</th><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Last login</th><th scope="col">Ends</th><th scope="col"></th></tr></thead>
                 <tbody>${rows}</tbody></table></div>`;
         } catch (e) { /* non-admin or pre-upgrade server: section stays hidden */ }
     },
@@ -848,6 +1109,87 @@ const SettingsPage = {
         } catch (err) { toast(err.message, 'error'); }
     },
 
+    // Invite your accountant (#345): a sign-in with a one-time password
+    // and, if the engagement has one, an end date; the answer is shown
+    // once, with the address to send.
+    showInvite() {
+        openModal('Invite your accountant', `
+            <form onsubmit="SettingsPage.sendInvite(event)">
+                <p style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">The sign-in gets a one-time password, shown once; the person chooses their own at the first sign-in. Leave the end date empty for a sign-in with no end.</p>
+                <div class="form-grid">
+                    <div class="form-group"><label>Username *</label><input name="username" required autocomplete="off"></div>
+                    <div class="form-group"><label>Display name</label><input name="display_name" autocomplete="off"></div>
+                    <div class="form-group"><label>Role</label>
+                        <select name="role" data-no-search>
+                            <option value="accountant">Accountant — reads everything, posts journal entries</option>
+                            <option value="readonly">Read-only — reports and lookups</option>
+                            <option value="bookkeeper">Bookkeeper — daily books, no admin</option>
+                        </select></div>
+                    <div class="form-group"><label>Sign-in ends on <span style="font-weight:normal; color:var(--text-muted);">(optional)</span></label><input name="expires_on" type="date">
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Leave it empty for a sign-in with no end date.</div></div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Create the invitation</button>
+                </div>
+            </form>`);
+    },
+
+    // An empty date box is drawn by WebKit with today's date greyed in, which
+    // read as "ends today" (NEW-151): a sign-in with no end date shows
+    // "none", and the box appears on request.
+    askEndDate(id, username) {
+        openModal(`When does ${username}'s sign-in end?`, `
+            <form onsubmit="event.preventDefault(); SettingsPage.updateUser(${id}, {expires_on: this.expires_on.value || null}); closeModal();">
+                <div class="form-group"><label for="user-end-date">Sign-in ends on</label>
+                    <input id="user-end-date" name="expires_on" type="date" required></div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Set the end date</button>
+                </div>
+            </form>`);
+    },
+
+    async sendInvite(e) {
+        e.preventDefault();
+        const form = e.target;
+        try {
+            const r = await API.post('/users/invite', {
+                username: form.username.value.trim(),
+                display_name: form.display_name.value.trim(),
+                role: form.role.value,
+                expires_on: form.expires_on.value || null,
+            });
+            const note = `Address: ${r.address}${r.note ? ` (${r.note})` : ''}\nUsername: ${r.username}\nOne-time password: ${r.password}${r.expires_on ? `\nThe sign-in ends on ${r.expires_on}.` : ''}\n\nSign in once with this password; you will be asked to choose your own.`;
+            // Each line copies on its own (NEW-167): the password is typed at
+            // the sign-in, the rest goes in a message; the whole invitation
+            // sits under them, selectable like any text.
+            SettingsPage._invite = { address: r.address, username: r.username, password: r.password, note };
+            openModal('Send this to your accountant', `
+                <p style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">The one-time password is shown here once; it is not stored anywhere readable. Each line copies on its own, or copy the whole invitation.</p>
+                <div style="display:grid; grid-template-columns:max-content minmax(0,1fr) max-content; gap:6px 10px; align-items:center; margin-bottom:10px;">
+                    ${copyLineHtml('invite-address', 'Address', r.address, "SettingsPage.copyInvite('address')")}
+                    ${copyLineHtml('invite-username', 'Username', r.username, "SettingsPage.copyInvite('username')")}
+                    ${copyLineHtml('invite-password', 'One-time password', r.password, "SettingsPage.copyInvite('password')")}
+                </div>
+                <textarea id="invite-note" readonly rows="7" aria-label="The whole invitation" style="width:100%; font-family:var(--font-mono); font-size:12px;">${escapeHtml(note)}</textarea>
+                <div class="form-actions" style="justify-content:space-between;">
+                    <button type="button" class="btn btn-secondary" onclick="SettingsPage.copyInvite('note')">Copy the whole invitation</button>
+                    <button type="button" class="btn btn-primary" onclick="closeModal()">Done</button>
+                </div>`);
+            SettingsPage.loadUsers();
+        } catch (err) { toast(err.message, 'error'); }
+    },
+
+    // One line of the invitation, or all of it, to the clipboard; where the
+    // page may not write it (plain HTTP on a network address) the text is
+    // selected for the copy shortcut instead.
+    async copyInvite(which) {
+        const inv = SettingsPage._invite || {};
+        const labels = { address: 'Address', username: 'Username', password: 'One-time password', note: 'Invitation' };
+        await copyToClipboard(inv[which] || '', labels[which] || 'Text', $(`#invite-${which}`));
+    },
+
     async updateUser(id, patch) {
         try {
             await API.put(`/users/${id}`, patch);
@@ -868,6 +1210,34 @@ const SettingsPage = {
         } catch (err) { toast(err.message, 'error'); }
     },
 
+    // One checkbox per sidebar section and per link (#334), read from the
+    // sidebar itself so the list is always the menu as shipped; the ones
+    // the setting names are ticked.
+    _hiddenMenuChoices(raw) {
+        let hidden = [];
+        try { hidden = JSON.parse(raw || '[]'); } catch (err) { hidden = []; }
+        const set = new Set((Array.isArray(hidden) ? hidden : []).map(String));
+        const box = (key, label, indent) => `<label style="display:block; font-weight:normal; ${indent ? 'margin-left:18px;' : 'margin-top:6px;'}">
+                <input type="checkbox" name="hide-menu:${escapeHtml(key)}" data-hide-menu="${escapeHtml(key)}" ${set.has(key) ? 'checked' : ''} style="width:auto; vertical-align:middle; margin-right:6px;">
+                ${escapeHtml(label)}</label>`;
+        let html = '';
+        const items = (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') ? [...document.querySelectorAll('#sidebar li')] : [];
+        items.forEach(li => {
+            // an item the company's kind hides (the nonprofit pages on a
+            // business company) is not on offer (2.23.5 round 2, NEW-145)
+            if (li.hidden || (typeof li.closest === 'function' && li.closest('[hidden]'))) return;
+            if (li.classList.contains('nav-section')) {
+                const name = li.textContent.trim();
+                if (name) html += box(`section:${name}`, `${name} (the whole section)`, false);
+                return;
+            }
+            const link = li.querySelector('.nav-link[data-page]');
+            if (!link || link.dataset.page === 'settings') return;
+            html += box(link.dataset.page, link.textContent.trim(), true);
+        });
+        return html || '<span style="color:var(--text-muted);">The sidebar is not on this page.</span>';
+    },
+
     async save(e) {
         e.preventDefault();
         const data = Object.fromEntries(new FormData(e.target).entries());
@@ -878,6 +1248,12 @@ const SettingsPage = {
         if (logoOption) data.invoice_show_logo = logoOption.checked ? 'true' : 'false';
         const classWarn = e.target.querySelector('[name="class_warn_blank"]');
         if (classWarn) data.class_warn_blank = classWarn.checked ? 'true' : 'false';
+        // the hidden menu items, as a list (#334); the boxes are not form fields
+        const hiddenBoxes = typeof e.target.querySelectorAll === 'function' ? [...e.target.querySelectorAll('input[data-hide-menu]')] : [];
+        if (hiddenBoxes.length) {
+            data.hidden_menu = JSON.stringify(hiddenBoxes.filter(b => b.checked).map(b => b.dataset.hideMenu));
+            for (const key of Object.keys(data)) if (key.startsWith('hide-menu:')) delete data[key];
+        }
         const btn = document.getElementById('settings-save-btn');
         if (btn) btn.disabled = true;
         try {
@@ -1300,7 +1676,8 @@ const SettingsPage = {
                 <tbody>${backups.map(b => `<tr>
                     <td>${escapeHtml(b.filename)}${b.backup_type === 'pre-restore'
                         ? ' <span style="font-size:10px; color:var(--text-muted);">(taken before a restore)</span>'
-                        : b.backup_type === 'auto' ? ' <span style="font-size:10px; color:var(--text-muted);">(automatic)</span>' : ''}</td>
+                        : b.backup_type === 'auto' ? ' <span style="font-size:10px; color:var(--text-muted);">(automatic)</span>' : ''}${b.encrypted === false && SettingsPage._companyFile && SettingsPage._companyFile.encrypted
+                        ? ' <span style="font-size:10px; color:var(--danger);">(plain SQLite, made before encryption: readable with no key)</span>' : ''}</td>
                     <td>${(b.file_size / 1024).toFixed(1)} KB</td>
                     <td>${escapeHtml(SettingsPage._when(b.created_at))}</td>
                     <td class="actions">
@@ -1426,21 +1803,39 @@ const SettingsPage = {
         const label = btn.textContent;
         btn.disabled = true;
         btn.textContent = 'Restoring…';
-        const send = allowOther => API.post('/backups/restore',
-            allowOther ? { filename, allow_other_company: true } : { filename });
+        const body = { filename };
+        const send = () => API.post('/backups/restore', body);
         try {
             let result;
-            try {
-                result = await send(false);
-            } catch (err) {
-                // Another company's backup: say whose, and ask a second time.
-                if (!(err.status === 409 && err.detail && err.detail.code === 'other_company')) throw err;
-                if (!confirm(`${err.message}\n\nRestore it over this company anyway?`)) {
-                    btn.disabled = false;
-                    btn.textContent = label;
-                    return;
+            // Another company's backup: say whose, and ask a second time. A
+            // backup encrypted under another key (#290): ask for the
+            // recovery key it was made under, and send again with it.
+            for (;;) {
+                try {
+                    result = await send();
+                    break;
+                } catch (err) {
+                    if (err.status === 409 && err.detail && err.detail.code === 'other_company') {
+                        if (!confirm(`${err.message}\n\nRestore it over this company anyway?`)) {
+                            btn.disabled = false;
+                            btn.textContent = label;
+                            return;
+                        }
+                        body.allow_other_company = true;
+                        continue;
+                    }
+                    if (err.status === 409 && err.detail && (err.detail.code === 'other_key' || err.detail.code === 'wrong_recovery_key')) {
+                        const typed = prompt(`${err.message}\n\nRecovery key:`, '');
+                        if (!typed) {
+                            btn.disabled = false;
+                            btn.textContent = label;
+                            return;
+                        }
+                        body.recovery_key = typed.trim();
+                        continue;
+                    }
+                    throw err;
                 }
-                result = await send(true);
             }
             closeModal();
             SettingsPage._leaving = true;  // the books were replaced; nothing here to keep
@@ -1640,18 +2035,19 @@ const SettingsPage = {
                 ${currentSpec.docs_url ? ` &middot; <a href="${escapeHtml(currentSpec.docs_url)}" target="_blank" rel="noopener">Get a key</a>` : ''}
             </div>
             <label class="form-field">
-                <span>Model</span>
-                <select id="ai-settings-model-select" data-admin>
-                    ${SettingsPage._modelOptionsHtml(currentSpec, currentModel)}
+                <span><span id="ai-settings-model-label">Model</span> <button type="button" class="btn btn-sm" id="ai-settings-models-refresh" data-admin title="List the provider's models again">Refresh models</button></span>
+                <select id="ai-settings-model-select" data-admin aria-labelledby="ai-settings-model-label">
+                    ${SettingsPage._modelOptionsHtml(SettingsPage._aiModels[currentProvider] || [], currentModel, SettingsPage._modelsEmptyText[currentProvider])}
                 </select>
-                <input type="text" id="ai-settings-model-custom" data-admin
+                <input type="text" id="ai-settings-model-custom" data-admin aria-label="Model ID" spellcheck="false" autocapitalize="off" autocorrect="off"
                        value="${escapeHtml(currentModel || '')}"
                        placeholder="Type a model ID"
-                       style="margin-top:6px; ${SettingsPage._isCustomModel(currentSpec, currentModel) ? '' : 'display:none;'}">
+                       style="margin-top:6px; ${SettingsPage._isCustomModel(SettingsPage._aiModels[currentProvider] || [], currentModel) ? '' : 'display:none;'}">
+                <div id="ai-settings-models-note" class="ai-settings-hint"></div>
             </label>
             <label class="form-field" id="ai-settings-cf-wrap" style="${needsAccount ? '' : 'display:none'}">
                 <span>Cloudflare Account ID</span>
-                <input type="text" id="ai-settings-cf-account" data-admin
+                <input type="text" id="ai-settings-cf-account" data-admin spellcheck="false" autocapitalize="off" autocorrect="off"
                        value="${escapeHtml(cfg.cloudflare_account_id || '')}"
                        placeholder="32-char hex (from dash.cloudflare.com)">
             </label>
@@ -1729,25 +2125,78 @@ const SettingsPage = {
         return cfg.api_key_provider || (cfg.has_api_key ? cfg.provider : '') || '';
     },
 
-    // True when the saved model isn't in the curated list — the dropdown
-    // should show "Custom…" pre-selected and reveal the text input.
-    _isCustomModel(spec, model) {
+    // The models each provider offers, as the provider listed them this
+    // session (#254): there is no built-in list and no built-in default.
+    // Keyed by provider; filled by _loadAiModels once a key is saved.
+    _aiModels: {},
+
+    // True when the chosen model isn't on the provider's list (a model the
+    // provider has since dropped, or one typed by hand): the dropdown shows
+    // "Custom…" and the text box holds it.
+    _isCustomModel(models, model) {
         if (!model) return false;
-        const choices = (spec && spec.model_choices) || [];
-        return choices.indexOf(model) === -1;
+        return !(models || []).some(m => m.id === model);
     },
 
-    _modelOptionsHtml(spec, currentModel) {
-        const choices = (spec && spec.model_choices) || [];
-        const isCustom = SettingsPage._isCustomModel(spec, currentModel);
-        // Default to default_model if no choice saved yet; otherwise echo
-        // the saved one (or pick Custom if it's not in the list).
-        const selected = currentModel || (spec && spec.default_model) || '';
-        const opts = choices.map(m =>
-            `<option value="${escapeHtml(m)}"${m === selected && !isCustom ? ' selected' : ''}>${escapeHtml(m)}</option>`
+    // What an empty list says, per provider (gate round 2, NEW-63: one
+    // text for the page showed OpenAI a failure that was Anthropic's)
+    _modelsEmptyText: {},
+
+    _modelOptionsHtml(models, currentModel, emptyText) {
+        models = models || [];
+        const isCustom = SettingsPage._isCustomModel(models, currentModel);
+        const opts = models.map(m =>
+            `<option value="${escapeHtml(m.id)}"${m.id === currentModel ? ' selected' : ''}>${escapeHtml(m.label || m.id)}</option>`
         ).join('');
-        return opts +
+        // Nothing chosen yet: a placeholder, not a guess. Save and Test ask
+        // for a choice; the server does too.
+        const placeholder = `<option value="" disabled${currentModel ? '' : ' selected'}>${models.length ? 'Choose a model…' : (emptyText || 'Enter a key to list models')}</option>`;
+        return placeholder + opts +
             `<option value="__custom__"${isCustom ? ' selected' : ''}>Custom…</option>`;
+    },
+
+    // Ask the provider for its models (GET /api/analytics/ai-models, with
+    // the saved key) and fill the picker, keeping whatever is chosen. A
+    // provider that can't list (a gateway without /models, a bad key) leaves
+    // the typed model and says why.
+    // What the model list is asked with: the provider picked and the key
+    // typed, saved or not (gate round 1, NEW-56 / W-4: a first key could
+    // not reach the list while Save asked for a model and the list for a
+    // saved key). Nothing in it is stored by the list.
+    _modelsRequest(provider) {
+        const val = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+        const body = { provider };
+        const key = val('ai-settings-key');
+        if (key) body.api_key = key;
+        for (const [field, id] of [['cloudflare_account_id', 'ai-settings-cf-account'], ['worker_url', 'ai-settings-worker-url'], ['endpoint_url', 'ai-settings-endpoint-url']]) {
+            if (val(id)) body[field] = val(id);
+        }
+        return body;
+    },
+
+    async _loadAiModels(provider, keepModel) {
+        const sel = document.getElementById('ai-settings-model-select');
+        const custom = document.getElementById('ai-settings-model-custom');
+        const note = document.getElementById('ai-settings-models-note');
+        if (!sel) return;
+        sel.innerHTML = '<option value="" selected disabled>Loading models…</option>';
+        note.textContent = '';
+        try {
+            const res = await API.post('/analytics/ai-models', SettingsPage._modelsRequest(provider));
+            if (res.provider !== provider) return; // the provider changed under the request
+            SettingsPage._aiModels[provider] = res.models || [];
+            SettingsPage._modelsEmptyText[provider] = res.models.length ? '' : 'No models listed — type a model ID';
+            sel.innerHTML = SettingsPage._modelOptionsHtml(res.models, keepModel, SettingsPage._modelsEmptyText[provider]);
+            custom.style.display = sel.value === '__custom__' ? '' : 'none';
+            note.textContent = `${res.models.length} models listed by ${res.provider_label}.`;
+        } catch (err) {
+            SettingsPage._aiModels[provider] = [];
+            SettingsPage._modelsEmptyText[provider] = 'No models listed — type a model ID';
+            sel.innerHTML = SettingsPage._modelOptionsHtml([], keepModel, SettingsPage._modelsEmptyText[provider]);
+            if (!keepModel) sel.value = '__custom__';
+            custom.style.display = '';
+            note.textContent = `Couldn't list models: ${String(err.message || err).replace(/\.$/, '')}. Type a model ID.`;
+        }
     },
 
     _wireAiConfig(cfg) {
@@ -1786,6 +2235,16 @@ const SettingsPage = {
         };
         modelSel.addEventListener('change', syncCustomVisibility);
 
+        // The model the picker holds now: the chosen one, or the typed one.
+        const chosenModel = () =>
+            modelSel.value === '__custom__' ? modelCustom.value.trim() : (modelSel.value || '');
+        // The provider's models, with the key typed or saved for it (#254).
+        const loadModels = () => SettingsPage._loadAiModels(providerSel.value, chosenModel());
+        if (SettingsPage._aiKeyOwner(cfg) === providerSel.value && !SettingsPage._aiModels[providerSel.value]) {
+            loadModels();
+        }
+        document.getElementById('ai-settings-models-refresh').addEventListener('click', loadModels);
+
         providerSel.addEventListener('change', () => {
             const spec = providers.find(p => p.key === providerSel.value) || {};
             hintEl.innerHTML =
@@ -1793,12 +2252,17 @@ const SettingsPage = {
                 (spec.docs_url
                     ? ` &middot; <a href="${escapeHtml(spec.docs_url)}" target="_blank" rel="noopener">Get a key</a>`
                     : '');
-            // Repopulate model dropdown for the new provider — the old
-            // provider's options aren't valid for this one. Reset custom
-            // input too so we don't carry a stale model ID over.
+            // The old provider's models aren't this one's: the picker
+            // empties, and fills from the new provider once it has a key.
+            // Back on the saved provider, the saved model is in the picker
+            // again (gate round 2, NEW-63: a switch away and back lost it,
+            // and the next Save wrote an empty model over it).
+            const back = providerSel.value === cfg.provider ? (cfg.model || '') : '';
+            const known = SettingsPage._aiModels[providerSel.value] || [];
             modelSel.innerHTML =
-                SettingsPage._modelOptionsHtml(spec, spec.default_model || '');
-            modelCustom.value = '';
+                SettingsPage._modelOptionsHtml(known, back, SettingsPage._modelsEmptyText[providerSel.value]);
+            modelCustom.value = back && SettingsPage._isCustomModel(known, back) ? back : '';
+            document.getElementById('ai-settings-models-note').textContent = '';
             syncCustomVisibility();
             cfWrap.style.display = spec.needs_account_id ? '' : 'none';
             workerWrap.style.display = spec.needs_worker_url ? '' : 'none';
@@ -1807,11 +2271,16 @@ const SettingsPage = {
             // key typed for the last provider is not carried to this one.
             document.getElementById('ai-settings-key').value = '';
             syncKeyMark();
+            if (SettingsPage._aiKeyOwner(cfg) === providerSel.value) loadModels();
         });
 
-        const resolveModel = () => {
-            if (modelSel.value === '__custom__') return modelCustom.value.trim();
-            return modelSel.value;
+        const resolveModel = () => chosenModel();
+        // Save and Test need a model (there is no built-in default, #254).
+        const modelChosen = () => {
+            if (resolveModel()) return true;
+            toast('Choose a model first: enter the key, pick one from the list the provider gives, or type a model ID.', 'error');
+            modelSel.focus();
+            return false;
         };
 
         const collectPayload = () => ({
@@ -1844,10 +2313,27 @@ const SettingsPage = {
             });
         }
 
+        // Save takes a key with no model chosen yet: the key is stored, the
+        // provider's models listed, and a choice asked for (gate round 1,
+        // NEW-56 / W-4: Save refused the first key, and only Test got past).
+        // The analyses still need a model; the server says so.
         saveBtn.addEventListener('click', async () => {
+            const needsModel = !resolveModel();
+            const typedKey = !!keyPayload().api_key;
+            // no model and no key typed: a model is what is missing (a save
+            // here wrote an empty model over the saved one — NEW-63)
+            if (needsModel && !typedKey) { modelChosen(); return; }
             try {
                 const updated = await API.put('/analytics/ai-config', { ...collectPayload(), ...keyPayload() });
                 SettingsPage.aiConfigState = updated;
+                if (needsModel) {
+                    Object.assign(cfg, updated);
+                    document.getElementById('ai-settings-key').value = '';
+                    syncKeyMark();
+                    await loadModels();
+                    toast('Key saved. Choose a model from the list, then Save.', 'success');
+                    return;
+                }
                 toast('AI settings saved', 'success');
                 // Re-render to reflect "(saved ✓)" state and clear the key input
                 SettingsPage.loadAiConfig();
@@ -1858,6 +2344,10 @@ const SettingsPage = {
 
         testBtn.addEventListener('click', async () => {
             // Save first so the test uses any just-entered key, then call /test.
+            // A key just entered with no model chosen: save the key, list the
+            // provider's models, and ask for a choice; Test again then tests.
+            const needsModel = !resolveModel();
+            if (needsModel && !keyPayload().api_key) { modelChosen(); return; }
             testRes.textContent = 'Saving…';
             testRes.className = 'ai-settings-test-result';
             try {
@@ -1865,6 +2355,14 @@ const SettingsPage = {
                 Object.assign(cfg, updated);
                 SettingsPage.aiConfigState = updated;
                 syncKeyMark();
+                if (keyPayload().api_key || (needsModel && !SettingsPage._aiModels[providerSel.value])) {
+                    await loadModels();
+                }
+                if (needsModel) {
+                    testRes.textContent = 'Key saved. Choose a model, then Test.';
+                    modelSel.focus();
+                    return;
+                }
             } catch (err) {
                 testRes.textContent = 'Save failed: ' + (err.message || err);
                 testRes.classList.add('ai-test-fail');

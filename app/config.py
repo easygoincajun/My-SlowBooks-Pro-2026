@@ -30,14 +30,6 @@ FORCE_HTTPS = (
 # Two years is the HSTS preload-list minimum (and the value most browsers cache).
 HSTS_MAX_AGE = int(os.getenv("HSTS_MAX_AGE", "63072000"))
 
-# ---- Proxy trust ----
-# X-Forwarded-For is client-controllable on a direct (non-proxied) deploy, so
-# trusting it blindly lets an attacker forge the IP in the login/portal audit
-# trail (and, if a proxy is later added that the limiter trusts, evade rate
-# limits). Only honor XFF when you actually run behind a trusted reverse proxy
-# that sets it. Default off → use the socket peer.
-TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
-
 # ---- Session idle timeout ----
 # Sliding-window inactivity cap on the session cookie. The cookie itself has
 # a 30-day hard expiry; this trims long-lived idle sessions on top of that.

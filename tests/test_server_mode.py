@@ -202,3 +202,160 @@ def test_parent_watcher_exits_when_parent_dies(tmp_path):
             alive = False
             break
     assert not alive, "server child outlived its launcher parent"
+
+
+def test_source_run_starts_the_watched_serve_child(monkeypatch):
+    """From source, start_server() must launch the same --_serve child as
+    the frozen build: that is where the parent watcher lives. It launched a
+    bare `python -m uvicorn`, which has no watcher, so Command-Q orphaned
+    it on the port (#52 fixed only the frozen build)."""
+    spawned = {}
+
+    def fake_popen(cmd, cwd, env, **kwargs):
+        spawned.update(cmd=cmd, env=env)
+
+    monkeypatch.setattr(desktop_launcher, "FROZEN", False)
+    monkeypatch.setattr(desktop_launcher.subprocess, "Popen", fake_popen)
+    desktop_launcher.start_server("sqlite:///x.db", 3123, bind_host="0.0.0.0")
+
+    script = __import__("pathlib").Path(desktop_launcher.__file__).resolve()
+    assert spawned["cmd"] == [sys.executable, str(script), "--_serve"]
+    # _serve() takes its host and port from the environment, not argv
+    assert spawned["env"]["APP_HOST"] == "0.0.0.0"
+    assert spawned["env"]["APP_PORT"] == "3123"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only, like test_parent_watcher_exits_when_parent_dies (#121)",
+)
+def test_source_run_server_dies_with_its_launcher(tmp_path):
+    """Real process pair, end to end: a fake launcher starts the server with
+    start_server(), exactly as a source run does, and is then killed the way
+    Command-Q kills it, with no cleanup. The server must follow it down."""
+    import os as _os
+    import socket
+    import subprocess
+    import time
+    import urllib.request
+
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    db_url = "sqlite:///" + (tmp_path / "books.db").as_posix()
+
+    launcher_script = tmp_path / "launcher.py"
+    launcher_script.write_text(
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(root)!r})\n"
+        "import desktop_launcher\n"
+        f"proc = desktop_launcher.start_server({db_url!r}, {port})\n"
+        "print(proc.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    launcher = subprocess.Popen(
+        [sys.executable, str(launcher_script)],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    server_pid = int(launcher.stdout.readline().strip())
+
+    def alive(pid):
+        try:
+            _os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def healthy():
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/health", timeout=1
+            ) as resp:
+                return resp.status == 200
+        except OSError:
+            return False
+
+    try:
+        # The real server, answering: not a child that died on its own
+        deadline = time.time() + 60
+        while not healthy() and alive(server_pid) and time.time() < deadline:
+            time.sleep(0.25)
+        assert healthy(), "server never came up"
+        # Several poll cycles with the launcher alive: the server stays up
+        time.sleep(1)
+        assert healthy(), "server exited while its launcher lived"
+
+        launcher.kill()  # SIGKILL: no finally, no stop_server()
+        launcher.wait()
+        deadline = time.time() + 10
+        while alive(server_pid) and time.time() < deadline:
+            time.sleep(0.2)
+        assert not alive(server_pid), "server child outlived its launcher"
+    finally:
+        if alive(server_pid):
+            _os.kill(server_pid, 9)
+        if launcher.poll() is None:
+            launcher.kill()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows parent watcher (W-7)")
+def test_parent_watcher_exits_when_parent_dies_on_windows(tmp_path):
+    """Windows (2.22.3 gate, W-7): a launcher ended from Task Manager, or
+    crashed, left the server on its port — the watcher ran on POSIX only
+    and the window-close cleanup never saw TerminateProcess. The same
+    process pair as the POSIX test, with liveness read from tasklist (an
+    os.kill probe is a kill on Windows, #121) and the launcher ended the
+    way End task ends it."""
+    import subprocess
+    import sys as _sys
+    import time
+
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    child_script = tmp_path / "child.py"
+    child_script.write_text(
+        "import os, sys, time\n"
+        f"sys.path.insert(0, {str(root)!r})\n"
+        "import desktop_launcher\n"
+        "desktop_launcher._watch_parent(os.getppid())\n"
+        "time.sleep(30)\n"
+    )
+    parent_script = tmp_path / "parent.py"
+    parent_script.write_text(
+        "import subprocess, sys, time\n"
+        f"p = subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
+        "print(p.pid, flush=True)\n"
+        "time.sleep(30)\n"
+    )
+
+    def alive(pid):
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        return f" {pid} " in out
+
+    parent = subprocess.Popen(
+        [_sys.executable, str(parent_script)], stdout=subprocess.PIPE, text=True
+    )
+    child_pid = int(parent.stdout.readline().strip())
+    try:
+        time.sleep(1.0)
+        assert alive(child_pid), "the child died on its own"
+        parent.kill()  # TerminateProcess: End task, a crash — no cleanup
+        parent.wait()
+        deadline = time.time() + 5
+        while alive(child_pid) and time.time() < deadline:
+            time.sleep(0.2)
+        assert not alive(child_pid), "server child outlived its launcher parent"
+    finally:
+        if alive(child_pid):
+            subprocess.run(
+                ["taskkill", "/PID", str(child_pid), "/F"], capture_output=True
+            )
+        if parent.poll() is None:
+            parent.kill()

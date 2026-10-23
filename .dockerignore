@@ -2,6 +2,7 @@
 .github
 .claude
 .env
+.env.*
 __pycache__
 *.pyc
 *.pyo
@@ -17,3 +18,38 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
+# ---- Runtime secrets & data — Dockerfile does `COPY . .`, so none of this
+# may ride into a shared image. ----
+
+# Auto-generated encryption / signing keys. Copying a developer's keys would
+# bake them into the image and hand them to every pull.
+#   .slowbooks-master.key  -> app/services/crypto.py:61
+#   .slowbooks-session.key -> app/services/auth.py:95
+.slowbooks-master.key
+.slowbooks-session.key
+
+# SQLite company files and their WAL / shared-memory / journal sidecars
+# (desktop mode, plus any left in the tree by local dev). Both top-level and
+# nested, since company files live under a data dir.
+*.db
+*.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+**/*.db
+**/*.sqlite3
+**/*.db-wal
+**/*.db-shm
+**/*.db-journal
+
+# User-uploaded attachments / logos written at runtime (the app recreates the
+# folder and owns it — see the Dockerfile's useradd/mkdir).
+app/static/uploads/
+
+# Local dev server scratch dir and log / coverage artifacts.
+.local-server/
+*.log
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/

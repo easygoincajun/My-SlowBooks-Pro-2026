@@ -16,11 +16,13 @@ from app.database import get_db
 from app.routes.invoices.helpers import (
     _due_date_from_terms,
     _post_invoice_journal,
+    confirm_credit_limit,
     confirm_zero_total,
     opening_status,
     resolve_line_taxable,
 )
-from app.routes._helpers import clamp_pagination
+from app.routes._helpers import clamp_pagination, reject_null_updates
+from app.services.audit import audited_bulk_delete
 from app.models.estimates import Estimate, EstimateLine, EstimateStatus
 from app.models.invoices import Invoice, InvoiceLine
 from app.models.contacts import Customer
@@ -188,7 +190,9 @@ def update_estimate(
     if not estimate:
         raise HTTPException(status_code=404, detail="Estimate not found")
 
-    changes = data.model_dump(exclude_unset=True, exclude={"lines"})
+    changes = reject_null_updates(
+        Estimate, data.model_dump(exclude_unset=True, exclude={"lines"})
+    )
     if changes.get("customer_id") not in (None, estimate.customer_id):
         customer = db.get(Customer, changes["customer_id"])
         if not customer:
@@ -213,7 +217,10 @@ def update_estimate(
         # 2.17.3 exploratory fixes). The customer is the one the estimate
         # has after this edit.
         resolve_line_taxable(db, data.lines, db.get(Customer, estimate.customer_id))
-        db.query(EstimateLine).filter(EstimateLine.estimate_id == estimate_id).delete()
+        # each old line leaves a DELETE event with its amounts (#289)
+        audited_bulk_delete(
+            db, db.query(EstimateLine).filter(EstimateLine.estimate_id == estimate_id)
+        )
         for i, line_data in enumerate(data.lines):
             line = EstimateLine(
                 estimate_id=estimate_id,
@@ -331,6 +338,16 @@ def convert_to_invoice(
         "estimate",
         "converting it",
         question="This estimate adds up to $0.00. Convert it to an invoice anyway?",
+    )
+    from app.services.contact_balances import home_amount
+
+    confirm_credit_limit(
+        db,
+        estimate.customer,
+        home_amount(total, getattr(estimate, "exchange_rate", None)),
+        bool(data and data.allow_over_credit_limit),
+        "invoice",
+        question=None,
     )
 
     invoice_number = next_invoice_number(db)

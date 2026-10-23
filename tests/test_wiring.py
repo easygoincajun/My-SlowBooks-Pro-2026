@@ -272,18 +272,11 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     # public /pay/{token} page (a Jinja template, outside the JS scan).
     ("POST", "/api/payments/{provider_name}/webhook"),
     ("POST", "/api/payments/{provider_name}/create-checkout-session"),
-    ("GET", "/api/qbo/callback"),
-    # The synchronous QBO imports: the page starts a background run
-    # (POST /api/qbo/import-runs, #192). These stay for API clients, share
-    # its one-import-per-company guard, and are listed in docs/setup-qbo.md.
-    ("POST", "/api/qbo/import"),
-    ("POST", "/api/qbo/import/{entity}"),
     # The logo image. Its address IS the company_logo_path setting, which
     # the Settings page and the invoice view put in an <img src> as a value,
     # not a literal the JS scan can see.
     ("GET", "/api/uploads/logo/{file_id}"),
     ("POST", "/api/payroll/gross-up"),
-    ("POST", "/api/payroll/{run_id}/nacha"),
     ("POST", "/api/time-entries/classify"),
     # Legacy: superseded by /api/payroll/forms/* — kept until next major release.
     # Migration tracker in docs/todo.md. (The 1099 summary, the 1099-NEC and
@@ -326,9 +319,6 @@ _INTENTIONAL_BACKEND_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/pto/accruals/year-end-carryover"),
     # DocumentAudit hash-chain viewer/verifier — endpoints ready, the
     # admin UI ("Compliance" tab) is future work (docs/todo.md).
-    ("GET", "/api/document-audits"),
-    ("GET", "/api/document-audits/{audit_id}"),
-    ("GET", "/api/document-audits/verify/{content_hash}"),
 }
 
 

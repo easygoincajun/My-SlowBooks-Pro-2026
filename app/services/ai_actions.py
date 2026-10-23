@@ -207,8 +207,13 @@ ACTIONS: Dict[str, ActionSpec] = {
     "expenses_by_category": ActionSpec(
         key="expenses_by_category",
         label="Expenses by category",
-        category="Vendors & Bills",
-        framing="Vendor bill expenses grouped by expense account for the period.",
+        category="Financial Reports",
+        framing=(
+            "Expenses for the period by account, from the ledger as the Profit & "
+            "Loss counts them: bills when dated (paid or not), expenses, register "
+            "entries, card charges, payroll and journal entries. Not vendor bills "
+            "alone."
+        ),
         uses_period=True,
         runner=_run_expenses_by_category,
     ),

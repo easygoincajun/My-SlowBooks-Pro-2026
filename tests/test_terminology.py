@@ -123,7 +123,10 @@ def test_shell_loads_terms_before_pages():
     html = INDEX.read_text(encoding="utf-8")
     assert html.index("terms.js") < html.index("customers.js")
     app_js = (ROOT / "app/static/js/app.js").read_text(encoding="utf-8")
-    assert "App.loadCompanySettings().then(" in app_js
+    # the first page waits for the settings (and the sign-in's state) since 2.24.0
+    assert (
+        "Promise.all([App.loadCompanySettings(), App.initSystemInfo()]).then(" in app_js
+    )
     assert "App.applyTerminology();" in app_js
 
 
@@ -198,7 +201,6 @@ def test_setup_accounts_is_idempotent_and_yields_taken_numbers(client, seed_acco
 # "class code" on employees.
 LEAVE_ALONE = {
     "iif.js",
-    "qbo.js",
     "ocr.js",
     "ocr_canvas.js",
     "migration.js",
@@ -323,7 +325,6 @@ def test_invoice_and_receipt_pdfs_are_named_in_the_company_words(
 _SWEEP_EXEMPT = {
     # interop, tax, HR and shell files keep their own vocabulary by design
     "iif.js",
-    "qbo.js",
     "ocr.js",
     "ocr_receipts.js",
     "migration.js",

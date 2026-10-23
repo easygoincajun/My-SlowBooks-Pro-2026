@@ -71,6 +71,8 @@ const CreditMemosPage = {
                 ${cm.status !== 'void' ? `<button data-destructive class="btn btn-danger" onclick="CreditMemosPage.void(${cm.id})">Void</button>` : ''}
                 <button class="btn btn-secondary" onclick="closeModal()">Close</button>
             </div>`);
+        // the document's own address, so Back returns to the list and the Open group lists it (NEW-164)
+        if (App.documentAddress) App.documentAddress(`#/credit-memos/${Number(id)}`);
     },
 
     async void(id) {
@@ -148,7 +150,7 @@ const CreditMemosPage = {
         return `<tr data-cmline="${idx}">
                 <td><select class="line-item" onchange="CreditMemosPage.itemSelected(${idx})"><option value="">--</option>${typeof ItemQuickAdd !== 'undefined' ? ItemQuickAdd.option() : ''}${itemOpts}</select></td>
                 <td><input class="line-desc"></td>
-                <td><input class="line-qty" type="number" step="0.01" value="1" oninput="CreditMemosPage.recalc()"></td>
+                <td><input class="line-qty" type="number" step="0.0001" value="1" oninput="CreditMemosPage.recalc()"></td>
                 <td><input class="line-rate" type="number" step="0.0001" min="0" value="0" oninput="CreditMemosPage.recalc()"></td>
                 <td style="text-align:center"><input type="checkbox" class="line-taxable" title="Sales tax applies to this line" checked onchange="CreditMemosPage.recalc()"></td>
                 <td class="col-amount line-amount">$0.00</td>
@@ -233,8 +235,8 @@ const CreditMemosPage = {
         if (!(await ClassWarn.ok(form))) return;
         try {
             // $0.00 asks "Save it anyway?" first (SalesLines.sendAllowingZero)
-            const saved = await SalesLines.sendAllowingZero(allow =>
-                API.post('/credit-memos', allow ? { ...data, allow_zero_total: true } : data));
+            const saved = await SalesLines.sendAllowingZero(flags =>
+                API.post('/credit-memos', { ...data, ...flags }));
             if (!saved) return;
             toast('Credit memo created');
             closeModal();

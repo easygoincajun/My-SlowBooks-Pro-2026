@@ -2,9 +2,12 @@
 # System info + update check
 #
 # /api/system tells the frontend what it's running (version, desktop mode);
-# /api/system/update-check compares against the published latest.json on
-# dl.slowbookspro.com on desktop installs, unless the operator turns it off
-# with SLOWBOOKS_UPDATE_CHECK=0.
+# /api/system/update-check compares against this fork's latest GitHub
+# release on desktop installs, unless the operator turns it off with
+# SLOWBOOKS_UPDATE_CHECK=0. The fork's installer installs over the upstream
+# app (same AppId), so it must never be offered the upstream build: that
+# would drop the fork's own features. The upstream latest.json shape is
+# still understood, should LATEST_URL ever point at one.
 #
 # The check is proxied through the backend (not fetched from the browser)
 # so the manifest host needs no CORS relationship with the app, and it is
@@ -13,6 +16,8 @@
 # ============================================================================
 
 import os
+import platform
+import sys
 import time
 
 import httpx
@@ -22,7 +27,9 @@ from app import __version__
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
-LATEST_URL = "https://dl.slowbookspro.com/latest.json"
+LATEST_URL = (
+    "https://api.github.com/repos/easygoincajun/My-SlowBooks-Pro-2026/releases/latest"
+)
 _CHECK_TTL_SECONDS = 12 * 60 * 60
 
 # Process-lifetime cache: the desktop app runs for a session at a time, so
@@ -42,7 +49,7 @@ _OFF = ("0", "false", "no", "off")
 def _update_check_enabled() -> bool:
     """On for desktop installs, so an install on an old version hears about
     the new one; SLOWBOOKS_UPDATE_CHECK=0 in .env turns it off (the request
-    tells dl.slowbookspro.com the install's IP address and version)."""
+    tells GitHub the install's IP address and version)."""
     setting = os.environ.get("SLOWBOOKS_UPDATE_CHECK", "1").strip().lower()
     return _is_desktop() and setting not in _OFF
 
@@ -68,6 +75,47 @@ def _parse(v) -> tuple:
 
 def is_newer(remote: str, local: str) -> bool:
     return _parse(remote) > _parse(local)
+
+
+def _this_macos() -> str:
+    """The running macOS version ("15.1"), or "" anywhere else."""
+    if sys.platform != "darwin":
+        return ""
+    return platform.mac_ver()[0] or ""
+
+
+def runs_here(data: dict) -> bool:
+    """Whether the published release can run on this machine. latest.json
+    may name the lowest macOS it runs on (`macos_minimum`); a Mac below it
+    is not offered an update it could not open. Anywhere else, or with no
+    minimum named, every release runs."""
+    minimum = str(data.get("macos_minimum", "") or "").strip()
+    here = _this_macos()
+    if not minimum or not here:
+        return True
+    return _parse(here) >= _parse(minimum)
+
+
+def manifest(data: dict) -> dict:
+    """The answer as a latest.json manifest. A GitHub release (``tag_name``)
+    gives its version, its Windows installer (else its page) to download,
+    and its page for the notes; a manifest is returned as it is."""
+    if "tag_name" not in data:
+        return data
+    page = str(data.get("html_url", "") or "").strip()
+    installer = next(
+        (
+            str(a.get("browser_download_url", "") or "").strip()
+            for a in data.get("assets") or []
+            if str(a.get("name", "")).lower().endswith(".exe")
+        ),
+        "",
+    )
+    return {
+        "version": str(data.get("tag_name", "")).strip().lstrip("vV"),
+        "download_url": installer or page,
+        "notes_url": page,
+    }
 
 
 @router.get("")
@@ -96,13 +144,21 @@ async def update_check():
         async with httpx.AsyncClient(timeout=6) as client:
             resp = await client.get(
                 LATEST_URL,
-                headers={"User-Agent": f"SlowBooksPro/{__version__}"},
+                headers={
+                    "User-Agent": f"SlowBooksPro/{__version__}",
+                    "Accept": "application/vnd.github+json",
+                },
             )
             resp.raise_for_status()
-            data = resp.json()
+            data = manifest(resp.json())
         remote = str(data.get("version", "")).strip()
         download_url = str(data.get("download_url", "")).strip()
-        if remote and download_url and is_newer(remote, __version__):
+        if (
+            remote
+            and download_url
+            and is_newer(remote, __version__)
+            and runs_here(data)
+        ):
             result = {
                 "update_available": True,
                 "latest_version": remote,

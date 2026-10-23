@@ -1,0 +1,15 @@
+"Sunrise Trailer Sales, Inc.",,,,,,,,,,,,,,,,,8:41 PM
+Transaction Detail by Date,,,,,,,,,,,,,,,,,08/18/26
+"April 9 through August 18, 2026",,,,,,,,,,,,,,,,,Accrual Basis
+,Date,Num,Name,Memo,Item,Item Description,Account,Class,Clr,Split,Qty,Sales Price,Debit,Credit,Amount,Open Balance,Balance
+"Apr 9 - Aug 18, '26",,,,,,,,,,,,,,,,,
+,04/12/26,1031,Alex Vega:Kitchen remodel,,,,Accounts Receivable,,,-SPLIT-,,,"1,350.00",,0.00,0.00,0.00
+,04/12/26,1031,Alex Vega:Kitchen remodel,three doors,Exterior door,,Service Income,,,Accounts Receivable,-3,"400.00",,"1,200.00","-1,200.00",,"-1,200.00"
+,04/12/26,1031,Alex Vega:Kitchen remodel,hang them,Install labor,,Service Income,,,Accounts Receivable,-1.5,100.00,,150.00,-150.00,,"-1,350.00"
+,04/20/26,1032,Bella Cruz,,,,Accounts Receivable,,,-SPLIT-,,,"537.50",,0.00,237.50,"-1,350.00"
+,04/20/26,1032,Bella Cruz,parts,Exterior door,,Service Income,,,Accounts Receivable,-1,500.00,,500.00,-500.00,,"-1,850.00"
+,04/20/26,1032,Dept of Revenue,Sales Tax,SCST,Sales Tax,Sales Tax Payable,,,Accounts Receivable,,7.5%,,37.50,-37.50,,"-1,887.50"
+,05/02/26,1033,Carlos Diaz,,,,Accounts Receivable,,,-SPLIT-,,,"80.00",,0.00,80.00,"-1,887.50"
+,05/02/26,1033,Carlos Diaz,consult,,,Service Income,,,Accounts Receivable,-1,80.00,,80.00,-80.00,,"-1,967.50"
+,05/09/26,7,Dana Ellis,,,,Undeposited Funds,,√,-SPLIT-,,,"60.00",,0.00,,"-1,967.50"
+,05/09/26,7,Dana Ellis,walk-in,,,Service Income,,,Undeposited Funds,-1,60.00,,60.00,-60.00,,"-2,027.50"

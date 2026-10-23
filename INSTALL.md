@@ -88,7 +88,7 @@ administer — no `pg_dump`, no containers, no background services.
 
 ## Option 0A: macOS desktop app
 
-**Recommended for Apple Silicon Macs running macOS 14 or newer.** No Docker,
+**Recommended for Apple Silicon Macs running macOS 15 or newer.** No Docker,
 Python, or database server is required.
 
 1. Download `SlowBooksPro-<version>-macos-arm64.dmg` from the
@@ -146,7 +146,14 @@ Open **http://localhost:3001** in your browser.
 > production transport guards (database TLS, HTTPS redirect). Before you
 > expose it beyond the host, put a TLS proxy in front
 > ([docs/tls-proxy-setup.md](docs/tls-proxy-setup.md)), set `FORCE_HTTPS=true`,
-> add `?sslmode=require` to `DATABASE_URL`, and unset that flag.
+> add `?sslmode=require` to `DATABASE_URL`, and unset that flag. Behind a
+> proxy you must also set `FORWARDED_ALLOW_IPS` to the proxy's address or
+> CIDR, or the login rate limiter and the audit tables both key on the
+> proxy's IP instead of the real client's. uvicorn reads that variable
+> itself and decides the client address once; the older `TRUST_PROXY_HEADERS`
+> knob is retired. With several workers, point `RATE_LIMIT_STORAGE_URI` at a
+> Redis (the client ships with the app; startup refuses to boot when it is
+> unreachable) — see [docs/tls-proxy-setup.md](docs/tls-proxy-setup.md).
 
 > On Windows, **Option 0** avoids all of this (no Docker at all, secret
 > generated for you, opens a desktop window) — prefer it unless you
@@ -183,6 +190,22 @@ Edit `.env`:
 APP_PORT=8080
 ```
 Then `docker compose up` — the app will be at http://localhost:8080.
+
+### Network exposure (defaults are loopback-only)
+
+By default `docker compose up` binds both published ports to `127.0.0.1`, so
+the app (`3001`) and Postgres (`5433`) answer on **this host only**. That keeps
+the dev database — which ships with the default `bookkeeper` password — off the
+LAN. To reach either from another machine, set the matching bind variable in
+`.env` to `0.0.0.0`:
+
+```
+APP_BIND=0.0.0.0        # expose the app (put a TLS proxy in front first)
+POSTGRES_BIND=0.0.0.0   # expose Postgres (set a real POSTGRES_PASSWORD first)
+```
+
+For production, use `docker-compose.prod.yml`, which publishes neither service
+and expects your own TLS-terminating reverse proxy in front.
 
 ### Allowing a different browser origin
 

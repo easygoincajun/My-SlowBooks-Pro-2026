@@ -27,13 +27,16 @@ def _js(name):
 def test_the_page_learns_the_role_from_auth_status():
     app = _js("app.js")
     status = app.index("fetch('/api/auth/status'")
-    assert "if (a.user) App.setRole(a.user.role);" in app[status : status + 400]
+    assert (
+        "if (a.user) App.setRole(a.user.role, a.user.username);"
+        in app[status : status + 400]
+    )
     assert "isReadOnly() { return App.role === 'readonly'; }" in app
 
 
 def test_create_buttons_are_hidden_for_a_read_only_sign_in():
     app = _js("app.js")
-    body = app[app.index("hideWriteControls(root) {") :][:1500]
+    body = app[app.index("hideWriteControls(root) {") :][:2200]
     assert "label.startsWith('+')" in body
     assert "el.classList.contains('btn-primary') && el.closest('.page-header')" in body
     assert "el.classList.add('hidden')" in body
@@ -54,7 +57,14 @@ def test_every_dialog_form_is_locked_except_a_document_picker():
     body = app[app.index("lockForms(root) {") :][:1200]
     assert "form:not([data-readonly-ok])" in body
     assert "el.disabled = true" in body and "form.onsubmit" in body
-    assert "App.READ_ONLY_MESSAGE" in body
+    # the sentence is the read-only one for a read-only sign-in (and the
+    # accountant's for an accountant, #340)
+    assert "App.lockedMessage()" in body
+    assert "if (App.inCopy) return App.COPY_MESSAGE();" in app
+    assert (
+        "return App.isAccountant() ? App.ACCOUNTANT_MESSAGE : App.READ_ONLY_MESSAGE;"
+        in app
+    )
     utils = _js("utils.js")
     modal = utils[utils.index("function openModal(") :][:900]
     assert "window.App.lockForms($('#modal-body'))" in modal
@@ -103,7 +113,6 @@ MARKED = {
         r"data-write><button[^>]*BatchPaymentsPage\.selectAll\(\)",
         r'data-write>\s*<button type="submit" class="btn btn-primary">Apply Batch Payment',
     ],
-    "qbo.js": [r'<form id="qbo-manual-connect" data-write'],
     "banking.js": [
         r'<form onsubmit="BankingPage\.connectSimpleFIN\(event\)" data-write>',
         r'class="review-cat" data-write',

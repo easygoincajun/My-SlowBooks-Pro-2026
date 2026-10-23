@@ -92,11 +92,26 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    url = config.get_main_option("sqlalchemy.url") or ""
+    if url.startswith("sqlite"):
+        # An encrypted company file (#290): the key has to be in hand before
+        # a migration opens the file. The launcher hands it over in
+        # config.attributes (in-process) or SLOWBOOKS_COMPANY_FILE_KEY (a
+        # child process); otherwise it derives from the operator's secret.
+        # A plain file is opened as before.
+        from app.services import company_file
+
+        connectable = company_file.create_sqlite_engine(
+            url,
+            config.attributes.get("company_file_key") or company_file.resolve_key,
+            poolclass=pool.NullPool,
+        )
+    else:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+        )
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

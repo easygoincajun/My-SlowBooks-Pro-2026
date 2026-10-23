@@ -1,0 +1,83 @@
+,Sutehk Realty Group,,,,,,,
+,Journal,,,,,,,
+,All Dates,,,,,,,
+,,,,,,,,
+,Date,Transaction Type,Num,Name,Memo/Description,Account,Debit,Credit
+,01/05/2026,Journal Entry,1,,Opening deposit,Operating Account,=1000.00,
+,,,,,Opening deposit,Opening Balance Equity,,=1000.00
+,,,,,,,=1000.00,=1000.00
+,,,,,,,,
+,01/10/2026,Invoice,1001,Dana Reyes - CUST,Listing commission,Accounts Receivable (A/R),=3500.00,
+,,,,,Listing commission,Commission Income,,=3500.00
+,,,,,Subtotal,,,
+,,,,,Courtesy discount,,=0.00,
+,,,,,,,=3500.00,=3500.00
+,,,,,,,,
+,01/20/2026,Payment,,Dana Reyes - CUST,Payment,Undeposited Funds,=3500.00,
+,,,,,Payment,Accounts Receivable (A/R),,=3500.00
+,,,,,,,=3500.00,=3500.00
+,,,,,,,,
+,01/21/2026,Deposit,,,Deposit,Operating Account,=3500.00,
+,,,,,Deposit,Undeposited Funds,,=3500.00
+,,,,,,,=3500.00,=3500.00
+,,,,,,,,
+,02/02/2026,Check,2001,Print Shop Co,Signs,Office Supplies,=400.00,
+,,,,,Signs,Operating Account,,=400.00
+,,,,,,,=400.00,=400.00
+,,,,,,,,
+,02/09/2026,Expense,,Facebook Ads,Boosted post,Advertising:Facebook,=120.00,
+,,,,,Boosted post,Company Visa,,=120.00
+,,,,,,,=120.00,=120.00
+,,,,,,,,
+,02/15/2026,Check,2002,Local Paper,Quarter page,Advertising,=250.00,
+,,,,,Quarter page,Operating Account,,=250.00
+,,,,,,,=250.00,=250.00
+,,,,,,,,
+,03/01/2026,Deposit,,Sam Ortiz - CUST,Referral,Operating Account,=300.00,
+,,,,,Referral,Commission Income:Referral Fees,,=300.00
+,,,,,,,=300.00,=300.00
+,,,,,,,,
+,03/05/2026,Transfer,,,Earnest money,Escrow,=500.00,
+,,,,,Earnest money,Escrow Held,,=500.00
+,,,,,,,=500.00,=500.00
+,,,,,,,,
+,03/05/2026,Transfer,,,Earnest money returned,Escrow Held,=500.00,
+,,,,,Earnest money returned,Escrow,,=500.00
+,,,,,,,=500.00,=500.00
+,,,,,,,,
+,03/06/2026,Transfer,,,Earnest money,Escrow,=500.00,
+,,,,,Earnest money,Escrow Held,,=500.00
+,,,,,,,=500.00,=500.00
+,,,,,,,,
+,03/08/2026,Check,2003,Print Shop Co,Postcards,Advertising:Postcards,=80.00,
+,,,,,Postcards,Operating Account,,=80.00
+,,,,,,,=80.00,=80.00
+,,,,,,,,
+,03/09/2026,Check,2004,Jackal Print Co,Flyers,Promotional:Flyers,=60.00,
+,,,,,Flyers,Operating Account,,=60.00
+,,,,,,,=60.00,=60.00
+,,,,,,,,
+,06/15/2026,Invoice,1002,Sam Ortiz - CUST,Buyer consultation,Accounts Receivable (A/R),=450.00,
+,,,,,Buyer consultation,Commission Income,,=450.00
+,,,,,,,=450.00,=450.00
+,,,,,,,,
+,06/30/2026,Payment,4417,Sam Ortiz - CUST,Payment,Undeposited Funds,=600.00,
+,,,,,Payment,Accounts Receivable (A/R),,=600.00
+,,,,,,,=600.00,=600.00
+,,,,,,,,
+,08/20/2026,Invoice,1003,Dana Reyes - CUST,Listing commission,Accounts Receivable (A/R),=800.00,
+,,,,,Listing commission,Commission Income,,=800.00
+,,,,,,,=800.00,=800.00
+,,,,,,,,
+,09/02/2026,Invoice,1004,Sam Ortiz - CUST,Market analysis,Accounts Receivable (A/R),=275.00,
+,,,,,Market analysis,Commission Income,,=275.00
+,,,,,,,=275.00,=275.00
+,,,,,,,,
+,09/25/2026,Payment,,Dana Reyes - CUST,Payment,Undeposited Funds,=300.00,
+,,,,,Payment,Accounts Receivable (A/R),,=300.00
+,,,,,,,=300.00,=300.00
+,,,,,,,,
+,10/01/2026,Payment,,Dana Reyes - CUST,Payment,Undeposited Funds,=100.00,
+,,,,,Payment,Accounts Receivable (A/R),,=100.00
+,,,,,,,=100.00,=100.00
+,,,,,,,,

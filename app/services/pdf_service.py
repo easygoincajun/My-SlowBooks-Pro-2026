@@ -142,6 +142,16 @@ def _format_rate(value, code=None):
     return _money(body, d < 0, code)
 
 
+def _format_qty(value):
+    """A line's quantity as the API shows it: two places ("3.00"), or the
+    places it has when finer ("2.125"); quantities are kept to four
+    (2.23.0, NEW-94: the PDFs printed the column raw, which read 2.1250
+    once the column was widened)."""
+    from app.schemas.common import quantity_text
+
+    return quantity_text(value)
+
+
 def _format_tax_percent(value):
     """A document's tax rate (a fraction) as the percent it prints: at least
     two places, up to the four a rate keeps ("8.875", "8.25", "7.00"). The
@@ -177,6 +187,7 @@ def _format_date(value):
 
 _jinja_env.filters["currency"] = _format_currency
 _jinja_env.filters["rate"] = _format_rate
+_jinja_env.filters["qty"] = _format_qty
 _jinja_env.filters["tax_percent"] = _format_tax_percent
 _jinja_env.filters["fdate"] = _format_date
 _jinja_env.globals["document_currency_code"] = document_currency_code
@@ -227,6 +238,18 @@ def render_invoice_html(invoice, company_settings: dict) -> str:
 
 def generate_invoice_pdf(invoice, company_settings: dict) -> bytes:
     return render_pdf(render_invoice_html(invoice, company_settings))
+
+
+def render_deposit_html(deposit: dict, company_settings: dict) -> str:
+    """A deposit slip (#260): the bank account, the date, each check or
+    payment the deposit took (who, number, amount) and the total, for the
+    envelope that walks to the bank. `deposit` is the deposit detail as
+    GET /api/deposits/{id} answers it."""
+    return _render("deposit_pdf.html", company_settings, deposit=deposit)
+
+
+def generate_deposit_pdf(deposit: dict, company_settings: dict) -> bytes:
+    return render_pdf(render_deposit_html(deposit, company_settings))
 
 
 def generate_credit_memo_pdf(credit_memo, company_settings: dict) -> bytes:

@@ -86,3 +86,41 @@ def test_a_name_never_overwrites_or_escapes_the_folder(
     assert r.status_code == 200, r.text
     assert (books.backups / r.json()["filename"]).exists()
     assert not (tmp_path / "outside.db").exists()
+
+
+# An encrypted company's backups have no SQLite header (#290): its own are
+# taken, one under another key is refused, and a plain company takes neither.
+
+KEY = bytes(range(32))
+
+
+def _encrypted(books, monkeypatch, tmp_path, key=KEY):  # noqa: F811
+    from app.services import company_file
+
+    company_file.convert(books.live, KEY, encrypt=True)
+    monkeypatch.setattr(company_file, "active_path", lambda: books.live)
+    monkeypatch.setenv(company_file.KEY_ENV, KEY.hex())
+    path = tmp_path / "encrypted-backup.db"
+    _make_books(path, "Harbor Light Bakery", "from the drive", revision=_head())
+    company_file.convert(path, key, encrypt=True)
+    return path.read_bytes()
+
+
+def test_an_encrypted_companys_own_backup_is_taken(
+    books, client, tmp_path, monkeypatch  # noqa: F811
+):
+    data = _encrypted(books, monkeypatch, tmp_path)
+    assert not data.startswith(b"SQLite format 3")
+    r = _upload(client, "harbor-light-bakery_20260101_120000.db", data)
+    assert r.status_code == 200, r.text
+    assert (books.backups / r.json()["filename"]).read_bytes() == data
+
+
+def test_a_backup_under_another_key_is_refused(
+    books, client, tmp_path, monkeypatch  # noqa: F811
+):
+    data = _encrypted(books, monkeypatch, tmp_path, key=bytes(range(1, 33)))
+    r = _upload(client, "someone-elses.db", data)
+    assert r.status_code == 400
+    assert "key" in r.json()["detail"]
+    assert [p.name for p in books.backups.iterdir()] == []

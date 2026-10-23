@@ -71,6 +71,12 @@ def _serialize(
         reference=txn.reference or "",
         memo=(debit_line.description or "") if debit_line else "",
         status="void" if voided else "recorded",
+        printable=(
+            not voided
+            and credit_line is not None
+            and credit_line.account is not None
+            and credit_line.account.bank_kind == "bank"
+        ),
     )
 
 

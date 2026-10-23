@@ -3,7 +3,7 @@
  * fetch() layer.
  */
 const API = {
-    async request(method, path, body = null) {
+    async request(method, path, body = null, headers = null) {
         // Set when a change refused for the closing date is sent again with
         // the override password the person typed. Used for that one change
         // only: never kept, never logged.
@@ -12,7 +12,9 @@ const API = {
             const opts = {
                 method,
                 credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
+                // extra headers: an Idempotency-Key names one intended payment,
+                // so a retry after a lost response books it once (#292)
+                headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
             };
             const companyId = localStorage.getItem('slowbooks_company');
             if (companyId) opts.headers['X-Company-Id'] = companyId;
@@ -191,7 +193,7 @@ const API = {
     // Used e.g. by vendors/customers to retry with ?force=true after a
     // duplicate-warning 409.
     get(path)       { return this.request('GET', path); },
-    post(path, data, opts) { return this.request('POST', path + _qs(opts), data); },
+    post(path, data, opts, headers) { return this.request('POST', path + _qs(opts), data, headers); },
     put(path, data, opts)  { return this.request('PUT', path + _qs(opts), data); },
     del(path)       { return this.request('DELETE', path); },
 };

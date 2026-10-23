@@ -39,6 +39,7 @@ class PTORequestStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     DENIED = "denied"
+    CANCELLED = "cancelled"  # withdrawn after the fact; the bank got its hours back
 
 
 class PTOPolicy(Base):
@@ -119,6 +120,13 @@ class PTORequest(Base):
     status = Column(Enum(PTORequestStatus), default=PTORequestStatus.PENDING)
     approver_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
     notes = Column(Text, nullable=True)
+    # What the approval actually took out of the bank, so a cancel puts back
+    # exactly that: the hours that were in the bank (an approval can overdraw
+    # it to zero) and the dollars the relief journal moved. NULL on requests
+    # approved before these columns existed — a cancel then assumes the
+    # request's own hours.
+    hours_drawn = Column(Numeric(10, 2), nullable=True)
+    dollars_relieved = Column(Numeric(12, 2), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

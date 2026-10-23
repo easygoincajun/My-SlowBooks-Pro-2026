@@ -48,6 +48,9 @@ def parse_amount(raw: str) -> Decimal:
     """Money cell → Decimal. Tolerates $, thousands separators, and
     accounting-style parentheses negatives."""
     raw = (raw or "").strip().replace(",", "").replace("$", "")
+    # QuickBooks Online's Excel exports write every figure as formula text
+    # ("=23683.16"), which a sheet-to-CSV pass keeps verbatim.
+    raw = raw.lstrip("=").strip()
     if not raw:
         return Decimal("0")
     negative = raw.startswith("(") and raw.endswith(")")
@@ -144,6 +147,22 @@ def dry_run_bundle(
     journals, gl_errors = parsers["gl"](bundle["gl"])
     errors.extend(gl_errors)
 
+    # A file that parsed to nothing is named — unless its rows were read and
+    # refused one by one (a ledger whose accounts an empty chart does not
+    # list): those errors already say what happened, and "no records were
+    # recognised" beside them blamed a good file (2.23.1 gate, W-1 / NEW-97).
+    for kind, records, kind_errors, label in (
+        ("coa", accounts, coa_errors, "chart of accounts"),
+        ("gl", journals, gl_errors, "general ledger"),
+    ):
+        if not records and not kind_errors:
+            header = (bundle[kind].lstrip("\ufeff").splitlines() or [""])[0]
+            errors.append(
+                f"No {label} records were recognised in the {source_label} file. "
+                f"Check that the export contains data and the expected columns. "
+                f"The file's header row is: {header[:300]}"
+            )
+
     known = {a["name"].lower() for a in accounts}
     known |= {strip_code_suffix(a["name"]) for a in accounts}
     known |= {a.name.lower() for a in db.query(Account).all()}
@@ -213,6 +232,14 @@ def dry_run_bundle(
     if "tb" in bundle and "tb" in parsers:
         tb, tb_errors = parsers["tb"](bundle["tb"])
         errors.extend(tb_errors)
+        if not tb:
+            header = (bundle["tb"].lstrip("\ufeff").splitlines() or [""])[0]
+            errors.append(
+                f"No trial balance records were recognised in the {source_label} "
+                f"file, so balances could not be verified. Check that the export "
+                f"contains data and the expected columns. "
+                f"The file's header row is: {header[:300]}"
+            )
         residuals = []
         for name, expected in tb.items():
             got = simulated.get(name, Decimal("0"))
@@ -246,14 +273,19 @@ def dry_run_bundle(
                         f"Trial balance mismatch for {name!r}: GL nets "
                         f"{_q(tb[name] - diff)}, trial balance says {_q(tb[name])}"
                     )
-    else:
+    elif not bundle.get("tb_set_aside"):
+        # A dialect that set the trial balance aside (one on the cash basis,
+        # beside an accrual journal) has said so in a note of its own.
         warnings.append("No trial balance file supplied — balance verification skipped")
 
+    existing = {a.name.lower() for a in db.query(Account).all()}
     return {
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
         "accounts": len(accounts),
+        # the chart's accounts not in the books yet: what an import would make
+        "new_accounts": len([a for a in accounts if a["name"].lower() not in existing]),
         "journals": len(journals),
         "duplicate_journals": len(duplicates),
         "opening_balances": opening_balances,
@@ -281,6 +313,13 @@ def run_import_bundle(
             account_type=spec["type"],
             description=spec["description"],
         )
+        # A dialect may say what kind of account it is (a bank, a card) and
+        # whose sub-account it is ("Parent:Child", the parent listed first).
+        if spec.get("bank_kind"):
+            acct.bank_kind = spec["bank_kind"]
+        parent_name = (spec.get("parent") or "").lower()
+        if parent_name and parent_name in by_name:
+            acct.parent_id = by_name[parent_name].id
         # Source-system codes can collide with the seeded chart's numbers —
         # the name stays authoritative; drop the code rather than fail.
         if spec["code"] and (

@@ -1,0 +1,8 @@
+,Sutehk Realty Group,,,,,,,,
+,General Ledger,,,,,,,,
+,All Dates,,,,,,,,
+,,,,,,,,,
+,Date,Transaction Type,Num,Name,Memo/Description,Account,Debit,Credit,Balance
+,Operating Account,,,,,,,,
+,01/05/2026,Journal Entry,1,,Opening deposit,Operating Account,=1000.00,,=1000.00
+,Total for Operating Account,,,,,,=1000.00,,

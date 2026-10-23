@@ -1,4 +1,4 @@
-"""Drift guard for the IIF/QBO type correspondences in iif_common/qbo_common.
+"""Drift guard for the IIF type correspondences in iif_common.
 
 The import and export directions of each format used to live in separate
 modules with no shared source of truth; nothing failed if one side changed
@@ -18,12 +18,6 @@ from app.services.iif_common import (
     IIF_TO_ITEM_TYPE,
     account_to_iif_type,
     item_to_iif_type,
-)
-from app.services.qbo_common import (
-    ACCOUNT_TYPE_TO_QBO,
-    ITEM_TYPE_TO_QBO,
-    QBO_TO_ACCOUNT_TYPE,
-    QBO_TO_ITEM_TYPE,
 )
 
 
@@ -75,26 +69,3 @@ def test_iif_item_type_round_trips(itype, expected_back):
     iif_type = item_to_iif_type(_item(itype))
     assert iif_type in IIF_TO_ITEM_TYPE, f"export emits unknown item type {iif_type}"
     assert IIF_TO_ITEM_TYPE[iif_type] == expected_back
-
-
-def test_qbo_account_type_round_trips():
-    assert set(ACCOUNT_TYPE_TO_QBO) == set(AccountType), "every enum must export"
-    for atype, (qbo_type, _subtype) in ACCOUNT_TYPE_TO_QBO.items():
-        assert qbo_type in QBO_TO_ACCOUNT_TYPE, f"export emits unknown {qbo_type}"
-        assert QBO_TO_ACCOUNT_TYPE[qbo_type] == atype
-
-
-@pytest.mark.parametrize(
-    "itype,expected_back",
-    [
-        (ItemType.SERVICE, ItemType.SERVICE),
-        (ItemType.PRODUCT, ItemType.PRODUCT),
-        (ItemType.MATERIAL, ItemType.MATERIAL),
-        # Lossy: QBO has no labor item type; exports as Service.
-        (ItemType.LABOR, ItemType.SERVICE),
-    ],
-)
-def test_qbo_item_type_round_trips(itype, expected_back):
-    qbo_type = ITEM_TYPE_TO_QBO[itype]
-    assert qbo_type in QBO_TO_ITEM_TYPE, f"export emits unknown {qbo_type}"
-    assert QBO_TO_ITEM_TYPE[qbo_type] == expected_back

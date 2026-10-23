@@ -38,7 +38,7 @@ from app.services.settings_service import (
 CANARIES = {
     "smtp_password": "hunter2-CANARY",
     "stripe_secret_key": "sk_live_CANARY",
-    "qbo_refresh_token": "qbo-CANARY",
+    "square_access_token": "sq-CANARY",
     "simplefin_access_url": "https://CANARY@simplefin.example/x",
 }
 
@@ -182,7 +182,7 @@ def test_the_acknowledgment_template_cannot_read_a_secret(
     _set_template(
         db_session,
         ACK_TEMPLATE_NAME,
-        "<p>{{ company.smtp_password }}|{{ company.qbo_refresh_token }}|{{ company }}</p>",
+        "<p>{{ company.smtp_password }}|{{ company.square_access_token }}|{{ company }}</p>",
     )
     cust = client.post(
         "/api/customers", json={"name": "Donor", "email": "d@e.com"}

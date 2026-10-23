@@ -43,7 +43,7 @@ const buttons = [
   ['Print', "window.open('/api/invoices/7/print-preview','_blank')"], ['Duplicate', 'InvoicesPage.duplicate(7)'],
   ['Mark Sent', 'InvoicesPage.markSent(7)'], ['Void Invoice', 'InvoicesPage.void(7)'],
   ['Edit', 'InvoicesPage.showForm(7)'], ['Close', 'closeModal()'], ['View', 'InvoicesPage.view(7)'],
-  ['Export All', 'IIFPage.exportAll()'], ['Export to QBO', 'QBOPage.exportAll()'],
+  ['Export All', 'IIFPage.exportAll()'], ['Import', 'IIFPage.importFile()'],
 ].map(([l, o]) => button(l, o));
 // an invoice row: View and Edit side by side; a vendor row: Edit alone
 const row = { querySelectorAll: () => [buttons[8], buttons[6]] };

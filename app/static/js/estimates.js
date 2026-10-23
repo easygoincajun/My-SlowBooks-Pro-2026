@@ -74,8 +74,9 @@ const EstimatesPage = {
         } catch (err) { /* the server still decides the conversion */ }
         try {
             // an estimate for $0.00 asks before it becomes a $0.00 invoice
-            const inv = await SalesLines.sendAllowingZero(allow =>
-                API.post(`/estimates/${id}/convert`, allow ? { allow_zero_total: true } : undefined));
+            const inv = await SalesLines.sendAllowingZero(flags =>
+                API.post(`/estimates/${id}/convert`, Object.keys(flags).length ? flags : undefined),
+                InvoicesPage._overLimitOk ? { allow_over_credit_limit: true } : {});
             if (!inv) return;
             toast(`Created ${T('Invoice')} #${inv.invoice_number}`);
             // another customer's job stored on the estimate was left off
@@ -209,7 +210,7 @@ const EstimatesPage = {
             <td><input class="line-desc" value="${escapeHtml(line.description || '')}"></td>
             ${CostCodes.cellHtml('line-cost-code', line.cost_code_id || null)}
             <td><input class="line-unit-cost" type="number" step="0.01" value="${line.unit_cost ?? ''}" placeholder="cost" title="Unit cost (budget side); rate is what you charge"></td>
-            <td><input class="line-qty" type="number" step="0.01" value="${line.quantity || 1}" oninput="EstimatesPage.recalc()"></td>
+            <td><input class="line-qty" type="number" step="0.0001" value="${line.quantity || 1}" oninput="EstimatesPage.recalc()"></td>
             <td><input class="line-rate" type="number" step="0.0001" min="0" value="${Number(line.rate) || 0}" oninput="EstimatesPage.recalc()"></td>
             <td style="text-align:center"><input type="checkbox" class="line-taxable" title="Sales tax applies to this line" ${line.is_taxable === false ? '' : 'checked'} onchange="EstimatesPage.recalc()"></td>
             <td class="col-amount line-amount">${formatCurrency((line.quantity||1) * (line.rate||0))}</td>

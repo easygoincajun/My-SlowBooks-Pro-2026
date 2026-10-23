@@ -26,6 +26,7 @@ from tests.test_theme_contrast import (  # noqa: E402,F401  (the fixtures)
     _visit,
     below_threshold,
     browser_fixture,
+    new_page,
     company_fixture,
     settle,
     sweep_of,
@@ -478,7 +479,7 @@ def test_the_pdf_window_meets_aa_in_both_colour_schemes(browser):
         src="about:blank",
         open_label="Open in Preview",
     )
-    page = browser.new_page(viewport={"width": 1100, "height": 700})
+    page = new_page(browser, viewport={"width": 1100, "height": 700})
     swept = {}
     try:
         page.set_content(html)

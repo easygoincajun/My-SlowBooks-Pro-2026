@@ -448,34 +448,32 @@ def get_expenses_by_category(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Get total expenses grouped by account/category."""
-    q = db.query(BillLine).join(BillLine.bill).join(BillLine.account)
+    """Get total expenses grouped by account/category — from the ledger
+    (v2.22.3, #281): everything posted to expense and cost-of-goods
+    accounts, bills when dated, expenses, register entries, card charges,
+    payroll and journal entries, as the Profit & Loss counts them. It read
+    bill lines alone, so a bank-fed, journal-entry company got an empty
+    answer. The same query the Analytics page uses."""
+    from app.services.analytics import AnalyticsEngine, account_label
 
+    sd = ed = None
     if start_date:
         try:
             sd = datetime.fromisoformat(start_date).date()
-            q = q.filter(Bill.date >= sd)
         except (ValueError, TypeError):
             pass
-
     if end_date:
         try:
             ed = datetime.fromisoformat(end_date).date()
-            q = q.filter(Bill.date <= ed)
         except (ValueError, TypeError):
             pass
 
-    bill_lines = q.all()
     expenses_by_category = {}
-    for bl in bill_lines:
-        category_name = (
-            f"{bl.account.account_number or ''} {bl.account.name}"
-            if bl.account
-            else "Unclassified"
-        )
+    for number, name, amount in AnalyticsEngine(db).expenses_by_account(sd, ed):
+        category_name = account_label(number, name)  # as the page names it
         expenses_by_category[category_name] = _to_float(
-            (Decimal(expenses_by_category.get(category_name, 0)) or 0)
-            + (Decimal(bl.amount or 0) or 0)
+            Decimal(str(expenses_by_category.get(category_name, 0)))
+            + Decimal(str(amount))
         )
 
     return {

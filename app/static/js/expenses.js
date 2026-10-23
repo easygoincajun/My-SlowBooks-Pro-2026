@@ -15,7 +15,7 @@ const ExpensesPage = {
         let html = `
             <div class="page-header">
                 <h2>Expenses</h2>
-                <button class="btn btn-primary" onclick="ExpensesPage.showForm()">+ Enter Expense</button>
+                <button class="btn btn-primary" ${App.shortcutAttrs('E', 'Enter Expense')} onclick="ExpensesPage.showForm()">+ Enter Expense</button>
             </div>`;
 
         if (expenses.length === 0) {
@@ -68,7 +68,7 @@ const ExpensesPage = {
         // 5100 Materials Cost as often as against an expense (W-L18).
         const expenseAccts = PurchaseAccounts.filter(accounts);
         const paidFrom = ExpensesPage.paidFromAccounts(accounts);
-        const acctOpt = a => `<option value="${a.id}">${escapeHtml(a.account_number || '')} - ${escapeHtml(a.name)}</option>`;
+        const acctOpt = a => `<option value="${a.id}">${accountLabel(a)}</option>`;
         const checking = paidFrom.find(a => /checking/i.test(a.name || '')) || paidFrom[0];
 
         openModal('Enter Expense', `
@@ -241,9 +241,11 @@ const ExpensesPage = {
                 </div>
             </div>
             <div class="form-actions">
+                ${x.printable ? `<button type="button" class="btn btn-secondary" onclick="window.open('/api/checks/print?transaction_id=${x.id}','_blank')">Print Check</button>` : ''}
                 ${isVoid ? '' : `<button data-destructive type="button" class="btn btn-danger" onclick="ExpensesPage.void(${x.id})">Void</button>`}
                 <button type="button" class="btn btn-secondary" onclick="closeModal()">Close</button>
             </div>`);
+        if (App.documentAddress) App.documentAddress(`#/expenses/${Number(id)}`);  // the document's own address (NEW-164)
         ExpensesPage.loadAttachments(x.id);
     },
 

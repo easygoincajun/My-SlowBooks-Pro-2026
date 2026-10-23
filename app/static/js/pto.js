@@ -35,6 +35,7 @@ const PTOPage = {
         }
 
         // --- Requests section ---
+        this._requests = requests;
         let requestsBody = '';
         if (requests.length === 0) {
             requestsBody = '<tr><td colspan="7"><em>No PTO requests on file</em></td></tr>';
@@ -47,6 +48,11 @@ const PTOPage = {
                 const rejectBtn = isPending
                     ? `<button class="btn btn-sm btn-secondary" onclick="PTOPage.rejectRequest(${r.id})">Reject</button>`
                     : '';
+                // a pending or approved request can be taken back; an
+                // approved one gives the bank its hours back
+                const cancelBtn = (isPending || r.status === 'approved')
+                    ? `<button class="btn btn-sm btn-secondary" onclick="PTOPage.cancelRequest(${r.id})">Cancel</button>`
+                    : '';
                 requestsBody += `<tr>
                     <td>${escapeHtml(r.employee_name || String(r.employee_id))}</td>
                     <td>${formatDate(r.start_date)}</td>
@@ -54,7 +60,7 @@ const PTOPage = {
                     <td class="amount">${r.hours}</td>
                     <td>${escapeHtml(r.pto_type)}</td>
                     <td>${statusBadge(r.status)}</td>
-                    <td class="actions">${approveBtn}${rejectBtn}</td>
+                    <td class="actions">${approveBtn}${rejectBtn}${cancelBtn}</td>
                 </tr>`;
             }
         }
@@ -272,6 +278,28 @@ const PTOPage = {
         try {
             await API.post(`/pto/requests/${id}/reject`, {});
             toast('Request rejected');
+            App.navigate('#/hr/pto');
+        } catch (err) { toast(err.message, 'error'); }
+    },
+
+    async cancelRequest(id) {
+        const r = (this._requests || []).find(x => x.id === id) || {};
+        let question = 'Cancel this request?';
+        if (r.status === 'approved') {
+            // what the approval took is what goes back — a request approved
+            // before the draw was recorded falls back to its own hours
+            const back = r.hours_drawn == null ? r.hours : r.hours_drawn;
+            const hours = `${back} ${Number(back) === 1 ? 'hour goes' : 'hours go'}`;
+            // today in the reader's own calendar, not UTC's (NEW-65)
+            const passed = r.start_date && r.start_date < todayISO();
+            question = passed
+                ? `These dates have already passed. Cancel anyway? ${hours} back into the bank and the relief journal is reversed.`
+                : `Cancel this approved request? ${hours} back into the bank.`;
+        }
+        if (!confirm(question)) return;
+        try {
+            await API.post(`/pto/requests/${id}/cancel`, {});
+            toast('Request cancelled');
             App.navigate('#/hr/pto');
         } catch (err) { toast(err.message, 'error'); }
     },

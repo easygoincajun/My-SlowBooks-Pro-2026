@@ -10,10 +10,13 @@ separate download, free either way.
 - One Windows PC hosts the books; everyone else uses a **browser** —
   nothing to install on the other computers.
 - **Users and roles**: admin (everything), bookkeeper (daily books, no
-  admin functions), read-only (reports and lookups). **HR and payroll are
+  admin functions), accountant (reads everything, the audit log included,
+  and posts journal entries only — an outside accountant's sign-in, see
+  [working-with-your-accountant.md](working-with-your-accountant.md)),
+  read-only (reports and lookups). **HR and payroll are
   admin functions** — pay runs, pay stubs, W-2/941 forms, direct-deposit
   accounts, portal tokens, benefits, garnishments, onboarding paperwork and
-  employee records are refused to the other two roles, reads included; the
+  employee records are refused to the other three roles, reads included; the
   employee list stays visible to them as a directory (names, activity,
   work state) with pay, tax elections and addresses blanked. Time entries
   and time off remain daily books.
@@ -75,9 +78,63 @@ trusted networks.
    second user exists, the login screen gains a username field and the
    header reads **SERVER EDITION**.
 3. Roles are enforced server-side: a read-only user physically cannot
-   post an entry; a bookkeeper cannot touch Settings, Users, backups, or
-   migrations. The last active admin can never be locked out — the app
-   refuses to demote or deactivate them.
+   post an entry; an accountant can post and void their own journal
+   entries and nothing else; a bookkeeper cannot touch Settings, Users,
+   backups, or migrations, and cannot connect, remap or disconnect a bank
+   feed (those store a credential and wire the books, so they are the
+   administrator's) — but a bookkeeper does run the day-to-day syncs on a
+   feed the administrator has connected. The last active admin can never be
+   locked out — the app refuses to demote or deactivate them.
+4. **Invite your accountant** (Settings → Users) makes a sign-in with a
+   one-time password and shows what to send, once: the address, the username
+   and the password, each with a Copy button of its own. They choose their own
+   password at the first sign-in and nothing else opens until they do. Give the sign-in an end date if the
+   engagement has one: past that day the sign-in is refused with the date,
+   and you can extend it from the Users list, which also shows each
+   person's last sign-in. An administrator's password reset works the same
+   way: the new password is for one use.
+
+## Several companies on one server
+
+One host serves every company in its list. A bookkeeper who keeps a small
+business's books and a nonprofit's signs in to either from the same address,
+and two people can work in two companies at the same time.
+
+- **The sign-in screen asks which company.** It lists the companies by name
+  (names only, like the usernames, and only on a Server Edition host), then the
+  people in the chosen company.
+- **Each company keeps its own people and roles.** A user lives in the company
+  file, the way they always have. To give the bookkeeper both companies, add
+  them under Settings → Users in each one, with whatever role each company
+  gives them: admin in one and bookkeeper in the other is fine.
+- **One sign-in, one click to switch.** Signing in also checks the same
+  username and password against the other companies. The topbar then offers a
+  company switch: each company that sign-in opens is one click away, with that
+  company's role. A company where the person has another password, or no
+  sign-in at all, is marked "(sign in)" and asks for its own password, with
+  the username already chosen. A switch is recorded as a sign-in in that
+  company's own log.
+- **Everything else stays per company:** the audit log, backups (named for the
+  company, and listed only in it), bank feeds, settings and the closing date.
+  The company is still one file: backup is copy, undo is restore.
+- **A new company** made under Companies → + New Company joins the list at
+  once. The administrator who made it opens it (Companies → Open) and sets it
+  up. Nobody else on the network can set up a company nobody has set up yet.
+- **API tokens** belong to the company they were made in. A token's request
+  names that company with an `X-SlowBooks-Company: <file>.db` header; without
+  it, the request goes to the company the server was started for. A token
+  is its own principal, not its maker's session: by design it outlives the
+  deactivation of the user who made it, until it is revoked itself.
+- **Starting the server** brings every company in the list up to this version
+  before it serves any of them. A company that cannot be brought up (a failed
+  migration, or a file encrypted under its own recovery key, which only opens
+  at the SlowBooks Pro window) is named in `launcher.log` and is not served. To
+  serve encrypted company files, set `COMPANY_FILE_ENCRYPTION_SECRET` on the
+  host; every company is opened with it.
+
+Customer pay links, the employee portal and payment-provider webhooks still
+reach only the company the server was started for (the last one opened on the
+host).
 
 ## Honest limits (current release)
 

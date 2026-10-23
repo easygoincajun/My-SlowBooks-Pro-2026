@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import get_db
-from app.routes._helpers import clamp_pagination
+from app.routes._helpers import clamp_pagination, reject_null_updates
 from app.routes.invoices.helpers import _due_date_from_terms
 from app.models.bills import Bill, BillLine, BillStatus
 from app.models.contacts import Vendor
@@ -24,6 +24,7 @@ from app.services.accounting import (
     get_ap_account_id,
     reversing_lines,
 )
+from app.services.audit import audited_bulk_delete
 from app.services.closing_date import check_closing_date
 from app.services.request_utils import content_disposition
 from app.services.purchase_posting import (
@@ -428,7 +429,13 @@ def update_bill(bill_id: int, data: BillUpdate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Cannot edit a voided bill")
     check_closing_date(db, bill.date)
 
-    update_data = data.model_dump(exclude_unset=True, exclude={"lines"})
+    # The edit form sends a cleared number as null; the generate step below
+    # fills it in, so it is the one NOT NULL column null may reach.
+    update_data = reject_null_updates(
+        Bill,
+        data.model_dump(exclude_unset=True, exclude={"lines"}),
+        allow_null=("bill_number",),
+    )
 
     vendor = bill.vendor
     if "vendor_id" in update_data and update_data["vendor_id"] != bill.vendor_id:
@@ -586,7 +593,8 @@ def update_bill(bill_id: int, data: BillUpdate, db: Session = Depends(get_db)):
                         Decimal(str(ln.rate)),
                     )
 
-        db.query(BillLine).filter(BillLine.bill_id == bill.id).delete()
+        # each old line leaves a DELETE event with its amounts (#289)
+        audited_bulk_delete(db, db.query(BillLine).filter(BillLine.bill_id == bill.id))
         db.flush()
         if txn:
             _reverse_and_delete_journal(db, txn.id)

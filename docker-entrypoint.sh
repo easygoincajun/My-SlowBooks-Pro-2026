@@ -44,6 +44,12 @@ if [ -z "${SKIP_BOOT_SELFCHECK:-}" ] && python -c "import pytest" 2>/dev/null; t
 fi
 
 echo "Starting Slowbooks Pro 2026 on port ${APP_PORT:-3001}..."
+
+# Reverse-proxy client-IP trust needs no flag here: uvicorn reads
+# FORWARDED_ALLOW_IPS from the environment on its own (default 127.0.0.1, so
+# set it to the proxy's address or CIDR behind a proxy) and --proxy-headers is
+# on by default. A directly reachable deploy never trusts a spoofable header.
+
 # Multi-worker production mode.
 # uvloop + httptools come from uvicorn[standard], explicit for clarity.
 # APP_WORKERS defaults to 2 (tunable via docker-compose env or .env).

@@ -24,6 +24,7 @@ import logging
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.accounts import Account
@@ -39,8 +40,11 @@ from app.services.accounting import (
     get_default_income_account_id,
     get_undeposited_funds_id,
 )
+from app.services.donor_documents import document_label
+from app.services.terminology import document_reference, terms_from_db
 from app.services.csv_export import strip_formula_guard
 from app.services.iif_import import _find_account
+from app.services.jobs_service import resolve_customer_and_job
 from app.services.safe_errors import DataProblem, safe_message
 
 
@@ -123,33 +127,90 @@ def _cell(row: list[str], cols: dict, name: str) -> str:
     return (row[idx] or "").strip()
 
 
-def _group_receipts(rows, cols, start, errors):
-    """Group data rows into receipts.
+_AR_NAMES = frozenset({"accounts receivable", "a/r", "accounts receivable (a/r)"})
 
-    A row whose Split column is "-SPLIT-" is a receipt header: it carries
-    the customer, date, document number, deposit account, and the total
-    (Debit side). Rows that follow belong to that receipt: a percentage
-    in Sales Price marks a tax row; everything else is a line item with
-    a signed amount of Credit − Debit.
+
+def _ar_names(db: Session | None) -> frozenset:
+    """How the report may name the receivable account: the usual names and
+    this chart's own 1100 (renamed control accounts keep their number)."""
+    names = set(_AR_NAMES)
+    if db is not None:
+        try:
+            from app.services.control_accounts import find
+
+            ar_id = find(db, "1100")
+            acct = db.get(Account, ar_id) if ar_id else None
+            if acct and acct.name:
+                names.add(acct.name.strip().lower())
+        except Exception:  # a chart with no receivable: the usual names stand
+            pass
+    return frozenset(names)
+
+
+def _header_kind(row, cols, ar_names) -> str:
+    """An invoice's header row posts to Accounts Receivable; a sales
+    receipt's to the deposit account. A Type column, when the report has
+    one, says so outright (#291)."""
+    if "Type" in cols:
+        rtype = _cell(row, cols, "Type").strip().lower()
+        if rtype:
+            return "invoice" if rtype == "invoice" else "receipt"
+    return (
+        "invoice"
+        if _cell(row, cols, "Account").strip().lower() in ar_names
+        else "receipt"
+    )
+
+
+def _group_sales(rows, cols, start, errors, ar_names=_AR_NAMES, warnings=None):
+    """Group data rows into sales — receipts and invoices alike.
+
+    A row whose Split column is "-SPLIT-" is a sale's header: it carries
+    the customer (Customer:Job), date, document number, the posting
+    account (the deposit account for a receipt, Accounts Receivable for an
+    invoice), and the total (Debit side); an Open Balance, Paid or Due
+    Date column, when the report has one, is read from it too. Rows that
+    follow belong to that sale: a percentage in Sales Price marks a tax
+    row; everything else is a line item with a signed amount of
+    Credit − Debit.
     """
-    receipts = []
+    sales = []
     current = None
     for n, row in enumerate(rows[start + 1 :], start=start + 2):
         if not _parse_date(_cell(row, cols, "Date")):
             continue  # report group headers/footers/blank rails
         if _cell(row, cols, "Split") == "-SPLIT-":
+            open_cell = (
+                _cell(row, cols, "Open Balance") if "Open Balance" in cols else ""
+            )
+            paid_cell = (
+                _cell(row, cols, "Paid").strip().lower() if "Paid" in cols else ""
+            )
             current = {
                 "row": n,
+                "kind": _header_kind(row, cols, ar_names),
                 "num": _cell(row, cols, "Num"),
                 "date": _parse_date(_cell(row, cols, "Date")),
                 "customer": _cell(row, cols, "Name"),
                 "deposit_account": _cell(row, cols, "Account"),
                 "total": _q(_amount(_cell(row, cols, "Debit"))),
+                "open_balance": _q(_amount(open_cell)) if open_cell != "" else None,
+                "paid_flag": (
+                    True
+                    if paid_cell in ("paid", "yes", "y")
+                    else False if paid_cell in ("unpaid", "no", "n") else None
+                ),
+                "due_date": (
+                    _parse_date(_cell(row, cols, "Due Date"))
+                    if "Due Date" in cols
+                    else None
+                ),
                 "lines": [],
                 "tax_amount": Decimal("0"),
                 "tax_rate": Decimal("0"),
+                "class": _cell(row, cols, "Class"),
             }
-            receipts.append(current)
+            sales.append(current)
             continue
         if current is None:
             errors.append(f"Row {n}: detail line before any receipt header; skipped")
@@ -165,6 +226,27 @@ def _group_receipts(rows, cols, start, errors):
                 current["tax_rate"] = rate
             continue
         qty = abs(_amount(_cell(row, cols, "Qty"))) or Decimal("1")
+        kept = qty.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        if kept != qty and warnings is not None:
+            # quantities are kept to four places (2.23.0, NEW-94)
+            warnings.append(
+                f"{current['num'] or f'row {current['row']}'}: quantity {qty} kept as "
+                f"{kept} (quantities are kept to four decimal places; the line "
+                "amount is the report's, and its unit price is set so that "
+                "quantity × price gives it)"
+            )
+        qty = kept
+        # The unit price: the report's Sales Price when it reproduces the
+        # amount at this quantity, else the amount ÷ the quantity to four
+        # places, so quantity × price is the amount an edit works out
+        # (2.23.0 gate, NEW-95: it was amount ÷ quantity to the cent).
+        listed = _amount(price) if price and not price.endswith("%") else Decimal("0")
+        if listed and _q(qty * abs(listed)) == abs(signed):
+            rate = abs(listed)
+        else:
+            rate = (abs(signed) / qty).quantize(
+                Decimal("0.0001"), rounding=ROUND_HALF_UP
+            )
         current["lines"].append(
             {
                 "description": _cell(row, cols, "Memo")
@@ -173,17 +255,30 @@ def _group_receipts(rows, cols, start, errors):
                 "item_name": _cell(row, cols, "Item"),
                 "account": _cell(row, cols, "Account"),
                 "quantity": qty,
+                "rate": rate,
                 "amount": signed,
+                "class": _cell(row, cols, "Class"),
             }
         )
-    return receipts
+    return sales
 
 
-def _assign_number(db: Session, num: str) -> str:
-    """Use the report's Num when it's free; otherwise SR-prefix and bump.
+def _group_receipts(rows, cols, start, errors, ar_names=_AR_NAMES, warnings=None):
+    """The sales receipts of a report (an invoice's block, which posts to
+    Accounts Receivable, is the invoice importer's)."""
+    return [
+        b
+        for b in _group_sales(rows, cols, start, errors, ar_names, warnings=warnings)
+        if b["kind"] == "receipt"
+    ]
+
+
+def _assign_number(db: Session, num: str, prefix: str = "SR") -> str:
+    """Use the report's Num when it's free; otherwise prefix and bump.
 
     QB sales receipts run their own sequence (often 1, 2, 3 …), which can
-    collide with existing invoice numbers here.
+    collide with existing invoice numbers here; an invoice whose number is
+    taken gets a QB- prefix the same way.
     """
     from app.services.numbering import next_invoice_number
 
@@ -195,13 +290,13 @@ def _assign_number(db: Session, num: str) -> str:
         is not None
     ):
         n = 0
-        candidate = f"SR-{num}"
+        candidate = f"{prefix}-{num}"
         while (
             db.query(Invoice.id).filter(Invoice.invoice_number == candidate).first()
             is not None
         ):
             n += 1
-            candidate = f"SR-{num}-{n}"
+            candidate = f"{prefix}-{num}-{n}"
     return candidate
 
 
@@ -223,7 +318,9 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
         )
         return result
 
-    receipts = _group_receipts(rows, cols, header_idx, result["errors"])
+    receipts = _group_receipts(
+        rows, cols, header_idx, result["errors"], _ar_names(db), result["warnings"]
+    )
     ar_id = get_ar_account_id(db)
     default_income_id = get_default_income_account_id(db)
 
@@ -266,6 +363,7 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                 continue
 
             subtotal = _q(line_sum)
+            header_class_id = _line_classes(db, rec, result["warnings"])  # #308
             invoice = Invoice(
                 invoice_number=_assign_number(db, rec["num"]),
                 customer_id=customer.id,
@@ -280,6 +378,7 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                 total=rec["total"],
                 amount_paid=rec["total"],
                 balance_due=Decimal("0"),
+                class_id=header_class_id,
             )
             db.add(invoice)
             db.flush()
@@ -297,9 +396,10 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                         item_id=item_id,
                         description=ln["description"] or None,
                         quantity=qty,
-                        rate=_q(ln["amount"] / qty) if qty else ln["amount"],
+                        rate=ln["rate"],
                         amount=ln["amount"],
                         line_order=order,
+                        class_id=ln["class_id"],
                     )
                 )
 
@@ -313,6 +413,7 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                         "debit": rec["total"],
                         "credit": Decimal("0"),
                         "description": f"Sales receipt {invoice.invoice_number}",
+                        "class_id": header_class_id,
                     }
                 ]
                 unmatched = []
@@ -335,6 +436,7 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                                 ln["amount"] if ln["amount"] > 0 else Decimal("0")
                             ),
                             "description": ln["description"] or "",
+                            "class_id": ln["class_id"],
                         }
                     )
                 if rec["tax_amount"]:
@@ -357,6 +459,7 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                         journal_lines,
                         source_type="invoice",
                         source_id=invoice.id,
+                        class_id=header_class_id,
                     )
                     invoice.transaction_id = txn.id
                     if unmatched:
@@ -432,6 +535,430 @@ def import_sales_receipt_report(db: Session, csv_text: str) -> dict:
                 f"Receipt {rec.get('num') or rec['row']}: "
                 + safe_message(e, "QB report import")
             )
+
+    db.commit()
+    return result
+
+
+def _status_for(total: Decimal, block: dict):
+    """Open balance, paid amount and status from the report's Open Balance
+    or Paid column; with neither, the invoice is open (#291)."""
+    if block.get("open_balance") is not None:
+        open_bal = _q(min(max(block["open_balance"], Decimal("0")), total))
+    elif block.get("paid_flag") is True:
+        open_bal = Decimal("0")
+    else:
+        open_bal = total
+    paid = _q(total - open_bal)
+    if open_bal == 0 and total > 0:
+        status = InvoiceStatus.PAID
+    elif paid > 0:
+        status = InvoiceStatus.PARTIAL
+    else:
+        status = InvoiceStatus.SENT
+    return open_bal, paid, status
+
+
+# Statuses an invoice cannot take a report's payment in: something is paid
+# on it already, or it is void.
+_SETTLED = {InvoiceStatus.PAID, InvoiceStatus.PARTIAL} | {
+    st for st in InvoiceStatus if "VOID" in st.name
+}
+
+
+def _report_class(db: Session, name: str, warnings=None):
+    """The class a report row names (its Class column): exact, then
+    case-insensitive; a class the books do not have is created, as a
+    customer or a job named in a report is, and the result says so once
+    (2.23.1, #308: the column was read into the index and never used, so
+    a file whose entities are its classes arrived with every posting
+    under Uncategorized)."""
+    from app.models.classes import TxnClass
+    from app.services.classes_service import resolve_class_id
+
+    name = (name or "").strip()
+    if not name:
+        return None
+    class_id = resolve_class_id(db, name)
+    if class_id is not None:
+        return class_id
+    limit = TxnClass.__table__.c.name.type.length
+    if len(name) > limit:
+        raise DataProblem(
+            f"class '{name}' is over the {limit}-character limit; shorten it in "
+            "the report or create it under Settings → Classes first"
+        )
+    row = TxnClass(name=name)
+    db.add(row)
+    db.flush()
+    if warnings is not None:
+        note = (
+            f"Class '{name}' is named in the report and was not in your books: created"
+        )
+        if note not in warnings:
+            warnings.append(note)
+    return row.id
+
+
+def _line_classes(db: Session, block: dict, warnings) -> int | None:
+    """Resolve a sale's header class and each line's (its own, else the
+    header's) onto the block's dicts; returns the header's id."""
+    header_class_id = _report_class(db, block.get("class"), warnings)
+    for ln in block["lines"]:
+        ln["class_id"] = (
+            _report_class(db, ln.get("class"), warnings)
+            if ln.get("class")
+            else header_class_id
+        )
+    return header_class_id
+
+
+def _a(word: str) -> str:
+    """The word with its article: "an invoice", "a pledge" (2.23.0 gate,
+    W-7: the notice switched vocabulary halfway for a nonprofit)."""
+    return ("an " if word[:1].lower() in "aeiou" else "a ") + word
+
+
+def _same_invoice(db: Session, customer_id: int, blk: dict):
+    """The query for the invoice a report row already is here: this
+    customer's, under the report's number as it was kept or renumbered
+    (QB-<num>, QB-<num>-<n>), or — with no number — of the same date and
+    total."""
+    q = db.query(Invoice).filter(
+        Invoice.is_sales_receipt.is_(False), Invoice.customer_id == customer_id
+    )
+    num = blk.get("num")
+    if num:
+        return q.filter(
+            or_(
+                Invoice.invoice_number == num,
+                Invoice.invoice_number == f"QB-{num}",
+                Invoice.invoice_number.like(f"QB-{num}-%"),
+            )
+        )
+    return q.filter(Invoice.date == blk["date"], Invoice.total == blk["total"])
+
+
+def _nothing_paid(db: Session, invoice) -> bool:
+    return (
+        invoice.status not in _SETTLED
+        and _q(Decimal(str(invoice.amount_paid or 0))) == 0
+        and db.query(PaymentAllocation.id).filter_by(invoice_id=invoice.id).first()
+        is None
+    )
+
+
+def _record_report_payment(db, invoice, customer_id, paid_amt, ar_id, ledger_ref):
+    """What QuickBooks showed as paid: one payment, dated the invoice, to
+    Undeposited Funds (the report has no payment dates), applied to the
+    invoice and posted."""
+    uf_id = get_undeposited_funds_id(db)
+    payment = Payment(
+        customer_id=customer_id,
+        date=invoice.date,
+        amount=paid_amt,
+        reference=invoice.invoice_number,
+        deposit_to_account_id=uf_id,
+    )
+    db.add(payment)
+    db.flush()
+    db.add(
+        PaymentAllocation(payment_id=payment.id, invoice_id=invoice.id, amount=paid_amt)
+    )
+    if ar_id and uf_id:
+        txn = create_journal_entry(
+            db,
+            invoice.date,
+            f"QB report import — Payment for {ledger_ref}",
+            [
+                {
+                    "account_id": uf_id,
+                    "debit": paid_amt,
+                    "credit": Decimal("0"),
+                    "description": ledger_ref,
+                },
+                {
+                    "account_id": ar_id,
+                    "debit": Decimal("0"),
+                    "credit": paid_amt,
+                    "description": ledger_ref,
+                },
+            ],
+            source_type="payment",
+            source_id=payment.id,
+        )
+        payment.transaction_id = txn.id
+    return payment
+
+
+def import_invoice_report(db: Session, csv_text: str) -> dict:
+    """Import a Transaction Detail by Date CSV filtered to Invoice (#291):
+    each invoice with its lines (item, quantity, price, tax), its
+    Customer:Job and its number; open, partly paid or paid by the
+    report's Open Balance (or Paid) column, with a payment for what was
+    paid, dated the invoice, deposited to Undeposited Funds. Without that
+    column every invoice comes in open, and the import says so."""
+    result = {
+        "imported": 0,
+        "open": 0,
+        "partly_paid": 0,
+        "paid": 0,
+        "updated": 0,  # already here and open; marked paid from Open Balance
+        "duplicates_skipped": 0,
+        "errors": [],
+        "warnings": [],
+    }
+    rows = _csv_rows(csv_text)
+    header_idx, cols = _find_header(rows)
+    if header_idx is None:
+        result["errors"].append(
+            "Could not find the report's column header row. Export the "
+            "Transaction Detail report with at least these columns: "
+            + ", ".join(REQUIRED_COLUMNS)
+        )
+        return result
+
+    blocks = [
+        b
+        for b in _group_sales(
+            rows, cols, header_idx, result["errors"], _ar_names(db), result["warnings"]
+        )
+        if b["kind"] == "invoice"
+    ]
+    has_paid_column = "Open Balance" in cols or "Paid" in cols
+    ar_id = get_ar_account_id(db)
+    default_income_id = get_default_income_account_id(db)
+    # The import's own messages say the company's word for the report's
+    # document (Invoice, or Pledge on a nonprofit); what the ledger writes
+    # for a document it made says that document's face, as a posting does.
+    words = terms_from_db(db)
+    doc = words("Invoice")
+
+    for blk in blocks:
+        sp = db.begin_nested()
+        try:
+            ref = blk["num"] or f"row {blk['row']}"
+            line_sum = sum((ln["amount"] for ln in blk["lines"]), Decimal("0"))
+            expected = _q(line_sum + blk["tax_amount"])
+            if expected != blk["total"]:
+                sp.rollback()
+                result["errors"].append(
+                    f"{doc} {ref}: lines + tax ({expected}) do not equal the "
+                    f"{doc.lower()} total ({blk['total']}); skipped"
+                )
+                continue
+
+            # Customer:Job — the job is created under the customer on first sight
+            customer, job = resolve_customer_and_job(
+                db, (blk["customer"] or "Walk-In Customer")[:200]
+            )
+            if customer is None:
+                customer = (
+                    db.query(Customer)
+                    .filter(Customer.name == "Walk-In Customer")
+                    .first()
+                )
+                if not customer:
+                    customer = Customer(name="Walk-In Customer", is_active=True)
+                    db.add(customer)
+                    db.flush()
+
+            # Already here? The same source document: this customer's
+            # invoice under the report's number — as it was numbered here,
+            # or as the import renumbered it when the number was taken
+            # (QB-1031, QB-1031-1 …) — or, with no number, the customer's
+            # invoice of that date and total. The number alone matched
+            # another customer's invoice (skipped as a duplicate) and missed
+            # the import's own renumbered copies (imported again on every
+            # upload) (2.23.0 gate, W-2 / NEW-87).
+            dup = _same_invoice(db, customer.id, blk).first()
+            open_bal, paid_amt, status = _status_for(blk["total"], blk)
+            if dup:
+                # An invoice that came in open before the report had its
+                # Open Balance column takes its payment from this upload,
+                # as the warning promised; one with anything paid on it
+                # already, or a different total, is left alone (NEW-84).
+                if (
+                    has_paid_column
+                    and paid_amt > 0
+                    and _nothing_paid(db, dup)
+                    and _q(Decimal(str(dup.total or 0))) == blk["total"]
+                ):
+                    ledger_ref = document_reference(
+                        document_label(dup, words), dup.invoice_number
+                    )
+                    _record_report_payment(
+                        db, dup, customer.id, paid_amt, ar_id, ledger_ref
+                    )
+                    dup.amount_paid = paid_amt
+                    dup.balance_due = open_bal
+                    dup.status = status
+                    db.flush()
+                    sp.commit()
+                    result["updated"] += 1
+                    continue
+                sp.rollback()
+                result["duplicates_skipped"] += 1
+                continue
+
+            subtotal = _q(line_sum)
+            header_class_id = _line_classes(db, blk, result["warnings"])  # #308
+            invoice = Invoice(
+                invoice_number=_assign_number(db, blk["num"], prefix="QB"),
+                customer_id=customer.id,
+                job_id=job.id if job else None,
+                date=blk["date"],
+                due_date=blk["due_date"] or blk["date"],
+                status=status,
+                is_sales_receipt=False,
+                subtotal=subtotal,
+                tax_rate=blk["tax_rate"] if blk["tax_amount"] else Decimal("0"),
+                tax_amount=_q(blk["tax_amount"]),
+                total=blk["total"],
+                amount_paid=paid_amt,
+                balance_due=open_bal,
+                class_id=header_class_id,
+            )
+            db.add(invoice)
+            db.flush()
+            ledger_ref = document_reference(
+                document_label(invoice, words), invoice.invoice_number
+            )
+
+            for order, ln in enumerate(blk["lines"]):
+                item_id = None
+                if ln["item_name"]:
+                    item = db.query(Item).filter(Item.name == ln["item_name"]).first()
+                    if item:
+                        item_id = item.id
+                qty = ln["quantity"]
+                db.add(
+                    InvoiceLine(
+                        invoice_id=invoice.id,
+                        item_id=item_id,
+                        description=ln["description"] or None,
+                        quantity=qty,
+                        rate=ln["rate"],
+                        amount=ln["amount"],
+                        line_order=order,
+                        class_id=ln["class_id"],
+                    )
+                )
+
+            # The invoice's journal: DR A/R for the total; each positive line
+            # credits its account, a contra line debits it; tax credits its account
+            if ar_id and blk["total"] != 0:
+                journal_lines = [
+                    {
+                        "account_id": ar_id,
+                        "debit": blk["total"],
+                        "credit": Decimal("0"),
+                        "description": ledger_ref,
+                        "class_id": header_class_id,
+                    }
+                ]
+                unmatched = []
+                for ln in blk["lines"]:
+                    if ln["amount"] == 0:
+                        continue
+                    acct = _find_account(db, ln["account"])
+                    acct_id = acct.id if acct else default_income_id
+                    if not acct:
+                        unmatched.append(ln["account"] or "(blank)")
+                    if acct_id is None:
+                        continue
+                    journal_lines.append(
+                        {
+                            "account_id": acct_id,
+                            "debit": (
+                                -ln["amount"] if ln["amount"] < 0 else Decimal("0")
+                            ),
+                            "credit": (
+                                ln["amount"] if ln["amount"] > 0 else Decimal("0")
+                            ),
+                            "description": ln["description"] or "",
+                            "class_id": ln["class_id"],
+                        }
+                    )
+                if blk["tax_amount"]:
+                    from app.services.accounting import get_sales_tax_account_id
+
+                    tax_id = get_sales_tax_account_id(db)
+                    if tax_id:
+                        journal_lines.append(
+                            {
+                                "account_id": tax_id,
+                                "debit": Decimal("0"),
+                                "credit": blk["tax_amount"],
+                                "description": "Sales tax",
+                            }
+                        )
+                total_dr = sum(jl["debit"] for jl in journal_lines)
+                total_cr = sum(jl["credit"] for jl in journal_lines)
+                if total_dr == total_cr and total_dr > 0:
+                    txn = create_journal_entry(
+                        db,
+                        invoice.date,
+                        f"QB report import — {ledger_ref}",
+                        journal_lines,
+                        source_type="invoice",
+                        source_id=invoice.id,
+                        class_id=header_class_id,
+                    )
+                    invoice.transaction_id = txn.id
+                    if unmatched:
+                        result["warnings"].append(
+                            f"{doc} {ref}: account(s) not found, posted to "
+                            f"default income: {', '.join(sorted(set(unmatched)))}"
+                        )
+                else:
+                    result["warnings"].append(
+                        f"{doc} {ref}: imported but journal entry could not "
+                        "be created (account mismatch)"
+                    )
+
+            # What QuickBooks showed as paid: one payment, dated the invoice,
+            # to Undeposited Funds (the report has no payment dates)
+            if paid_amt > 0:
+                _record_report_payment(
+                    db, invoice, customer.id, paid_amt, ar_id, ledger_ref
+                )
+
+            db.flush()
+            db.refresh(invoice)
+            from app.services.inventory_hooks import post_sale_for_invoice
+
+            post_sale_for_invoice(db, invoice, txn_date=invoice.date)
+
+            sp.commit()
+            result["imported"] += 1
+            result[
+                (
+                    "paid"
+                    if status == InvoiceStatus.PAID
+                    else "partly_paid" if status == InvoiceStatus.PARTIAL else "open"
+                )
+            ] += 1
+        except Exception as e:
+            sp.rollback()
+            result["errors"].append(
+                f"{doc} {blk.get('num') or blk['row']}: "
+                + safe_message(e, "QB report import")
+            )
+
+    # Said once, after the fact, and only about invoices this upload brought
+    # in: a re-upload that skipped them all said "every invoice came in
+    # open" (2.23.0 gate, NEW-92).
+    if result["imported"] and not has_paid_column:
+        n = result["imported"]
+        result["warnings"].append(
+            f"The report has no Open Balance column, so the {n} "
+            f"{words('invoice' if n == 1 else 'invoices')} that came in "
+            f"{'is' if n == 1 else 'are'} open. Add Open Balance (Customize "
+            f"Report → Display → Columns) and re-upload it: {_a(words('invoice'))} "
+            "here with nothing paid on it is marked paid or partly paid from that "
+            "column — or record the payments here."
+        )
 
     db.commit()
     return result
@@ -520,8 +1047,10 @@ def import_deposit_report(db: Session, csv_text: str) -> dict:
                         f"source account '{acct_name}' not found - import "
                         "your chart of accounts (IIF lists) first"
                     )
-                detail.append((acct, amt, _cell(drow, cols, "Name")))
-            residual = total + sum(a for _, a, _ in detail)
+                detail.append(
+                    (acct, amt, _cell(drow, cols, "Name"), _cell(drow, cols, "Class"))
+                )
+            residual = total + sum(a for _, a, _, _ in detail)
             if abs(residual) > Decimal("0.01"):
                 raise DataProblem(
                     f"block does not balance (residual {residual}); "
@@ -548,21 +1077,30 @@ def import_deposit_report(db: Session, csv_text: str) -> dict:
                 result["duplicates_skipped"] += 1
                 continue
 
+            header_class_id = _report_class(  # the header row's Class (#308)
+                db, _cell(hdr, cols, "Class"), result["warnings"]
+            )
             journal_lines = [
                 {
                     "account_id": bank.id,
                     "debit": total,
                     "credit": Decimal("0"),
                     "description": f"Deposit to {bank.name}",
+                    "class_id": header_class_id,
                 }
             ]
-            for acct, amt, name in detail:
+            for acct, amt, name, class_name in detail:
                 journal_lines.append(
                     {
                         "account_id": acct.id,
                         "debit": amt if amt > 0 else Decimal("0"),
                         "credit": -amt if amt < 0 else Decimal("0"),
                         "description": name or f"Deposit to {bank.name}",
+                        "class_id": (
+                            _report_class(db, class_name, result["warnings"])
+                            if class_name
+                            else header_class_id
+                        ),
                     }
                 )
             create_journal_entry(
@@ -571,6 +1109,7 @@ def import_deposit_report(db: Session, csv_text: str) -> dict:
                 f"Deposit to {bank.name} ({total})",
                 journal_lines,
                 source_type="deposit",
+                class_id=header_class_id,
             )
             sp.commit()
             result["deposits"] += 1
@@ -653,8 +1192,15 @@ def import_check_report(db: Session, csv_text: str) -> dict:
                         f"account '{acct_name}' not found - import your "
                         "chart of accounts (IIF lists) first"
                     )
-                splits.append((acct, signed, _cell(drow, cols, "Memo")))
-            split_sum = sum(a for _, a, _ in splits)
+                splits.append(
+                    (
+                        acct,
+                        signed,
+                        _cell(drow, cols, "Memo"),
+                        _cell(drow, cols, "Class"),
+                    )
+                )
+            split_sum = sum(a for _, a, _, _ in splits)
             if abs(split_sum - total) > Decimal("0.01"):
                 raise DataProblem(
                     f"splits ({split_sum}) do not equal the check total ({total})"
@@ -682,21 +1228,30 @@ def import_check_report(db: Session, csv_text: str) -> dict:
                 result["duplicates_skipped"] += 1
                 continue
 
+            header_class_id = _report_class(  # the header row's Class (#308)
+                db, _cell(hdr, cols, "Class"), result["warnings"]
+            )
             journal_lines = [
                 {
                     "account_id": bank.id,
                     "debit": Decimal("0"),
                     "credit": total,
                     "description": desc,
+                    "class_id": header_class_id,
                 }
             ]
-            for acct, signed, line_memo in splits:
+            for acct, signed, line_memo, class_name in splits:
                 journal_lines.append(
                     {
                         "account_id": acct.id,
                         "debit": signed if signed > 0 else Decimal("0"),
                         "credit": -signed if signed < 0 else Decimal("0"),
                         "description": line_memo or desc,
+                        "class_id": (
+                            _report_class(db, class_name, result["warnings"])
+                            if class_name
+                            else header_class_id
+                        ),
                     }
                 )
             create_journal_entry(
@@ -706,6 +1261,7 @@ def import_check_report(db: Session, csv_text: str) -> dict:
                 journal_lines,
                 source_type="check",
                 reference=num or "",
+                class_id=header_class_id,
             )
             sp.commit()
             result["checks"] += 1
@@ -733,32 +1289,84 @@ def import_check_report(db: Session, csv_text: str) -> dict:
 # ============================================================================
 
 
-def detect_report_type(csv_text: str) -> str | None:
-    """Identify which QB report a CSV is, by column signature."""
+def _sale_kinds(rows, header_idx, cols, ar_names=_AR_NAMES) -> set:
+    return {b["kind"] for b in _group_sales(rows, cols, header_idx, [], ar_names)}
+
+
+def detect_report_type(csv_text: str, db: Session | None = None) -> str | None:
+    """Identify QB reports by grouping and column signature; a Transaction
+    Detail export is receipts, invoices, or both, by what its header rows
+    post to (#291)."""
     rows = _csv_rows(csv_text)
-    if _find_header_for(rows, REQUIRED_COLUMNS)[0] is not None:
+    from app.services.qb_ledger_import import (
+        LEDGER_COLUMNS,
+        has_account_sections,
+        is_ledger_header,
+    )
+
+    ledger_at, ledger_cols = _find_header_for(rows, LEDGER_COLUMNS)
+    if (
+        ledger_cols
+        and "Account" in ledger_cols
+        and has_account_sections(rows, ledger_at, ledger_cols)
+    ):
+        return "ledger"
+    header_idx, cols = _find_header_for(rows, REQUIRED_COLUMNS)
+    if header_idx is not None:
+        kinds = _sale_kinds(rows, header_idx, cols, _ar_names(db))
+        if kinds == {"invoice"}:
+            return "invoices"
+        if kinds == {"invoice", "receipt"}:
+            return "sales_and_invoices"
         return "sales_receipts"
     if _find_header_for(rows, CHECK_COLUMNS)[0] is not None:
         return "checks"
     if _find_header_for(rows, DEPOSIT_COLUMNS)[0] is not None:
         return "deposits"
+    if is_ledger_header(ledger_cols):
+        return "ledger"
+    from app.services.qb_time_import import TIME_COLUMNS, is_time_header
+
+    if is_time_header(_find_header_for(rows, TIME_COLUMNS)[1]):
+        return "time"
+    from app.services.categorized_import import is_categorized
+
+    if is_categorized(rows):
+        return "categorized"
     return None
 
 
-def import_qb_report(db: Session, csv_text: str) -> dict:
+def import_qb_report(
+    db: Session,
+    csv_text: str,
+    adjusting_only: bool = False,
+    posted_by: str = None,
+    outflow_positive: bool = False,
+) -> dict:
     """Import any supported QB report CSV, auto-detected by its columns.
 
-    Detection order (receipts, checks, deposits) is cosmetic: the three
-    column signatures are mutually exclusive on exact cell matches — the
+    Account-grouped ledgers are checked before document reports because an
+    added Account column overlaps the sales signature. For the remaining
+    receipts, checks and deposits, exact column names distinguish them — the
     deposit signature's bare "Amount" never appears in a check header
     ("Original Amount"/"Paid Amount" are distinct cells). (#62 review)
     """
-    kind = detect_report_type(csv_text)
+    kind = detect_report_type(csv_text, db)
     base = {
         "detected": kind,
         "sales_receipts": 0,
+        "invoices": 0,
+        "invoices_open": 0,
+        "invoices_partly_paid": 0,
+        "invoices_paid": 0,
+        "invoices_updated": 0,
         "deposits": 0,
         "checks": 0,
+        "journals": 0,
+        "time_entries": 0,
+        "posted": 0,
+        "splits": 0,
+        "report": None,
         "duplicates_skipped": 0,
         "errors": [],
         "warnings": [],
@@ -766,13 +1374,81 @@ def import_qb_report(db: Session, csv_text: str) -> dict:
     if kind is None:
         base["errors"].append(
             "Unrecognized report layout. Supported exports: Transaction "
-            "Detail (filtered to Sales Receipt), Deposit Detail, and "
-            "Check Detail — keep the report's default columns."
+            "Detail (filtered to Sales Receipt or Invoice), Deposit Detail, "
+            "Check Detail, Transaction Detail by Account and Time by Name by "
+            "Job detail — keep the report's default columns — or a categorized "
+            "bank sheet (Bank Account, Transaction Date, Memo, Payee, Account, "
+            "Amount)."
         )
         return base
-    if kind == "sales_receipts":
-        sub = import_sales_receipt_report(db, csv_text)
-        base["sales_receipts"] = sub.pop("imported", 0)
+    if adjusting_only and kind != "ledger":
+        # an accountant's adjustments come on Transaction Detail by Account
+        # filtered to journal entries (#344); any other report is not that
+        base["errors"].append(
+            "The adjusting-entries import takes QuickBooks Desktop's Transaction "
+            "Detail by Account report filtered to Transaction Type = Journal; this "
+            "file is a different report. Nothing was posted."
+        )
+        return base
+    if kind in ("sales_receipts", "invoices", "sales_and_invoices"):
+        sub = {"duplicates_skipped": 0, "errors": [], "warnings": []}
+        if kind != "invoices":
+            r = import_sales_receipt_report(db, csv_text)
+            base["sales_receipts"] = r.pop("imported", 0)
+            for key in ("duplicates_skipped",):
+                sub[key] += r.get(key, 0)
+            sub["errors"] += r.get("errors", [])
+            sub["warnings"] += r.get("warnings", [])
+        if kind != "sales_receipts":
+            r = import_invoice_report(db, csv_text)
+            base["invoices"] = r.pop("imported", 0)
+            base["invoices_open"] = r.get("open", 0)
+            base["invoices_partly_paid"] = r.get("partly_paid", 0)
+            base["invoices_paid"] = r.get("paid", 0)
+            base["invoices_updated"] = r.get("updated", 0)
+            sub["duplicates_skipped"] += r.get("duplicates_skipped", 0)
+            sub["errors"] += r.get("errors", [])
+            sub["warnings"] += r.get("warnings", [])
+    elif kind == "ledger":
+        from app.services.qb_ledger_import import LEDGER_COLUMNS, import_ledger_report
+
+        rows = _csv_rows(csv_text)
+        header_at, cols = _find_header_for(rows, LEDGER_COLUMNS)
+        if "Account" in cols:
+            base["errors"].append(
+                "This appears to be Transaction Detail by Account with an added "
+                "Account column. Nothing was imported. Export again using the "
+                "default columns; set Customize Report > Filters > Account > "
+                "All accounts rather than adding an Account column."
+            )
+            return base
+        sub = import_ledger_report(
+            db,
+            rows,
+            header_at,
+            cols,
+            adjusting_only=adjusting_only,
+            posted_by=posted_by,
+        )
+        base["journals"] = sub.pop("journals", 0)
+        base["adjusting"] = sub.pop("adjusting", False)
+    elif kind == "categorized":
+        # a categorized bank sheet (#328): posted transactions, not a feed
+        from app.services.categorized_import import import_sheet
+
+        sub = import_sheet(db, _csv_rows(csv_text), outflow_positive=outflow_positive)
+        base["posted"] = sub.pop("posted", 0)
+        base["splits"] = sub.pop("splits", 0)
+        base["report"] = sub.pop("report", None)
+        base["payees_added"] = sub.pop("payees_added", [])
+    elif kind == "time":
+        from app.services.qb_time_import import TIME_COLUMNS, import_time_report
+
+        rows = _csv_rows(csv_text)
+        header_at, cols = _find_header_for(rows, TIME_COLUMNS)
+        sub = import_time_report(db, rows, header_at, cols)
+        base["time_entries"] = sub.pop("time_entries", 0)
+        base["report"] = sub.pop("report", None)
     elif kind == "deposits":
         sub = import_deposit_report(db, csv_text)
         base["deposits"] = sub.pop("deposits", 0)

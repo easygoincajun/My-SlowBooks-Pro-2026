@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.schemas.common import StrictModel
@@ -18,6 +18,7 @@ from app.services.accounting import (
     create_journal_entry,
     get_ar_account_id,
     _q,
+    void_line_memo,
 )
 from app.services.jobs_service import own_job
 from app.services.numbering import next_invoice_number
@@ -84,7 +85,7 @@ def void_invoice(invoice_id: int, db: Session = Depends(get_db)):
                     "account_id": ol.account_id,
                     "debit": ol.credit,  # swap debit/credit
                     "credit": ol.debit,
-                    "description": f"VOID: {ol.description or ''}",
+                    "description": void_line_memo(ol.description),
                 }
             )
         if reverse_lines:
@@ -263,17 +264,11 @@ class WriteOffRequest(StrictModel):
     memo: Optional[str] = None
 
 
-@router.post(
-    "/{invoice_id}/write-off", response_model=CreditMemoResponse, status_code=201
-)
-def write_off_invoice(
-    invoice_id: int, data: WriteOffRequest, db: Session = Depends(get_db)
-):
-    """Forgive an open balance (a pledge that will never be paid): a credit
-    memo flagged as a write-off, posting DR Bad Debt Expense / CR A/R and
-    applied to the invoice at once, so the A/R subledger, the donor
-    statement and the pledge report all agree. Undo it by voiding the
-    credit memo."""
+def _post_write_off(db: Session, inv: Invoice, when: dt_date, amount: Decimal, memo):
+    """One write-off credit memo for `inv`, flushed and not committed: DR
+    Bad Debt Expense / CR A/R, applied to the invoice at once, so the A/R
+    subledger, the statement and the aging all agree. The caller commits,
+    so a batch posts all of its memos or none. Undone by voiding the memo."""
     from app.models.credit_memos import (
         CreditApplication,
         CreditMemo,
@@ -283,27 +278,11 @@ def write_off_invoice(
     from app.services.accounting import get_bad_debt_account_id
     from app.services.numbering import next_credit_memo_number
 
-    check_closing_date(db, data.date)
-    inv = db.query(Invoice).filter(Invoice.id == invoice_id).first()
-    if not inv:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    if inv.status == InvoiceStatus.VOID:
-        raise HTTPException(status_code=400, detail="Invoice is void")
     balance = Decimal(str(inv.balance_due or 0))
-    if balance <= 0:
-        raise HTTPException(
-            status_code=400, detail="Nothing to write off — no open balance"
-        )
-    amount = _q(Decimal(str(data.amount))) if data.amount is not None else balance
-    if amount <= 0 or amount > balance:
-        raise HTTPException(
-            status_code=400, detail="Write-off must be between 0 and the open balance"
-        )
-
     ar_id = get_ar_account_id(db)
     bad_debt_id = get_bad_debt_account_id(db)
     memo = (
-        data.memo
+        memo
         or f"Write-off: {document_label(inv, terms_from_db(db))} #{inv.invoice_number}"
     )
     cm = None
@@ -311,7 +290,7 @@ def write_off_invoice(
         cm = CreditMemo(
             memo_number=next_credit_memo_number(db),
             customer_id=inv.customer_id,
-            date=data.date,
+            date=when,
             original_invoice_id=inv.id,
             subtotal=amount,
             tax_rate=Decimal("0"),
@@ -325,14 +304,16 @@ def write_off_invoice(
             status=CreditMemoStatus.APPLIED,
             is_write_off=True,
         )
-        db.add(cm)
         try:
-            db.flush()
+            # a savepoint: a taken memo number rolls back this memo only,
+            # never a batch's earlier memos
+            with db.begin_nested():
+                db.add(cm)
+                db.flush()
             break
         except IntegrityError as e:
             if "memo_number" not in str(e.orig).lower():
                 raise
-            db.rollback()
             cm = None
     if cm is None:
         raise HTTPException(
@@ -350,7 +331,7 @@ def write_off_invoice(
     )
     txn = create_journal_entry(
         db,
-        data.date,
+        when,
         f"Credit Memo {cm.memo_number} - write-off of "
         + document_reference(
             document_label(inv, terms_from_db(db)), inv.invoice_number
@@ -379,11 +360,145 @@ def write_off_invoice(
     inv.amount_paid = Decimal(str(inv.amount_paid or 0)) + amount
     inv.balance_due = balance - amount
     inv.status = InvoiceStatus.PAID if inv.balance_due == 0 else InvoiceStatus.PARTIAL
+    return cm
+
+
+@router.post(
+    "/{invoice_id}/write-off", response_model=CreditMemoResponse, status_code=201
+)
+def write_off_invoice(
+    invoice_id: int, data: WriteOffRequest, db: Session = Depends(get_db)
+):
+    """Forgive an open balance (a pledge that will never be paid, a small
+    balance not worth collecting): a credit memo flagged as a write-off,
+    posting DR Bad Debt Expense / CR A/R and applied to the invoice at
+    once. Any company, since 2.22.2 (#255); undo it by voiding the memo."""
+    check_closing_date(db, data.date)
+    inv = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.status == InvoiceStatus.VOID:
+        raise HTTPException(status_code=400, detail="Invoice is void")
+    balance = Decimal(str(inv.balance_due or 0))
+    if balance <= 0:
+        raise HTTPException(
+            status_code=400, detail="Nothing to write off — no open balance"
+        )
+    amount = _q(Decimal(str(data.amount))) if data.amount is not None else balance
+    if amount <= 0 or amount > balance:
+        raise HTTPException(
+            status_code=400, detail="Write-off must be between 0 and the open balance"
+        )
+    cm = _post_write_off(db, inv, data.date, amount, data.memo)
     db.commit()
     db.refresh(cm)
     resp = CreditMemoResponse.model_validate(cm)
     resp.customer_name = inv.customer.name if inv.customer else None
     return resp
+
+
+# ── small balances, from A/R Aging (#255) ────────────────────────────────────
+
+_OPEN = (InvoiceStatus.DRAFT, InvoiceStatus.SENT, InvoiceStatus.PARTIAL)
+
+
+def _small_balances(db: Session, under: Decimal, as_of: dt_date) -> list:
+    """The open invoices whose balance, at the rate it was booked at, is
+    under the figure: what A/R Aging's "Write off balances under…" lists
+    before anything posts."""
+    from app.services.contact_balances import home_amount
+
+    invoices = (
+        db.query(Invoice)
+        .filter(
+            Invoice.status.in_(_OPEN), Invoice.balance_due > 0, Invoice.date <= as_of
+        )
+        .all()
+    )
+    rows = []
+    for inv in invoices:
+        bal = home_amount(inv.balance_due, inv.exchange_rate)
+        if bal >= under:
+            continue
+        rows.append(
+            {
+                "id": inv.id,
+                "invoice_number": inv.invoice_number,
+                "customer_id": inv.customer_id,
+                "customer_name": inv.customer.name if inv.customer else "",
+                "date": inv.date.isoformat(),
+                "due_date": inv.due_date.isoformat() if inv.due_date else None,
+                "days_overdue": (
+                    max((as_of - inv.due_date).days, 0) if inv.due_date else 0
+                ),
+                "balance_due": str(_q(bal)),
+            }
+        )
+    rows.sort(key=lambda r: ((r["customer_name"] or "").lower(), r["date"], r["id"]))
+    return rows
+
+
+@router.get("/write-offs/candidates")
+def write_off_candidates(
+    under: Decimal = Query(..., gt=0),
+    as_of_date: dt_date = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """The open balances under a figure, listed before any is written off
+    (#255): `[{id, invoice_number, customer_id, customer_name, date,
+    due_date, days_overdue, balance_due}]`."""
+    return _small_balances(db, _q(under), as_of_date or dt_date.today())
+
+
+class WriteOffBatchRequest(StrictModel):
+    date: dt_date
+    under: Decimal
+    invoice_ids: list[int]
+    memo: Optional[str] = None
+
+
+@router.post("/write-offs", status_code=201)
+def write_off_batch(data: WriteOffBatchRequest, db: Session = Depends(get_db)):
+    """Write off the listed invoices' balances, one credit memo each to Bad
+    Debt Expense, all posted together or none (#255). An invoice whose
+    balance is no longer under the figure (a payment landed since it was
+    listed), is paid, or is void is skipped and named, not written off.
+    Returns `{written_off: [...], skipped: [{invoice_id, reason}]}`."""
+    check_closing_date(db, data.date)
+    under = _q(data.under)
+    if under <= 0:
+        raise HTTPException(status_code=400, detail="under must be more than zero")
+    from app.services.contact_balances import home_amount
+
+    written, skipped = [], []
+    for invoice_id in dict.fromkeys(data.invoice_ids):
+        inv = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+        if not inv:
+            skipped.append({"invoice_id": invoice_id, "reason": "not found"})
+            continue
+        row = {"invoice_id": inv.id, "invoice_number": inv.invoice_number}
+        balance = Decimal(str(inv.balance_due or 0))
+        if inv.status == InvoiceStatus.VOID:
+            skipped.append({**row, "reason": "void"})
+            continue
+        if balance <= 0 or inv.status not in _OPEN:
+            skipped.append({**row, "reason": "already paid"})
+            continue
+        if home_amount(balance, inv.exchange_rate) >= under:
+            skipped.append({**row, "reason": "the balance changed since it was listed"})
+            continue
+        cm = _post_write_off(db, inv, data.date, _q(balance), data.memo)
+        written.append(
+            {
+                **row,
+                "customer_name": inv.customer.name if inv.customer else "",
+                "amount": str(_q(balance)),
+                "credit_memo_id": cm.id,
+                "memo_number": cm.memo_number,
+            }
+        )
+    db.commit()
+    return {"written_off": written, "skipped": skipped}
 
 
 @router.post("/{invoice_id}/duplicate", response_model=InvoiceResponse, status_code=201)

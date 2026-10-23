@@ -136,7 +136,6 @@ def test_settings_names_what_to_enter_again():
     for key in (
         "smtp_password",
         "stripe_secret_key",
-        "qbo_access_token",
         "simplefin_access_url",
         "closing_date_password",
         "ai_api_key",

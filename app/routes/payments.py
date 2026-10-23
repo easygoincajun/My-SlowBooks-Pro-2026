@@ -5,7 +5,7 @@
 
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import get_db
@@ -21,8 +21,11 @@ from app.services.accounting import (
     get_ar_account_id,
     get_undeposited_funds_id,
     reversing_lines,
+    void_line_memo,
 )
 from app.services.closing_date import check_closing_date
+from app.services import request_keys
+from app.services.audit import _actor
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -85,8 +88,21 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=PaymentResponse, status_code=201)
-def create_payment(data: PaymentCreate, db: Session = Depends(get_db)):
+def create_payment(
+    data: PaymentCreate,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    response: Response = None,
+):
     check_closing_date(db, data.date)
+    # A retry of a request whose response was lost must not book the
+    # payment twice (#292): an Idempotency-Key header names the intended
+    # payment, and its answer is kept with it.
+    replay = request_keys.reserve(
+        db, request, "POST /api/payments", data.model_dump(), _actor(db)
+    )
+    if replay is not None and not isinstance(replay, request_keys.Reservation):
+        return replay
     customer = db.query(Customer).filter(Customer.id == data.customer_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -256,9 +272,12 @@ def create_payment(data: PaymentCreate, db: Session = Depends(get_db)):
         )
         payment.transaction_id = txn.id
 
-    db.commit()
+    db.flush()
     db.refresh(payment)
-    return _response(payment, customer.name)
+    resp = _response(payment, customer.name)
+    request_keys.finish(db, replay, 201, resp.model_dump(mode="json"), response)
+    db.commit()
+    return resp
 
 
 @router.post("/{payment_id}/apply", response_model=PaymentResponse)
@@ -450,7 +469,7 @@ def void_payment(payment_id: int, db: Session = Depends(get_db)):
                 "account_id": ol.account_id,
                 "debit": ol.credit,
                 "credit": ol.debit,
-                "description": f"VOID: {ol.description or ''}",
+                "description": void_line_memo(ol.description),
             }
             for ol in original_lines
         ]

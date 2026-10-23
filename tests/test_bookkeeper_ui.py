@@ -2,23 +2,20 @@
 
 Server Edition's bookkeeper keeps the daily books, but some writes are the
 administrator's: company settings, backups, new company files, the logo,
-connecting and importing from QuickBooks Online, and bringing books in from
-another program (app.main's _ADMIN_WRITE_PREFIXES, and the routes that call
+and bringing books in from another program (app.main's _ADMIN_WRITE_PREFIXES, and the routes that call
 require_admin). The pages offered them to a bookkeeper all the same. Settings
 could be filled in top to bottom before Save Settings answered "Admin role
-required"; Send Test Email, Create Backup, Restore, the OCR engine, QBO's
-Connect and Import, "+ New Company" and every button of Migrate Data answered
-403 too. Opening an email template even sent the whole Settings form: its
+required"; Send Test Email, Create Backup, Restore, the OCR engine, "+ New
+Company" and every button of Migrate Data answered 403 too. Opening an email template even sent the whole Settings form: its
 Edit button had no type, so it submitted the form it sits in.
 
 The pages mark the administrator's controls where they are built, and
 App.adminPass takes them away for any role but admin: a field shows its value
 locked, a button is not offered, and a sentence says why. AI Insights' key
 and endpoint are company settings too (the endpoint receives the dashboard's
-figures), and disconnecting from QuickBooks Online is the administrator's as
-connecting is. Everything else stays: the lists on Settings (email templates,
-classes, cost types and codes, equipment), QBO's export, and every page the
-server lets a bookkeeper use.
+figures). Everything else stays: the lists on Settings (email templates,
+classes, cost types and codes, equipment) and every page the server lets a
+bookkeeper use.
 
 tests/js/admin_controls_probe.js draws those pages for each role, the first
 page's order included (the role arrives after the page). Here every control
@@ -212,6 +209,7 @@ SETTINGS_TAKEN = {
         {"provider": "anthropic", "model": ""},
     ),
     "AI Insights › Test": ("POST", "/api/analytics/ai-config/test", {}),
+    "AI Insights › Refresh models": ("GET", "/api/analytics/ai-models", None),
     "AI Insights › Remove": (
         "PUT",
         "/api/analytics/ai-config",
@@ -231,6 +229,12 @@ SETTINGS_TAKEN_FROM_A_SIGN_IN = {
         "POST",
         "/api/tokens",
         {"label": "kim-agent", "role": "bookkeeper"},
+    ),
+    # inviting an accountant (#345) makes a sign-in: an administrator's
+    "Users — Server Edition › Invite your accountant…": (
+        "POST",
+        "/api/users/invite",
+        {"username": "pat", "display_name": "Pat CPA"},
     ),
 }
 SETTINGS_TAKEN_PARTS = {
@@ -252,40 +256,14 @@ SETTINGS_TAKEN_PARTS = {
     ),
 }
 
-# QuickBooks Online. Export answers 400 on books not connected to QBO: heard,
-# not refused.
-QBO_KEPT = {
-    "Export to QuickBooks Online › Export All Data": [
-        ("POST", "/api/qbo/export", None, 400)
-    ],
-    "Export to QuickBooks Online › Export Selected": [
-        ("POST", "/api/qbo/export/accounts", None, 400)
-    ],
-    "Import from QuickBooks Online › Errors": [
-        ("GET", "/api/qbo/import-runs/latest", None, 200)
-    ],
-}
-QBO_TAKEN = {
-    "Connection › Disconnect from QuickBooks": ("POST", "/api/qbo/disconnect", None),
-    "Connection › Start connection with Intuit": ("GET", "/api/qbo/auth-url", None),
-    "Connection › Finish QBO connection": (
-        "POST",
-        "/api/qbo/connect-manual",
-        {"authorization_code": "code", "realm_id": "4620816365"},
-    ),
-    "Import from QuickBooks Online › Import All Data": (
-        "POST",
-        "/api/qbo/import-runs",
-        {"entities": None},
-    ),
-    "Import from QuickBooks Online › Import Selected": (
-        "POST",
-        "/api/qbo/import-runs",
-        {"entities": ["accounts"]},
-    ),
-}
 COMPANIES_TAKEN = {
     "+ New Company": ("POST", "/api/companies", {"name": "Harbor Light Catering"}),
+    # applying an accountant's changes posts to the books (#346): an administrator's
+    "Apply accountant's changes…": (
+        "POST",
+        "/api/accountants-copy/changes/apply",
+        None,
+    ),
 }
 MIGRATE_TAKEN = {
     "Dry Run": ("POST", "/api/migration/xero/dry-run", None),
@@ -293,8 +271,8 @@ MIGRATE_TAKEN = {
 }
 
 
-KEPT = {**SETTINGS_KEPT, **QBO_KEPT}
-TAKEN = {**SETTINGS_TAKEN, **QBO_TAKEN, **COMPANIES_TAKEN, **MIGRATE_TAKEN}
+KEPT = {**SETTINGS_KEPT}
+TAKEN = {**SETTINGS_TAKEN, **COMPANIES_TAKEN, **MIGRATE_TAKEN}
 
 
 def _control(key, names):
@@ -305,12 +283,6 @@ def _control(key, names):
     for parts in (SETTINGS_KEPT_PARTS, SETTINGS_TAKEN_PARTS):
         if key in parts:
             return parts[key]
-    if key.startswith("Import from QuickBooks Online › [value="):
-        return "Import from QuickBooks Online › Import Selected"
-    if key.startswith("Export to QuickBooks Online › [value="):
-        return "Export to QuickBooks Online › Export Selected"
-    if key in ("Connection › #qbo-authorization-code", "Connection › #qbo-realm-id"):
-        return "Connection › Finish QBO connection"
     if " › " in key and key.split(" › ")[-1] in names:
         return "Save Settings"
     return key
@@ -341,11 +313,9 @@ def _yes(controls):
 
 
 def _pages(probe, role):
-    """Each page's controls a role is offered (for QBO, shown: its Import
-    buttons wait for the import monitor, whoever is signed in)."""
+    """Each page's controls a role is offered."""
     runs = {
         "settings": [probe["settings"][role]["offered"]],
-        "qbo": [probe[p][role]["shown"] for p in ("qbo", "qbo_connected")],
         "companies": [probe["companies"][role]["offered"]],
     }
     if role == "bookkeeper":
@@ -414,28 +384,6 @@ def test_a_read_only_sign_in_has_its_own_sentence_on_settings_not_two():
     assert got["fields"]["enabled"] == []
     assert (got["readonly_notes"], got["notes"]) == (1, [])
     assert _yes(got["offered"]) & set(SETTINGS_TAKEN) == set()
-
-
-def test_quickbooks_online_says_who_connects_and_imports():
-    probe = _probe()
-    assert probe["qbo"]["bookkeeper"]["notes"] == [
-        "Connecting to QuickBooks Online is done by an administrator.",
-        "Importing from QuickBooks Online is done by an administrator.",
-    ]
-    # connected: Export stays, as the server allows; Disconnect is the
-    # administrator's, as connecting is
-    offered = _yes(probe["qbo_connected"]["bookkeeper"]["offered"])
-    assert {
-        "Export to QuickBooks Online › Export All Data",
-        "Export to QuickBooks Online › Export Selected",
-    } <= offered
-    assert "Connection › Disconnect from QuickBooks" not in offered
-    assert probe["qbo_connected"]["bookkeeper"]["notes"] == [
-        "Connecting to and disconnecting from QuickBooks Online are done by an administrator.",
-        "Importing from QuickBooks Online is done by an administrator.",
-    ]
-    for page in ("qbo", "qbo_connected"):
-        assert probe[page]["admin"]["notes"] == probe[page]["readonly"]["notes"] == []
 
 
 def test_companies_leaves_a_new_company_to_an_administrator():
@@ -559,7 +507,6 @@ def test_every_control_taken_from_a_bookkeeper_the_server_refuses(client, made):
     taken = {page: admin[page] - keeper_pages[page] for page in admin}
     assert taken == {
         "settings": set(SETTINGS_TAKEN) | set(SETTINGS_TAKEN_FROM_A_SIGN_IN),
-        "qbo": set(QBO_TAKEN),
         "companies": set(COMPANIES_TAKEN),
         "migrate": set(MIGRATE_TAKEN),
     }

@@ -23,6 +23,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -30,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.exc import DataError
 
 from app.services.control_accounts import MissingControlAccount
 from app.services.rate_limit import limiter
@@ -66,6 +68,9 @@ from app.routes import uploads
 
 # Phase 5: Advanced Integration
 from app.routes import bank_import, simplefin, tax, backups
+from app.routes import company_file as company_file_routes
+from app.routes import accountants_copy as accountants_copy_routes
+from app.routes import reclassify as reclassify_routes
 from app.routes import users as users_routes
 from app.routes import api_tokens as api_tokens_routes
 from app.routes import classes as classes_routes
@@ -86,9 +91,6 @@ from app.routes import companies, employees, payroll
 
 # Phase 7: Online Payments
 from app.routes import provider_payments, public
-
-# Phase 8: QuickBooks Online
-from app.routes import qbo
 
 # Phase 9: Forum Bug Fixes & Missing Features
 from app.routes import journal, deposits, cc_charges, checks, expenses, transfers
@@ -125,6 +127,8 @@ from app.services.auth import get_session_secret
 from app.services.auth import (
     signed_in_before_this_start as _signed_in_before_this_start,
     signed_in_to_another_company as _signed_in_to_another_company,
+    check_session_user as _check_session_user,
+    SESSION_VERSION_KEY as _SESSION_VERSION_KEY,
 )
 
 from app import __version__
@@ -135,6 +139,7 @@ from app.config import (
     SESSION_IDLE_TIMEOUT_SECONDS,
 )
 from app.database import SessionLocal, Base, engine
+from app.database import _served_company
 from app.services.audit import register_audit_hooks
 from app.services.request_context import acting_username as _acting_username
 from app.services.request_context import (
@@ -145,6 +150,11 @@ from app.services.closing_date import (
     password_from_header as _closing_password_from_header,
 )
 from app.services.api_token_service import resolve as _resolve_api_token
+from app.services.served_companies import CompanyUnavailable, sentence_of
+
+# An API token's request names the company it works in with this header
+# (#358); a signed-in person's session carries its company instead.
+_COMPANY_HEADER = "X-SlowBooks-Company"
 
 
 def _run_startup_security_checks():
@@ -172,6 +182,10 @@ def _run_startup_security_checks():
             "decryptable by anyone with the source code — even with APP_DEBUG=true. "
             "Set a unique, strong PAYROLL_ENCRYPTION_SECRET before deploying."
         )
+
+    # A configured rate-limit storage that cannot be reached would otherwise
+    # surface as a 500 on every rate-limited route (login first of all).
+    _check_rate_limit_storage()
 
     if not APP_DEBUG:
         if PAYROLL_ENCRYPTION_SECRET == _DEV_KEY:
@@ -218,12 +232,109 @@ def _run_startup_security_checks():
                 "redirect becomes a no-op."
             )
 
-    # Only after the cheap checks pass do we open a DB connection.
+        # Non-fatal: two proxy misconfigurations that silently weaken a
+        # security control without any visible symptom. Only reached in
+        # production (APP_DEBUG=false) and not on the SLOWBOOKS_PRIVATE_NETWORK
+        # path above, which knowingly serves plain HTTP on a trusted host — so
+        # the desktop app and local dev never see these warnings.
+        _warn_on_proxy_misconfiguration()
+
+    # Only after the cheap checks pass do we open a DB connection — and an
+    # encrypted company file is not opened at all without its key (#290):
+    # one sentence, before the migration guard or create_all can touch it.
+    from app.services.company_file import refuse_a_locked_file
+
+    refuse_a_locked_file()
     _refuse_a_database_behind_head()
     _create_missing_tables()
 
 
-def _refuse_a_database_behind_head() -> None:
+def _warn_on_proxy_misconfiguration() -> None:
+    """Warn (never refuse) on two silent weakenings behind a reverse proxy.
+
+    Both degrade a security control without any visible symptom — exactly the
+    kind of thing that goes unnoticed for a year — but the app serves correctly
+    either way, and failing hard would break existing deploys on upgrade.
+
+    1. Client IP. uvicorn parses X-Forwarded-For but trusts it only from the
+       addresses in --forwarded-allow-ips / FORWARDED_ALLOW_IPS (default
+       127.0.0.1). A proxy in another container or pod has a different address,
+       so the header is ignored and every request reports the PROXY's IP. That
+       collapses the login rate limiter into one shared bucket for all users and
+       writes the proxy's address into login_attempts and portal_accesses,
+       making the audit trail useless for forensics. FORCE_HTTPS=true is the
+       reliable signal here: it means TLS terminates somewhere (almost always a
+       proxy, since the app serves plain HTTP), so an empty trust list is wrong.
+
+    2. Rate-limit storage. In-process counters are per-worker and per-replica,
+       so with APP_WORKERS>1 the effective limit is N times the configured one.
+       Point RATE_LIMIT_STORAGE_URI at shared storage (e.g. redis://...).
+    """
+    from app.services.rate_limit import RATE_LIMIT_STORAGE_URI, _enabled
+
+    log = logging.getLogger("uvicorn.error")
+
+    if FORCE_HTTPS and not os.environ.get("FORWARDED_ALLOW_IPS", "").strip():
+        log.warning(
+            "FORWARDED_ALLOW_IPS is unset while FORCE_HTTPS is on, which implies "
+            "TLS terminates at a proxy in front of the app. uvicorn trusts "
+            "X-Forwarded-For only from 127.0.0.1, so a proxy in another "
+            "container or pod makes every client IP read as the proxy's address: "
+            "the login rate limiter degrades to one shared bucket for all users "
+            "and login_attempts / portal_accesses lose forensic value. Set "
+            "FORWARDED_ALLOW_IPS to your proxy's address or CIDR (never 0.0.0.0/0 "
+            "or *, which lets any client forge its source IP)."
+        )
+
+    workers = int(os.environ.get("APP_WORKERS", "1") or "1")
+    if _enabled and not RATE_LIMIT_STORAGE_URI and workers > 1:
+        log.warning(
+            "Rate limiting is on with APP_WORKERS=%d but RATE_LIMIT_STORAGE_URI "
+            "is unset, so each worker keeps its own counters — every configured "
+            "limit is effectively %dx looser (more still across replicas). Point "
+            "RATE_LIMIT_STORAGE_URI at shared storage, e.g. redis://redis:6379/0.",
+            workers,
+            workers,
+        )
+
+
+def _check_rate_limit_storage() -> None:
+    """Refuse to start when RATE_LIMIT_STORAGE_URI names storage that fails
+    its health check. Unset (in-process memory) is never checked.
+
+    slowapi builds the storage from the URI at import; a Redis that is down
+    or mis-addressed only shows up when the first rate-limited request runs
+    its counter, which turns every login into a 500. Fail once, loudly, here
+    instead. The message names the scheme and host only — the URI may carry
+    a password."""
+    from urllib.parse import urlsplit
+
+    from app.services.rate_limit import RATE_LIMIT_STORAGE_URI, limiter
+
+    if not RATE_LIMIT_STORAGE_URI:
+        return
+    parts = urlsplit(RATE_LIMIT_STORAGE_URI)
+    where = f"{parts.scheme}://{parts.hostname or ''}" + (
+        f":{parts.port}" if parts.port else ""
+    )
+    try:
+        healthy = limiter._storage.check()
+    except Exception as exc:  # the limits backends wrap their own errors
+        raise RuntimeError(
+            f"FATAL: RATE_LIMIT_STORAGE_URI storage at {where} failed its "
+            f"health check ({type(exc).__name__}: {exc}). Start the storage "
+            "service, fix the URI, or unset RATE_LIMIT_STORAGE_URI for "
+            "in-process counters (single worker only)."
+        ) from exc
+    if not healthy:
+        raise RuntimeError(
+            f"FATAL: RATE_LIMIT_STORAGE_URI storage at {where} is unreachable. "
+            "Start the storage service, fix the URI, or unset "
+            "RATE_LIMIT_STORAGE_URI for in-process counters (single worker only)."
+        )
+
+
+def _refuse_a_database_behind_head(target=None) -> None:
     """Refuse to start against a database the migrations have not reached.
 
     Issue #132, found by the macOS QA agent while gating 2.11.0.
@@ -248,11 +359,14 @@ def _refuse_a_database_behind_head() -> None:
     """
     from sqlalchemy import inspect as _inspect, text as _text
 
+    # ``target``: another company a Server Edition server serves (#358),
+    # checked the first time a session opens it
+    checked = engine if target is None else target
     try:
-        insp = _inspect(engine)
+        insp = _inspect(checked)
         if not insp.has_table("alembic_version"):
             return  # fresh database — create_all is how it gets built
-        with engine.connect() as conn:
+        with checked.connect() as conn:
             row = conn.execute(_text("SELECT version_num FROM alembic_version")).first()
         current = row[0] if row else None
     except Exception:
@@ -293,7 +407,7 @@ def _refuse_a_database_behind_head() -> None:
         # error saying "deactivate it instead" when nothing could deactivate.
         from app.services.schema_repair import looks_half_upgraded
 
-        if looks_half_upgraded(engine):
+        if looks_half_upgraded(checked):
             # Name the path that exists on THIS install. Frozen bundles put
             # it under _internal/scripts; a checkout has it at scripts/.
             # Printing the repo path at a Server Edition operator who only
@@ -323,7 +437,7 @@ def _refuse_a_database_behind_head() -> None:
         )
 
 
-def _create_missing_tables() -> None:
+def _create_missing_tables(target=None) -> None:
     """create_all for whatever the migrations do not cover — serialized.
 
     Under Docker the entrypoint starts uvicorn with two workers, and each
@@ -335,15 +449,17 @@ def _create_missing_tables() -> None:
     gate). A transaction-scoped advisory lock makes the second worker
     wait for the first; checkfirst then finds everything present.
     SQLite has one process and no enum types, so it takes the plain path.
+    ``target`` is another company a Server Edition server serves (#358).
     """
-    if engine.dialect.name == "postgresql":
+    checked = engine if target is None else target
+    if checked.dialect.name == "postgresql":
         from sqlalchemy import text
 
-        with engine.begin() as conn:
+        with checked.begin() as conn:
             conn.execute(text("SELECT pg_advisory_xact_lock(7264013)"))
             Base.metadata.create_all(bind=conn)
         return
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=checked)
 
 
 @asynccontextmanager
@@ -384,9 +500,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass  # a diagnostic, never a reason not to boot
     # At-rest upgrade: encrypt any legacy plaintext credential rows (SMTP,
-    # payment, QBO, SimpleFIN secrets) on first boot after upgrading.
+    # payment, SimpleFIN secrets) on first boot after upgrading, and drop
+    # the rows of a retired integration's settings.
     try:
-        from app.services.settings_service import upgrade_plaintext_secrets
+        from app.services.settings_service import (
+            remove_retired_settings,
+            upgrade_plaintext_secrets,
+        )
 
         _db = SessionLocal()
         try:
@@ -395,6 +515,16 @@ async def lifespan(app: FastAPI):
             # logging taint (alert #38), and the count isn't worth arguing.
             if upgrade_plaintext_secrets(_db):
                 print("Encrypted legacy plaintext secret settings at rest")
+            if remove_retired_settings(_db):
+                print("Removed the settings of a retired integration")
+            # #317: invoices the retired QuickBooks Online import counted as
+            # paid twice get their paid amount, balance and status back
+            from app.services.qbo_documents import repair_double_counted_payments
+
+            if repair_double_counted_payments(_db):
+                print(
+                    "Repaired invoices the QuickBooks Online import counted as paid twice"
+                )
         finally:
             _db.close()
     except Exception:
@@ -533,6 +663,42 @@ async def _missing_control_account_handler(request: Request, exc: Exception):
 app.add_exception_handler(MissingControlAccount, _missing_control_account_handler)
 
 
+# ---- Another company this server cannot open now (#358) ----
+# A session chose a company the server serves, and its file is missing,
+# locked, or from another version. 503 with the one sentence, never a
+# traceback; the person can sign in to another company meanwhile.
+async def _company_unavailable_handler(request: Request, exc: Exception):
+    return JSONResponse(status_code=503, content={"detail": sentence_of(exc)})
+
+
+app.add_exception_handler(CompanyUnavailable, _company_unavailable_handler)
+
+
+# ---- A value the database refuses (422, not 500) ----
+# PostgreSQL enforces column widths and types that SQLite does not: a
+# 301-character split memo, a number out of range. That is a problem with
+# the data, not a server fault, and nothing was written (the request's
+# session rolls back). Answer 422 with a fixed sentence; the driver's text
+# carries the statement and its parameters, so it goes to the log only.
+async def _data_error_handler(request: Request, exc: Exception):
+    logging.getLogger(__name__).warning(
+        "database refused a value: %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "A value in this request is too long or not valid for "
+            "the database, so nothing was saved."
+        },
+    )
+
+
+app.add_exception_handler(DataError, _data_error_handler)
+
+
 # ---- Validation errors (422), in sentences ----
 # FastAPI's own body, unchanged, with a plain "message" added to each entry
 # ("Name is required.") for the page to show instead of validator text
@@ -564,21 +730,16 @@ async def _request_validation_handler(request: Request, exc: RequestValidationEr
 
 app.add_exception_handler(RequestValidationError, _request_validation_handler)
 
-# ---- CORS (Phase 9.7: locked down) ----
-# Wildcard origins with credentials is a CSRF amplifier. Default to just
-# localhost; override with ALLOWED_ORIGINS env var (comma-separated) for
-# a custom LAN hostname like http://slowbooks.local:3001.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# gzip responses larger than 1 KB. Analytics JSON payloads compress ~70%,
-# which is a big win over LAN for /api/analytics/dashboard and friends.
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+# ---- Middleware registration ----
+# All middleware is registered as one ordered block near the end of this
+# module (the "Middleware stack" section), after require_session and
+# ActingUserContextMiddleware are defined. Starlette makes the LAST-added
+# middleware the OUTERMOST layer, and CORS plus the security-header
+# middleware MUST sit OUTSIDE the auth gate (require_session): a CORS
+# preflight is unauthenticated and has to be answered before auth, and the
+# gate's own 401/403/503 responses have to carry the security headers.
+# security_headers and require_session are only DEFINED below; the single
+# registration block at the end wires the whole stack in the right order.
 
 
 # Content-Security-Policy: defense in depth against XSS even if autoescape
@@ -661,7 +822,6 @@ def _set_if_unset(headers, name: str, value: str) -> None:
         headers[name] = value
 
 
-@app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     # The desktop shell fetches documents from page JS and saves them
@@ -705,24 +865,17 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-# Promote any plain-HTTP request to HTTPS before it touches the app. Added
-# BEFORE other middleware so it runs LAST in the response chain — i.e. the
-# OUTERMOST request gate. Behind a TLS-terminating proxy this is a no-op
-# because the proxy already speaks HTTPS to the app.
-if FORCE_HTTPS:
-    app.add_middleware(HTTPSRedirectMiddleware)
-
-
 # ---- Auth gate (Phase 9.7) ----
 # Single middleware that lets through static assets, the SPA shell, the
 # auth routes themselves, /health, and the public customer pay page.
 # Everything else demands an authenticated session.
 #
-# IMPORTANT: This decorator MUST come before the SessionMiddleware
-# add_middleware() call. Starlette's middleware stack wraps the
-# most-recently-added layer on the outside, so the LAST add_middleware
-# call is the outermost / runs first. SessionMiddleware needs to run
-# BEFORE require_session so that request.session is populated.
+# IMPORTANT: require_session must run INSIDE SessionMiddleware so that
+# request.session is populated by the time the gate dispatches, and INSIDE
+# CORS and the security-header middleware so a preflight is answered before
+# auth and the gate's own refusals still carry the headers. The registration
+# that enforces this lives in the "Middleware stack" section at the end of
+# this module; see it for the full outer-to-inner order.
 _AUTH_EXEMPT_PREFIXES = (
     "/static/",
     "/api/auth/",
@@ -742,17 +895,6 @@ _AUTH_EXEMPT_EXACT = {
     "/analytics",  # redirect to SPA hash route
     "/favicon.ico",
     "/api/stripe/webhook",  # legacy alias — Stripe auth via signature
-    # Intuit's OAuth redirect lands the browser back here directly from
-    # accounts.intuit.com — a cross-site top-level navigation, so a
-    # SameSite=Strict session cookie is never attached (browsers withhold
-    # Strict cookies on any cross-site request, no exceptions). Session-
-    # gating this route made every QBO connection attempt dead-end on
-    # {"detail": "Not authenticated"} before qbo_service.handle_callback
-    # ever ran. Safe to exempt: the flow already carries its own CSRF
-    # protection independent of the session — get_auth_url() stores a
-    # random `state` token server-side and handle_callback() rejects any
-    # callback whose `state` doesn't match (see app/services/qbo_service.py).
-    "/api/qbo/callback",
 }
 # Provider payment routes that are public by design:
 #   - webhook: the provider's signature is the authentication
@@ -780,9 +922,15 @@ _ADMIN_WRITE_PREFIXES = (
     "/api/tokens",
     "/api/settings",
     "/api/backups",
+    # Turning company-file encryption on or off is an administrator's
+    # decision (#290); the route asks for the company's name as well.
+    "/api/company-file",
+    # Sending the books to an accountant, opening a copy and applying the
+    # changes back are an administrator's (#346); the copy's own Send
+    # changes back is a read
+    "/api/accountants-copy",
     "/api/companies",
     "/api/migration",
-    "/api/qbo/connect-manual",
     # Staff records carry SSN, pay rate and W-4 elections: creating or
     # editing one is HR, not daily books (GHSA-rh75-6834-f66j).
     "/api/employees",
@@ -794,6 +942,7 @@ _ADMIN_WRITE_PREFIXES = (
 _ADMIN_ONLY_PREFIXES = (
     "/api/payroll",
     "/api/tax-forms",
+    "/api/document-audits",  # the forms' history and hash checks (#263)
     "/api/benefits",
     "/api/deductions",
     "/api/onboarding",
@@ -808,6 +957,21 @@ _ADMIN_ONLY_EMPLOYEE_RE = _re.compile(
     r"^/api/employees/[^/]+/(portal-token|portal-access|everify|bank-accounts|documents|ytd)(/|$)"
 )
 _READ_METHODS = ("GET", "HEAD", "OPTIONS")
+# An outside accountant's sign-in (#340) writes journal entries only: it
+# posts them, voids its own (the journal router checks whose), and attaches
+# the support behind one. Everything else it reads, the audit log included:
+# seeing what moved is the job.
+# ... and moves lines between accounts with the reclassify tool (#337),
+# the accountant's own job: nothing new is posted, and the audit log
+# names every line.
+_ACCOUNTANT_WRITE_RE = _re.compile(
+    r"^/api/(journal(/\d+/void)?|attachments/journal_entry/\d+|reclassify)$"
+)
+ACCOUNTANT_REFUSAL = (
+    "An accountant's sign-in posts journal entries and reads everything "
+    "else; it cannot make this change. An administrator can change the "
+    "role under Settings → Users."
+)
 
 
 def _is_hr_sensitive(path: str) -> bool:
@@ -827,14 +991,38 @@ def _role_allows(role: str, method: str, path: str) -> bool:
         # (tax ids, addresses) — "read the books" shouldn't mean "read
         # every historical value of every field".
         return is_read and not path.startswith("/api/audit")
+    if role == "accountant":
+        # an outside role: the employee directory (pay rates, filing status,
+        # the last four of a Social Security number) is HR's, not the
+        # books' (2.24.0 gate, macbase1's question on round 1)
+        if path.startswith("/api/employees"):
+            return False
+        return is_read or (method == "POST" and bool(_ACCOUNTANT_WRITE_RE.match(path)))
     # bookkeeper: full read, all daily-books writes, no admin writes
     if is_read:
         return True
     return not path.startswith(_ADMIN_WRITE_PREFIXES)
 
 
-@app.middleware("http")
+def _role_refusal(role: str) -> str:
+    """The sentence a refused write gets: the accountant's says what the
+    role is for (#340); the others keep the one the pages pin."""
+    if role == "accountant":
+        return ACCOUNTANT_REFUSAL
+    return "Your role doesn't allow this action"
+
+
 async def require_session(request: Request, call_next):
+    try:
+        return await _require_session(request, call_next)
+    except CompanyUnavailable as exc:
+        # The session's company cannot be opened now (#358): the gate itself
+        # opens it (the company id, the copy's mode) before any route runs,
+        # so the sentence is answered here too, as a 503, never a traceback.
+        return JSONResponse(status_code=503, content={"detail": sentence_of(exc)})
+
+
+async def _require_session(request: Request, call_next):
     path = request.url.path
     if (
         path in _AUTH_EXEMPT_EXACT
@@ -865,7 +1053,31 @@ async def require_session(request: Request, call_next):
                     "company's password to continue."
                 },
             )
-        role = request.session.get("role") or "admin"
+        # Revocable sessions: the signed cookie is no longer trusted
+        # on its own. Re-read the user this session names (one cheap lookup
+        # on this company's DB) and sign the session out when it has been
+        # deactivated, its role or password changed since, or the row is
+        # gone. The role comes from the row too, so a demotion takes effect
+        # on the next request instead of living in the cookie.
+        state, db_role, db_version = _check_session_user(request.session)
+        if state == "revoked":
+            request.session.clear()
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Your sign-in has ended. Sign in again to continue."
+                },
+            )
+        if state == "ok":
+            role = db_role
+            # Keep the cookie's own copy honest: routes that gate on
+            # request.session["role"] (user management, company switch) then
+            # see the demotion too, not the stale role the cookie carried.
+            if request.session.get("role") != db_role:
+                request.session["role"] = db_role
+            request.session[_SESSION_VERSION_KEY] = db_version
+        else:  # "skip": a legacy / desktop session that names no user row
+            role = request.session.get("role") or "admin"
     else:
         # Scoped API tokens: non-human principals (agents, integrations)
         # authenticate with `Authorization: Bearer sbp_...` and wear a role
@@ -895,7 +1107,40 @@ async def require_session(request: Request, call_next):
     if not _role_allows(role, request.method, path):
         return JSONResponse(
             status_code=403,
-            content={"detail": "Your role doesn't allow this action"},
+            content={"detail": _role_refusal(role)},
+        )
+    # An accountant's copy (#346) takes journal entries and nothing else,
+    # whoever is signed in: the one permission the copy has.
+    if not path.startswith("/api/auth/"):
+        from app.services import accountants_copy as _ac
+
+        copy = _ac.mode()
+        if copy and not _ac.copy_gate(request.method, path):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": _ac.COPY_MODE_MESSAGE.format(day=copy["dividing_date"])
+                },
+            )
+    if (
+        token_principal is None
+        and request.session.get("must_change_password")
+        # the shell's own reads, which the page that sets the password is
+        # drawn from: the version and the company's words (2.24.0 gate,
+        # W-18 / NEW-149: refused, the shell stopped before the form)
+        and not (
+            request.method in _READ_METHODS and path in ("/api/system", "/api/settings")
+        )
+    ):
+        # an invited sign-in with its one-time password (#345): the only
+        # thing it can do is set a password of its own (the auth routes
+        # are exempt above)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": "Set a password of your own first: the one you signed "
+                "in with was for one use."
+            },
         )
 
     # Idle session cap. Sliding window — every authenticated hit refreshes
@@ -950,19 +1195,72 @@ class ActingUserContextMiddleware:
                     override = _closing_password_from_header(value.decode("latin-1"))
         token = _acting_username.set(acting)
         override_token = _closing_date_password.set(override)
+        # The company this request works in (#358), here for the same reason
+        # as the username: every Session the request opens binds to it.
+        company_token = _served_company.set(_request_company(scope, session))
         try:
             await self.app(scope, receive, send)
         finally:
+            _served_company.reset(company_token)
             _closing_date_password.reset(override_token)
             _acting_username.reset(token)
 
 
-# ---- Session cookie (Phase 9.7) ----
-app.add_middleware(ActingUserContextMiddleware)
+def _request_company(scope, session) -> str | None:
+    """The company file a request works in: the one its session chose, or,
+    for an API token's request (no sign-in), the one its
+    X-SlowBooks-Company header names, where the token is then looked up.
+    None is the company the server was started for."""
+    from app.services import served_companies
 
-# Added AFTER require_session so SessionMiddleware becomes the outer
-# layer (Starlette: last added = outermost). That way request.session
-# is populated by the time require_session dispatches.
+    chosen = served_companies.chosen_file(session)
+    if chosen is not None or session.get("authenticated") is True:
+        return chosen
+    wanted = _COMPANY_HEADER.lower().encode("latin-1")
+    for name, value in scope.get("headers") or []:
+        if name == wanted:
+            return served_companies.chosen_file(
+                {served_companies.SESSION_FILE_KEY: value.decode("latin-1").strip()}
+            )
+    return None
+
+
+# ---- Middleware stack ----
+# Registered here, as one ordered block, because every constraint below is
+# about ORDER and Starlette resolves order by registration sequence: the
+# LAST add_middleware call is the OUTERMOST layer (runs first on the way in,
+# last on the way out). Registering innermost-first, the resulting stack is,
+# outermost to innermost:
+#
+#   HTTPS redirect -> CORS -> security headers -> session cookie
+#     -> acting-user context -> auth gate -> gzip -> routes
+#
+# Why this order:
+#   - HTTPS redirect outermost: a plain-HTTP request is promoted before any
+#     cookie is parsed or the app is touched. A no-op behind a TLS proxy.
+#   - CORS outside the auth gate: a browser preflight (OPTIONS) is sent
+#     WITHOUT credentials, so if it reached require_session it would be
+#     answered 401 with no Access-Control-Allow-* headers — breaking every
+#     cross-origin call after a successful login. It must be answered by
+#     CORSMiddleware before auth. The allow-list is unchanged; credentials
+#     still never combine with a wildcard origin.
+#   - Security headers outside the auth gate: so the gate's own 401/403/503
+#     refusals (unauthenticated, role refusal, CompanyUnavailable) still
+#     carry CSP, X-Frame-Options, nosniff, Referrer-Policy and HSTS.
+#     _set_if_unset means a route that already chose a stricter value (the
+#     portal's Referrer-Policy: no-referrer) still wins, since routes run
+#     inside this layer.
+#   - SessionMiddleware outside the gate and ActingUserContextMiddleware:
+#     both read the session (request.session / scope["session"]), which it
+#     populates.
+#   - ActingUserContextMiddleware outside the gate: it sets the acting-user
+#     and served-company contextvars before require_session opens the
+#     company and before any route runs.
+#   - gzip innermost: it only needs to compress route payloads; the gate's
+#     short refusals are tiny and need no compression.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+app.add_middleware(BaseHTTPMiddleware, dispatch=require_session)
+app.add_middleware(ActingUserContextMiddleware)
 app.add_middleware(
     SessionMiddleware,
     secret_key=get_session_secret(),
@@ -974,6 +1272,21 @@ app.add_middleware(
     # if the app insists on HTTPS, the session cookie must too.
     https_only=FORCE_HTTPS,
 )
+app.add_middleware(BaseHTTPMiddleware, dispatch=security_headers)
+# Wildcard origins with credentials is a CSRF amplifier. Default to just
+# localhost; override with ALLOWED_ORIGINS env var (comma-separated) for
+# a custom LAN hostname like http://slowbooks.local:3001.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# Outermost: promote plain HTTP to HTTPS before anything else sees the
+# request. Behind a TLS-terminating proxy this is a no-op.
+if FORCE_HTTPS:
+    app.add_middleware(HTTPSRedirectMiddleware)
 
 # Phase 9.7: Auth routes MUST be included (they're exempt from the session gate)
 app.include_router(auth_routes.router)
@@ -1029,6 +1342,9 @@ app.include_router(users_routes.router)
 app.include_router(api_tokens_routes.router)
 app.include_router(tax.router)
 app.include_router(backups.router)
+app.include_router(company_file_routes.router)
+app.include_router(accountants_copy_routes.router)
+app.include_router(reclassify_routes.router)
 app.include_router(system_routes.router)
 # Phase 6: Ambitious
 app.include_router(companies.router)
@@ -1039,7 +1355,6 @@ app.include_router(provider_payments.router)
 app.include_router(provider_payments.legacy_stripe_router)
 app.include_router(public.router)
 # Phase 8: QuickBooks Online
-app.include_router(qbo.router)
 # Phase 9: Analytics (real-time business intelligence)
 app.include_router(analytics.router)
 # Phase 9: Forum Bug Fixes & Missing Features
@@ -1087,8 +1402,76 @@ static_dir = Path(__file__).parent / "static"
 # who could reach the server. Each company now keeps its files in its own
 # database and serves them through signed-in routes; the folder is left on
 # disk (the upgrade copies from it, and other companies may still need it)
-# but nothing reads it over HTTP. Registered before the /static mount, which
-# on a server install covers app/static/uploads too.
+# but nothing reads it over HTTP.
+#
+# The route below answers 404 for the literal /static/uploads/ prefix, but a
+# route only matches that one spelling — StaticFiles resolves the request path
+# itself, so /static//uploads/<file> and /static/css/%2e%2e/uploads/<file>
+# slipped past the route and the mount served the file with 200. The real
+# defence is the mount: resolve the request against the static directory
+# and refuse it if it lands inside <static>/uploads, whatever spelling got it
+# there. The route stays as belt-and-braces for the common path.
+class _UploadsHiddenStaticFiles(StaticFiles):
+    """A /static mount that never serves anything under the uploads folder."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The one folder that must stay unreachable, as its resolved real path
+        # with the filesystem's case folding — normcase so a request for
+        # UPLOADS matches uploads on macOS/Windows; realpath so symlinks and
+        # the parent's real location are accounted for. Computed once; it is
+        # the same folder for the life of the mount even if it does not exist
+        # yet (realpath still normalises a missing path).
+        self._uploads_prefix = os.path.normcase(
+            os.path.realpath(os.path.join(str(self.directory), "uploads"))
+        )
+
+    def lookup_path(self, path):
+        try:
+            full_path, stat_result = super().lookup_path(path)
+        except (OSError, ValueError):
+            # A name the filesystem can't hold (on Windows ':' or one of
+            # < > ? * " |) is not a file here: a 404, not a 500 (2.26.0 gate,
+            # W-31). Starlette catches only FileNotFoundError and
+            # NotADirectoryError.
+            return "", None
+        if full_path and self._inside_uploads(
+            os.path.normcase(os.path.realpath(full_path))
+        ):
+            return "", None
+        return full_path, stat_result
+
+    def _inside_uploads(self, resolved: str) -> bool:
+        """Whether a resolved real path is the uploads folder or inside it."""
+        if resolved == self._uploads_prefix or resolved.startswith(
+            self._uploads_prefix + os.sep
+        ):
+            return True
+        # A case-insensitive filesystem (macOS, Windows) opens UPLOADS as
+        # uploads, but normcase folds case on Windows only and realpath keeps
+        # the spelling asked for, so the string test above misses it on a
+        # Mac. Ask the filesystem instead: walk from the file up to the
+        # static root and compare each folder's identity with the uploads
+        # folder's. A few stats per asset, and none when the folder is gone.
+        try:
+            uploads_stat = os.stat(self._uploads_prefix)
+        except OSError:
+            return False
+        root = os.path.normcase(os.path.realpath(str(self.directory)))
+        here = resolved
+        while here.startswith(root):
+            try:
+                if os.path.samestat(os.stat(here), uploads_stat):
+                    return True
+            except OSError:
+                return False
+            parent = os.path.dirname(here)
+            if parent == here:
+                return False
+            here = parent
+        return False
+
+
 @app.api_route(
     "/static/uploads/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False
 )
@@ -1096,7 +1479,9 @@ async def _uploads_folder_is_not_served(rest: str):
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+app.mount(
+    "/static", _UploadsHiddenStaticFiles(directory=str(static_dir)), name="static"
+)
 
 # SPA entry point
 index_path = Path(__file__).parent.parent / "index.html"

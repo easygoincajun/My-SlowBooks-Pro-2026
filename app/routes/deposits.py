@@ -195,6 +195,46 @@ def get_deposit(deposit_id: int, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/{deposit_id}/pdf")
+def deposit_pdf(deposit_id: int, db: Session = Depends(get_db)):
+    """The deposit slip as a PDF (#260): the account, the date, each
+    payment taken and the total; a void deposit's says VOID. Tagged like
+    every other document."""
+    from fastapi.responses import Response
+
+    from app.services.pdf_service import generate_deposit_pdf
+    from app.services.request_utils import content_disposition
+    from app.services.settings_service import get_all_settings
+
+    detail = get_deposit(deposit_id, db)
+    pdf = generate_deposit_pdf(detail.model_dump(), get_all_settings(db))
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": content_disposition(
+                f"Deposit_{detail.date.isoformat()}.pdf"
+            )
+        },
+    )
+
+
+@router.get("/{deposit_id}/print-preview")
+def deposit_print_preview(deposit_id: int, db: Session = Depends(get_db)):
+    """The slip as a page for the browser's print dialog."""
+    from fastapi.responses import HTMLResponse
+
+    from app.services.pdf_service import render_deposit_html
+    from app.services.settings_service import get_all_settings
+
+    detail = get_deposit(deposit_id, db)
+    html_str = render_deposit_html(detail.model_dump(), get_all_settings(db))
+    html_str = html_str.replace(
+        "</body>", "<script>window.onload=function(){window.print();}</script></body>"
+    )
+    return HTMLResponse(content=html_str)
+
+
 @router.post("")
 def create_deposit(data: DepositCreate, db: Session = Depends(get_db)):
     check_closing_date(db, data.date)

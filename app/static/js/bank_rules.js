@@ -44,14 +44,27 @@ const BankRulesPage = {
         return html;
     },
 
-    async showForm(id = null) {
+    // What a rule made from elsewhere does when saved (the banking page's
+    // "Rule…" on a statement line, #259): run, then return there. The
+    // rules list is the default.
+    _afterSave: null,
+
+    // prefill: a rule's fields filled in from another screen (#259).
+    async showForm(id = null, prefill = null) {
         let rule = { name: '', pattern: '', account_id: '', vendor_id: '', rule_type: 'contains', priority: 0, is_active: true };
         if (id) rule = await API.get(`/bank-rules/${id}`);
+        if (prefill) {
+            const { afterSave, from, ...fields } = prefill;
+            rule = { ...rule, ...fields };
+            BankRulesPage._afterSave = afterSave || null;
+        } else {
+            BankRulesPage._afterSave = null;
+        }
 
         const accounts = await API.get('/accounts');
         const acctOpts = accounts
             .filter(a => ['expense','income','asset','liability','cogs'].includes(a.account_type))
-            .map(a => `<option value="${a.id}" ${rule.account_id==a.id?'selected':''}>${escapeHtml(a.account_number)} - ${escapeHtml(a.name)}</option>`).join('');
+            .map(a => `<option value="${a.id}" ${rule.account_id==a.id?'selected':''}>${accountLabel(a)}</option>`).join('');
 
         openModal(id ? 'Edit Bank Rule' : 'New Bank Rule', `
             <form onsubmit="BankRulesPage.save(event, ${id})">
@@ -60,6 +73,7 @@ const BankRulesPage = {
                         <input name="name" required value="${escapeHtml(rule.name)}"></div>
                     <div class="form-group"><label>Payee Pattern *</label>
                         <input name="pattern" required value="${escapeHtml(rule.pattern)}" placeholder="e.g. AMZN or Amazon"></div>
+                    ${prefill && prefill.from ? `<div class="form-group full-width form-hint" style="font-size:11px; color:var(--gray-500);">From ${escapeHtml(prefill.from)}: the pattern is its payee, matched by Contains in any case. A shorter pattern catches other spellings, and a very short one ("CO") catches too much.</div>` : ''}
                     <div class="form-group"><label>Match Type</label>
                         <select name="rule_type">
                             <option value="contains" ${rule.rule_type==='contains'?'selected':''}>Contains</option>
@@ -93,6 +107,9 @@ const BankRulesPage = {
         try {
             if (id) { await API.put(`/bank-rules/${id}`, data); toast('Rule updated'); }
             else { await API.post('/bank-rules', data); toast('Rule created'); }
+            const after = BankRulesPage._afterSave;
+            BankRulesPage._afterSave = null;
+            if (after) { await after(); return; }
             closeModal();
             App.navigate('#/bank-rules');
         } catch (err) { toast(err.message, 'error'); }

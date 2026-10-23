@@ -4,6 +4,8 @@ format quirks."""
 
 import io
 
+import pytest
+
 from app.models.accounts import Account, AccountType
 from app.models.transactions import Transaction, TransactionLine
 
@@ -38,7 +40,7 @@ def _assert_balanced(db_session, journals):
 
 def test_sources_listing(client):
     keys = {s["key"] for s in client.get("/api/migration/sources").json()}
-    assert keys == {"xero", "myob", "sage", "wave", "zoho", "gnucash"}
+    assert keys == {"xero", "myob", "sage", "wave", "zoho", "gnucash", "qbo_export"}
 
 
 def test_unknown_source_400(client):
@@ -243,3 +245,111 @@ def test_wave_trial_balance_report_shape(client, seed_accounts):
     )
     data = resp.json()
     assert data["ok"] is True, data["errors"]
+
+
+# These are deliberately malformed synthetic inputs, not vendor export samples.
+@pytest.mark.parametrize(
+    "source,coa,gl",
+    [("sage", SAGE_COA, SAGE_GL), ("zoho", ZOHO_COA, ZOHO_GL)],
+    ids=["sage", "zoho"],
+)
+@pytest.mark.parametrize(
+    "filename,label",
+    [
+        ("chart.csv", "chart of accounts"),
+        ("journal.csv", "general ledger"),
+        ("trial.csv", "trial balance"),
+    ],
+)
+@pytest.mark.parametrize("content", ["", "Unexpected,Columns\nexample,123\n"])
+def test_migration_refuses_files_with_no_recognized_records(
+    client, db_session, seed_accounts, source, coa, gl, filename, label, content
+):
+    from app.models.settings import Settings
+
+    before = (
+        db_session.query(Account).count(),
+        db_session.query(Transaction).count(),
+        db_session.query(Settings).count(),
+    )
+    files = {"chart.csv": coa, "journal.csv": gl, filename: content}
+    for action in ("dry-run", "import"):
+        response = client.post(
+            f"/api/migration/{source}/{action}", files=_files(**files)
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["ok"] is False, data
+        assert any(f"no {label} records" in e.lower() for e in data["errors"]), data
+        if action == "import":
+            assert data["imported_accounts"] == data["imported_journals"] == 0
+    db_session.expire_all()
+    assert (
+        db_session.query(Account).count(),
+        db_session.query(Transaction).count(),
+        db_session.query(Settings).count(),
+    ) == before
+
+
+def test_sage_zero_trial_balance_is_data_not_an_empty_file(client, seed_accounts):
+    tb = (
+        "Account Description,Debit,Credit\n"
+        "Regular Checking Account,0,0\n"
+        "Sales,0,0\n"
+    )
+    response = client.post(
+        "/api/migration/sage/dry-run",
+        files=_files(
+            **{"chart.csv": SAGE_COA, "journal.csv": SAGE_GL, "trial.csv": tb}
+        ),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["ok"] is True, data["errors"]
+    assert len(data["opening_balances"]) == 2
+
+
+def test_sage_header_only_ledger_is_refused_before_opening_balances(
+    client, db_session, seed_accounts
+):
+    before = db_session.query(Account).count()
+    response = _import(
+        client,
+        "sage",
+        **{
+            "chart.csv": SAGE_COA,
+            "journal.csv": SAGE_GL.splitlines()[0] + "\n",
+            "trial.csv": (
+                "Account Description,Debit,Credit\n"
+                "Regular Checking Account,1000,\n"
+                "Sales,,1000\n"
+            ),
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["ok"] is False
+    assert data["imported_accounts"] == data["imported_journals"] == 0
+    assert any("No general ledger records" in e for e in data["errors"])
+    assert db_session.query(Account).count() == before
+
+
+def test_a_header_only_chart_beside_a_good_ledger_blames_the_chart_alone(
+    client, seed_accounts
+):
+    """The ledger's rows were read, then refused one by one because the
+    empty chart lists none of their accounts; "No general ledger records
+    were recognised" beside those errors blamed a good file (2.23.1 gate,
+    W-1 / NEW-97). The sentence names a file only when its parser read
+    nothing and had nothing to say."""
+    response = client.post(
+        "/api/migration/sage/dry-run",
+        files=_files(
+            **{"chart.csv": SAGE_COA.splitlines()[0] + "\n", "journal.csv": SAGE_GL}
+        ),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["ok"] is False
+    assert any("No chart of accounts records" in e for e in data["errors"]), data
+    assert not any("No general ledger records" in e for e in data["errors"]), data

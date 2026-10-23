@@ -19,6 +19,7 @@ from app.services.ofx_import import import_transactions
 JS_DIR = Path(__file__).resolve().parents[1] / "app/static/js"
 BANKING_JS = (JS_DIR / "banking.js").read_text(encoding="utf-8")
 DASHBOARD_JS = (JS_DIR / "dashboard.js").read_text(encoding="utf-8")
+APP_JS = (JS_DIR / "app.js").read_text(encoding="utf-8")
 
 
 @pytest.fixture
@@ -127,6 +128,10 @@ def test_a_register_is_a_route_of_its_own():
     assert '<a class="card card-link" href="#/banking/${a.account_id}"' in BANKING_JS
     assert '<a class="card card-link" href="#/banking/${b.id}"' in DASHBOARD_JS
     go = re.search(r"\n    go\(hash\) \{.*?\n    \},\n", BANKING_JS, re.S)
-    assert go and "location.hash = hash" in go.group(0)
+    # through App.navigate, which puts the address on the bar itself
+    # (pushState) and resolves once the page is drawn (2.23.5 round 3,
+    # W-17 / NEW-146: setting location.hash returned before the redraw)
+    assert go and "return App.navigate(hash);" in go.group(0)
+    assert "history.pushState(App.entryState(here), '', `#${full}`);" in APP_JS
     # nothing in the banking pages renders a register without its address
     assert not re.search(r"App\.navigate\(['`]#/banking", BANKING_JS)

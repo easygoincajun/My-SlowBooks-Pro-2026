@@ -47,6 +47,7 @@ from tests.test_theme_contrast import (  # noqa: E402,F401  (the fixtures)
     _served_by,
     _visit,
     browser_fixture,
+    new_page,
     company_fixture,
     settle,
 )
@@ -69,7 +70,7 @@ def _open_at(browser, client, page_hash):
     """A fresh document at the address: what a bookmark, a pasted link or a
     reload does."""
     handled = []
-    page = browser.new_page(viewport={"width": 1500, "height": 980})
+    page = new_page(browser, viewport={"width": 1500, "height": 980})
     page.route("**/*", _served_by(client, handled, SERVED))
     page.goto(f"{ORIGIN}/{page_hash}")
     page.wait_for_function("window.App && document.readyState === 'complete'")

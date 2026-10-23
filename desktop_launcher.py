@@ -309,8 +309,16 @@ def prepare_env() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _server_env(db_url: str, port: int, bind_host: str = "127.0.0.1") -> dict:
+def _server_env(
+    db_url: str, port: int, bind_host: str = "127.0.0.1", key: bytes | None = None
+) -> dict:
     env = dict(os.environ)
+    # The company file's key (#290), when the file is encrypted: the server
+    # child and a migration child take it from here, so neither opens the
+    # file without it. A value inherited from the shell never leaks through.
+    env.pop("SLOWBOOKS_COMPANY_FILE_KEY", None)
+    if key is not None:
+        env["SLOWBOOKS_COMPANY_FILE_KEY"] = key.hex()
     env.update(
         {
             "DATABASE_URL": db_url,
@@ -332,8 +340,12 @@ def _server_env(db_url: str, port: int, bind_host: str = "127.0.0.1") -> dict:
     return env
 
 
-def migrate(db_url: str, output=None) -> None:
+def migrate(db_url: str, output=None, key: bytes | None = None) -> None:
     """Run `alembic upgrade head` against the chosen company database.
+
+    ``key`` is the company file's key when it is encrypted (#290): in hand
+    before the migration opens the file, handed over in-process through
+    the alembic config or to a child through its environment.
 
     Only meaningfully does work the first time a company file is opened
     (or after an app update ships new migrations); safe to run every time.
@@ -353,6 +365,7 @@ def migrate(db_url: str, output=None) -> None:
         cfg = Config(str(ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(ROOT / "migrations"))
         cfg.attributes["database_url"] = db_url
+        cfg.attributes["company_file_key"] = key
         os.environ["SLOWBOOKS_DATA_DIR"] = str(get_data_dir())
         # env.py imports app.database (import-time engine): make sure that
         # binds to SQLite — the bundle ships no Postgres driver.
@@ -363,7 +376,7 @@ def migrate(db_url: str, output=None) -> None:
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=ROOT,
-        env=_server_env(db_url, 0),
+        env=_server_env(db_url, 0, key=key),
         check=True,
         stdout=output,
         stderr=subprocess.STDOUT if output else None,
@@ -371,7 +384,11 @@ def migrate(db_url: str, output=None) -> None:
 
 
 def start_server(
-    db_url: str, port: int, output=None, bind_host: str = "127.0.0.1"
+    db_url: str,
+    port: int,
+    output=None,
+    bind_host: str = "127.0.0.1",
+    key: bytes | None = None,
 ) -> subprocess.Popen:
     if FROZEN:
         # Re-exec this same bundled exe; --_serve (handled at the top of
@@ -381,24 +398,16 @@ def start_server(
         cwd = get_data_dir()
         cwd.mkdir(parents=True, exist_ok=True)
     else:
-        cmd = [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            bind_host,
-            "--port",
-            str(port),
-            # cmd.exe consoles don't render ANSI colors by default; without
-            # this the logs are full of "<-[32m" escape-code garbage.
-            "--no-use-colors",
-        ]
+        # The same --_serve child as the frozen build, so a source run gets
+        # the parent watcher too (#52). A bare `-m uvicorn` child had none:
+        # Command-Q left it on the port, and the next launch was refused as
+        # "already running". Host and port reach it through _server_env().
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--_serve"]
         cwd = ROOT
     return subprocess.Popen(
         cmd,
         cwd=cwd,
-        env=_server_env(db_url, port, bind_host),
+        env=_server_env(db_url, port, bind_host, key=key),
         stdout=output,
         stderr=subprocess.STDOUT if output else None,
     )
@@ -445,14 +454,25 @@ def _server_already_running(port: int) -> bool:
         return False
 
 
+class LockedCompany(RuntimeError):
+    """An encrypted company file whose key is in its keyring (#290): the
+    picker unlocks it with an administrator's sign-in or the recovery key.
+    ``str(exc)`` is the sentence to show."""
+
+
 def launch_company(
     filename: str,
     port: int,
     output=None,
     bind_host: str = "127.0.0.1",
     persist: bool = True,
+    key: bytes | None = None,
 ) -> subprocess.Popen:
     """Point the app at a company file, migrate it, and start the server.
+
+    ``key`` is the company file's key when the picker unlocked it (#290:
+    an administrator's sign-in or the recovery key); otherwise the key is
+    resolved from the environment as before.
 
     ``persist`` records the choice as the desktop app's state (.env
     DATABASE_URL + last-opened) — right for the windowed picker, wrong for
@@ -460,7 +480,33 @@ def launch_company(
     the next windowed launch (issue #110). The server itself takes its
     DATABASE_URL from the environment start_server() builds, so nothing
     needs the file."""
-    from app.services import company_service
+    from app.services import company_file, company_service
+
+    db_path = company_service.company_db_path(filename)
+    if db_path is None:
+        raise ValueError(f"Invalid company file name: {filename!r}")
+
+    # The key is in hand before anything opens the file (#290): before the
+    # already-running probe, before the migrations, before the server
+    # child, which takes it from the environment start_server() builds. An
+    # encrypted file with no key stops here, with one sentence.
+    if key is None:
+        key = company_file.resolve_key()
+    company_file.sweep_stale_conversions(db_path)
+    if company_file.is_encrypted_file(db_path):
+        if key is None:
+            from app.services import company_keyring
+
+            if company_keyring.exists(db_path):
+                # the desktop's own key: the picker asks for a sign-in
+                raise LockedCompany(company_keyring.LOCKED_MESSAGE)
+            raise RuntimeError(company_file.NO_KEY_MESSAGE)
+        # A wrong key is refused before the migration opens the file
+        # writable, so it writes nothing (NEW-109).
+        try:
+            company_file.verify_key(db_path, key)
+        except company_file.CompanyFileLocked as exc:
+            raise RuntimeError(str(exc)) from exc
 
     # A second launch while the app is already open would lose the fight
     # for the port and fail confusingly -- say what's actually wrong.
@@ -471,18 +517,14 @@ def launch_company(
             "Manager if no window is visible -- then try again."
         )
 
-    db_path = company_service.company_db_path(filename)
-    if db_path is None:
-        raise ValueError(f"Invalid company file name: {filename!r}")
-
     db_url = "sqlite:///" + db_path.as_posix()
     if persist:
         set_env_value("DATABASE_URL", db_url)
         company_service.set_last_opened(filename)
 
-    migrate(db_url, output=output)
+    migrate(db_url, output=output, key=key)
 
-    proc = start_server(db_url, port, output=output, bind_host=bind_host)
+    proc = start_server(db_url, port, output=output, bind_host=bind_host, key=key)
     # 0.0.0.0 includes loopback; a specific interface bind does not.
     health_host = "127.0.0.1" if bind_host in ("127.0.0.1", "0.0.0.0") else bind_host
     if not wait_for_health(proc, port, host=health_host):
@@ -527,6 +569,19 @@ PICKER_HTML = """<!DOCTYPE html>
   #status { margin-top: 16px; font-size: 13px; color: #556; min-height: 18px; }
   #status.error { color: #c0392b; }
   .empty { color: #778; font-size: 13px; margin-bottom: 8px; }
+  #unlock { margin-top: 16px; background: #fff; border: 1px solid #d8dee4; border-radius: 8px; padding: 16px; }
+  #unlock h2 { font-size: 15px; margin: 0 0 4px; color: #1a2b3c; }
+  #unlock p { font-size: 12px; color: #556; margin: 0 0 10px; line-height: 1.5; }
+  #unlock label { display: block; font-size: 12px; color: #334; margin: 8px 0 3px; }
+  #unlock input { width: 100%; box-sizing: border-box; padding: 8px 10px;
+                  border: 1px solid #c6ccd4; border-radius: 6px; font-size: 14px; }
+  #unlock .row { display: flex; gap: 8px; margin-top: 12px; }
+  #unlock button { flex: 1; padding: 9px; border: 0; border-radius: 6px; background: #2f6fed;
+                   color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  #unlock button.alt { background: #e8ecf1; color: #1a2b3c; }
+  #unlock button:disabled { background: #a9bce0; cursor: default; }
+  #unlock .switch { font-size: 12px; color: #2f6fed; cursor: pointer; background: none; border: 0;
+                    padding: 0; margin-top: 10px; text-decoration: underline; flex: none; font-weight: 400; }
 </style>
 </head>
 <body>
@@ -538,9 +593,74 @@ PICKER_HTML = """<!DOCTYPE html>
     <input id="newname" placeholder="New company name (e.g. Acme Consulting)">
     <button id="createbtn" onclick="createCompany()">+ Create New Company</button>
   </div>
+  <div id="unlock" hidden>
+    <h2 id="unlock-title">Unlock the company file</h2>
+    <p>This company file is encrypted. Sign in as an administrator to open it, or enter its recovery key.</p>
+    <div id="unlock-signin">
+      <label for="unlock-user">Username</label>
+      <input id="unlock-user" autocomplete="username" list="unlock-admins">
+      <datalist id="unlock-admins"></datalist>
+      <label for="unlock-pass">Password</label>
+      <input id="unlock-pass" type="password" autocomplete="current-password">
+    </div>
+    <div id="unlock-recovery" hidden>
+      <label for="unlock-key">Recovery key</label>
+      <input id="unlock-key" autocomplete="off" placeholder="ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567" spellcheck="false">
+    </div>
+    <div class="row">
+      <button id="unlock-btn" onclick="unlock()">Unlock and open</button>
+      <button class="alt" onclick="hideUnlock()">Cancel</button>
+    </div>
+    <button class="switch" id="unlock-switch" onclick="switchUnlock()">Use the recovery key instead</button>
+  </div>
   <div id="status"></div>
 </div>
 <script>
+var unlocking = null;  // the file waiting for its key
+function showUnlock(file, name, admins) {
+  unlocking = file;
+  document.getElementById('unlock-title').textContent = 'Unlock ' + (name || 'the company file');
+  document.getElementById('unlock-admins').innerHTML = (admins || []).map(function (a) { return '<option value="' + esc(a) + '">'; }).join('');
+  if ((admins || []).length === 1) document.getElementById('unlock-user').value = admins[0];
+  document.getElementById('unlock-pass').value = '';
+  document.getElementById('unlock-key').value = '';
+  document.getElementById('unlock').hidden = false;
+  setStatus('');
+  (document.getElementById('unlock-user').value ? document.getElementById('unlock-pass') : document.getElementById('unlock-user')).focus();
+}
+function hideUnlock() {
+  unlocking = null;
+  document.getElementById('unlock').hidden = true;
+  setBusy(false);
+}
+function switchUnlock() {
+  var signin = document.getElementById('unlock-signin'), recovery = document.getElementById('unlock-recovery');
+  var toRecovery = recovery.hidden;
+  signin.hidden = toRecovery; recovery.hidden = !toRecovery;
+  document.getElementById('unlock-switch').textContent = toRecovery ? 'Sign in as an administrator instead' : 'Use the recovery key instead';
+  (toRecovery ? document.getElementById('unlock-key') : document.getElementById('unlock-user')).focus();
+}
+async function unlock() {
+  if (!unlocking) return;
+  var recovery = document.getElementById('unlock-recovery').hidden ? '' : document.getElementById('unlock-key').value;
+  var user = document.getElementById('unlock-user').value, pass = document.getElementById('unlock-pass').value;
+  if (!recovery && !(user && pass)) { setStatus('Enter the username and password, or the recovery key.', true); return; }
+  var btn = document.getElementById('unlock-btn');
+  btn.disabled = true;
+  setStatus('Unlocking… this takes a moment.');
+  var result = await window.pywebview.api.unlock_company(unlocking, user, pass, recovery);
+  if (result && result.success) {
+    window.location.href = result.url;
+    return;
+  }
+  setStatus((result && result.error) || 'Could not unlock the company file.', true);
+  btn.disabled = false;
+  document.getElementById('unlock-pass').value = '';
+  (recovery ? document.getElementById('unlock-key') : document.getElementById('unlock-pass')).focus();
+}
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && !document.getElementById('unlock').hidden && e.target.closest('#unlock')) unlock();
+});
 function setStatus(msg, isError) {
   const el = document.getElementById('status');
   el.textContent = msg || '';
@@ -596,6 +716,10 @@ async function openCompany(file, name) {
     // page, throwing 'window.pywebview._returnValuesCallbacks... is
     // not a function' in a background thread.
     window.location.href = result.url;
+  } else if (result && result.locked) {
+    // the desktop's own key (#290): an administrator's sign-in, or the
+    // recovery key, unlocks it here
+    showUnlock(file, name, result.admins);
   } else {
     setStatus((result && result.error) || 'Could not open company.', true);
     setBusy(false);
@@ -699,7 +823,10 @@ def _given_folder(folder: str) -> str:
 def _folder_for(filename: str) -> str:
     """The folder for a PDF: Documents for a document someone is sent,
     Reports for everything else."""
-    kind = str(filename or "").split("_", 1)[0].replace("-", "").lower()
+    # the kind is the name's first word, read off the stem: "Check.pdf" (a
+    # check with no number) is a check too (2.24.1 gate, NEW-168)
+    stem = Path(str(filename or "")).stem
+    kind = stem.split("_", 1)[0].replace("-", "").lower()
     return "Documents" if kind in _DOCUMENT_KINDS else "Reports"
 
 
@@ -1160,6 +1287,42 @@ class PickerApi:
             result["note"] = note
         return result
 
+    def save_secret_file(self, name: str, text: str) -> dict:
+        """Save a text the person must keep (the company file's recovery
+        key, #290) where they choose, through a native Save panel. Not
+        save_document_file: that lands in Documents/SlowBooks Pro/Reports
+        with every export, which iCloud or OneDrive sync on many machines
+        (2.24.0 gate: both agents saw the key go to a cloud folder).
+        Returns {"success", "path"}, {"cancelled": True} when the panel is
+        dismissed, or {"success": False, "error"}."""
+        try:
+            import webview
+
+            window = self._window
+            if window is None:
+                return {"success": False, "error": "no window"}
+            safe = _safe_temp_filename(
+                Path(str(name or "recovery key.txt")).stem, ".txt"
+            )
+            chosen = window.create_file_dialog(
+                webview.SAVE_DIALOG,
+                directory=str(Path.home()),
+                save_filename=safe,
+            )
+            if not chosen:
+                return {"success": False, "cancelled": True}
+            dest = Path(chosen[0] if isinstance(chosen, (list, tuple)) else chosen)
+            if not dest.suffix:
+                dest = dest.with_suffix(".txt")
+            dest.write_text(str(text or ""), encoding="utf-8")
+            try:
+                os.chmod(dest, 0o600)
+            except OSError:
+                pass
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+        return {"success": True, "path": str(dest)}
+
     def reveal_path(self, path: str) -> dict:
         """Open the folder that holds a file this app saved (Explorer /
         Finder / the desktop's file manager). Only paths under the app's
@@ -1285,6 +1448,51 @@ class PickerApi:
         """
         try:
             self._server = launch_company(filename, self._port, output=self._log_fh)
+        except LockedCompany as exc:
+            # the desktop's own key (#290): the picker asks for an
+            # administrator's sign-in, or the recovery key
+            from app.services import company_keyring, company_service
+
+            ring = company_keyring.load(company_service.company_db_path(filename))
+            return {
+                "success": False,
+                "locked": True,
+                "error": str(exc),
+                "admins": company_keyring.admins(ring),
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+        return {"success": True, "url": f"http://127.0.0.1:{self._port}"}
+
+    def unlock_company(
+        self,
+        filename: str,
+        username: str = "",
+        password: str = "",
+        recovery_key: str = "",
+    ) -> dict:
+        """Unlock an encrypted company file with an administrator's sign-in
+        or its recovery key (#290), then launch it. The key goes to the
+        server child through its environment, as a launcher-resolved key
+        does; nothing is written anywhere."""
+        from app.services import company_keyring, company_service
+
+        db_path = company_service.company_db_path(filename)
+        if db_path is None:
+            return {
+                "success": False,
+                "error": f"Invalid company file name: {filename!r}",
+            }
+        try:
+            key = company_keyring.unlock(
+                db_path, username=username, password=password, recovery_key=recovery_key
+            )
+        except company_keyring.Locked as exc:
+            return {"success": False, "locked": True, "error": str(exc)}
+        try:
+            self._server = launch_company(
+                filename, self._port, output=self._log_fh, key=key
+            )
         except Exception as exc:
             return {"success": False, "error": str(exc)}
         return {"success": True, "url": f"http://127.0.0.1:{self._port}"}
@@ -1626,6 +1834,43 @@ def _lan_addresses() -> list[str]:
     return seen
 
 
+def _migrate_other_companies(started: str, output=None) -> list[str]:
+    """Server Edition serves every company in the list (#358): bring each
+    one besides the company it starts for up to this version first, the
+    way launch_company() does that one. A company that cannot be (no key
+    for an encrypted file, a failed migration) is named and skipped; the
+    server refuses to open it until it is. Returns the files skipped."""
+    from app.services import company_file, company_service
+
+    skipped = []
+    for entry in company_service.manifest_list_companies():
+        filename = entry["file"]
+        if filename == started:
+            continue
+        db_path = company_service.company_db_path(filename)
+        if db_path is None or not db_path.exists():
+            continue
+        key = None
+        if company_file.is_encrypted_file(db_path):
+            key = company_file.install_key()
+            if key is None:
+                print(
+                    f"WARNING: {filename} is encrypted under a key of its own "
+                    "and is not served; set COMPANY_FILE_ENCRYPTION_SECRET to serve it."
+                )
+                skipped.append(filename)
+                continue
+        try:
+            migrate("sqlite:///" + db_path.as_posix(), output=output, key=key)
+        except Exception as exc:  # one company must not stop the others
+            print(
+                f"WARNING: could not bring {filename} up to date ({exc}); "
+                "it is not served until it is."
+            )
+            skipped.append(filename)
+    return skipped
+
+
 def _start_default_company(
     port: int, bind_host: str = "127.0.0.1", output=None
 ) -> subprocess.Popen | None:
@@ -1646,11 +1891,21 @@ def _start_default_company(
                 return None
             filename = result["file"]
 
+    # every company the server will serve (#358); not while another server
+    # has them open (launch_company says so below)
+    if bind_host != "127.0.0.1" and not _server_already_running(port):
+        _migrate_other_companies(filename, output=output)
+
     print(f"Opening company file: {filename}")
     try:
         return launch_company(
             filename, port, bind_host=bind_host, persist=False, output=output
         )
+    except LockedCompany:
+        from app.services import company_keyring
+
+        print(f"ERROR: {company_keyring.HEADLESS_MESSAGE}")
+        return None
     except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}")
         return None
@@ -1687,8 +1942,15 @@ def _watch_parent(parent_pid: int, poll_seconds: float = 2.0) -> None:
     Server Edition is preserved BY DESIGN, not by accident: in
     --serve-lan / scheduled-task mode the launcher parent stays alive
     holding proc.wait(), so the watcher never fires and the server runs
-    perpetually. POSIX only (macOS + Linux); on Windows every quit path
-    goes through the window-close cleanup that already works.
+    perpetually.
+
+    POSIX (macOS + Linux) polls the parent: signal 0 and getppid. Windows
+    (2.22.3 gate, W-7) holds a handle on the parent process and waits on
+    it: WaitForSingleObject returns when the launcher is gone however it
+    went — Task Manager's End task, a crash, TerminateProcess — which the
+    window-close cleanup never saw, so the server sat on its port and the
+    next launch was refused as "already running". The handle pins the
+    process object, so a reused pid cannot fool it.
 
     (Deliberate "keep serving after the window closes" is a designed
     v2.6 feature — tray indicator + relaunch adoption — not an accident
@@ -1696,6 +1958,28 @@ def _watch_parent(parent_pid: int, poll_seconds: float = 2.0) -> None:
     """
     import threading
     import time as _t
+
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        SYNCHRONIZE = 0x00100000
+        INFINITE = 0xFFFFFFFF
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        handle = k32.OpenProcess(SYNCHRONIZE, False, int(parent_pid))
+        if not handle:
+            return  # no such process, or no right to wait on it: serve as before
+
+        def _wait():
+            k32.WaitForSingleObject(handle, INFINITE)
+            os._exit(0)  # parent gone: take the port down with us
+
+        threading.Thread(target=_wait, daemon=True, name="parent-watch").start()
+        return
 
     def _poll():
         while True:
@@ -1835,14 +2119,15 @@ def raise_timer_resolution(period_ms: int = 1):
 
 
 def _serve() -> int:
-    """Internal: run the uvicorn server in this process. The frozen build
-    has no child interpreter for `-m uvicorn`, so start_server() re-execs
-    the bundled exe with --_serve instead; all configuration (DATABASE_URL,
-    APP_PORT, SLOWBOOKS_*) arrives via the environment from _server_env()."""
+    """Internal: run the uvicorn server in this process. start_server()
+    launches every server child this way: the frozen build re-execs the
+    bundled exe with --_serve (it has no interpreter for `-m uvicorn`), and
+    a source run re-runs this script with it, so both get the parent
+    watcher. All configuration (DATABASE_URL, APP_PORT, SLOWBOOKS_*)
+    arrives via the environment from _server_env()."""
     import uvicorn
 
-    if sys.platform != "win32":
-        _watch_parent(os.getppid())
+    _watch_parent(os.getppid())
 
     # Import the app OURSELVES rather than passing "app.main:app": when the
     # import fails, uvicorn's string loader reports only "Could not import
@@ -1935,6 +2220,37 @@ def run_smoke_test(port: int = 3999) -> int:
     )
     if sys.platform == "darwin" and status.get("engine") != "vision":
         print("smoke: FAIL Apple Vision is not the selected engine in the bundle")
+        return 1
+
+    # Point 1 of #290: the encrypted-file driver rides in the bundle. The
+    # module is imported lazily (app/services/company_file.py), so prove
+    # PyInstaller collected it by reading SQLCipher's version through it,
+    # then write one encrypted scratch file and read it back.
+    print("smoke: reading the SQLCipher version through the bundled module...")
+    from app.services import company_file
+
+    cipher = company_file.cipher_version()
+    if not cipher:
+        print("smoke: FAIL sqlcipher3 is not in the bundle")
+        return 1
+    print(f"smoke: sqlcipher {cipher}")
+    scratch = get_data_dir() / "smoke-cipher.db"
+    scratch.unlink(missing_ok=True)
+    key = os.urandom(company_file.KEY_BYTES)
+    conn = company_file.connect_raw(scratch, key)
+    conn.execute("CREATE TABLE t (x)")
+    conn.execute("INSERT INTO t VALUES (1)")
+    conn.commit()
+    conn.close()
+    if not company_file.is_encrypted_file(scratch):
+        print("smoke: FAIL the scratch file is not encrypted on disk")
+        return 1
+    conn = company_file.connect_raw(scratch, key)
+    row = conn.execute("SELECT x FROM t").fetchone()
+    conn.close()
+    scratch.unlink(missing_ok=True)
+    if row != (1,):
+        print("smoke: FAIL the encrypted scratch file did not read back")
         return 1
 
     print("smoke: PASS")

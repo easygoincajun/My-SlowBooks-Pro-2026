@@ -79,6 +79,7 @@ def _vendor_payment_totals(db: Session, year: int) -> dict[int, Decimal]:
     rows = (
         db.query(BillPayment.vendor_id, func.sum(BillPayment.amount))
         .filter(BillPayment.date >= start, BillPayment.date <= end)
+        .filter(BillPayment.is_voided.isnot(True))  # not money paid (#287)
         .group_by(BillPayment.vendor_id)
         .all()
     )
