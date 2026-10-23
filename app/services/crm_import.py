@@ -1363,3 +1363,352 @@ def apply_contacts_plan(db: Session, plan: ContactsPlan) -> dict:
         "customers created": len(created),
         "existing customers updated": len(changed_ids - created),
     }
+
+
+# ---------------------------------------------------------------------------
+# Vendors: merge, rename and remove payees (--vendors), and reclassify
+#
+# The sales import made a vendor of every expense payee as written, so one
+# store can be two vendors ("Lowe’s" and "Lowes"), a payee can be an email
+# address, and some aren't vendors at all ("Transfer to Personal Checking").
+# The vendors export (Vendors.csv) holds names only. This writes
+# match/vendors.csv, one row per vendor in the books and per name in the
+# export: what it becomes (slowbooks_vendor; the same name on two rows is
+# one vendor, blank is no payee) and a "decide" question where two names
+# look like one. Merging moves the vendor's expenses to the vendor kept;
+# amounts and accounts don't change.
+#
+# match/reclass.csv moves amounts between accounts with a reclassifying
+# entry, since a posted entry is voided, never edited: an expense posted to
+# the wrong account, or a duplicate account emptied ("all") and made
+# inactive. Each row posts once, by its reference.
+# ---------------------------------------------------------------------------
+
+VENDORS_HEADER = [
+    "source_name",
+    "slowbooks_vendor",
+    "decide",
+    "action",
+    "in_export",
+    "expenses",
+    "total",
+]
+RECLASS_HEADER = ["reference", "date", "from_account", "to_account", "amount", "memo"]
+RECLASS_REF = "Cleanup: "
+
+
+@dataclass
+class VendorsPlan:
+    rows: dict = field(default_factory=OrderedDict)  # source name -> row
+    reclass: list = field(default_factory=list)
+    problems: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+    totals: dict = field(default_factory=dict)
+
+
+def _expense_txns(db: Session, vendor: Vendor):
+    return (
+        db.query(Transaction)
+        .filter(
+            Transaction.source_type == "expense", Transaction.source_id == vendor.id
+        )
+        .all()
+    )
+
+
+def _vendor_records(db: Session, vendor: Vendor) -> list[str]:
+    """Records other than expenses that name ``vendor`` (bills, POs, …): a
+    vendor they point to is merged in SlowBooks, not here."""
+    from sqlalchemy import func, select
+
+    from app.database import Base
+
+    found = []
+    for table in Base.metadata.sorted_tables:
+        if "vendor_id" in table.c:
+            n = db.execute(
+                select(func.count())
+                .select_from(table)
+                .where(table.c.vendor_id == vendor.id)
+            ).scalar()
+            if n:
+                found.append(f"{n} {table.name}")
+    return found
+
+
+def _balance(db: Session, account: Account) -> Decimal:
+    """Debits less credits on ``account`` (an expense's balance is positive)."""
+    from sqlalchemy import func
+
+    from app.models.transactions import TransactionLine
+
+    total = (
+        db.query(func.sum(TransactionLine.debit - TransactionLine.credit))
+        .filter(TransactionLine.account_id == account.id)
+        .scalar()
+    )
+    return _q(Decimal(str(total or 0)))
+
+
+def build_vendors_plan(db: Session, folder: Path) -> VendorsPlan:
+    from app.models.transactions import TransactionLine
+
+    folder = Path(folder)
+    match = folder / MATCH_DIR
+    plan = VendorsPlan()
+    edits = _read_edits(match / "vendors.csv", lambda r: r["source_name"])
+    exported = OrderedDict()
+    for c in _rows(folder, "vendors.csv"):
+        name = (c["company"].strip() or _source_key(c).split(" | ")[0]).strip()
+        if name:
+            exported.setdefault(name.lower(), name)
+
+    vendors = db.query(Vendor).order_by(Vendor.name).all()
+    names = [v.name for v in vendors] + [
+        n for k, n in exported.items() if _named(db, Vendor, n) is None
+    ]
+    for name in names:
+        vendor = _named(db, Vendor, name)
+        txns = _expense_txns(db, vendor) if vendor else []
+        total = sum(
+            (
+                ln.debit
+                for t in txns
+                for ln in db.query(TransactionLine).filter_by(transaction_id=t.id)
+                if ln.debit
+            ),
+            Decimal("0"),
+        )
+        others = [n for n in names if n != name]
+        twin = next((n for n in others if _norm(n) == _norm(name)), None)
+        near = twin or next(
+            (n for n in others if _near(name, n) >= 0.85 or "@" in name), None
+        )
+        decide = ""
+        if "@" in name:
+            decide = f"{name!r} is an email address: which vendor is it?"
+        elif near:
+            decide = f"Looks like {near!r}: the same vendor?"
+        row = {
+            "source_name": name,
+            "slowbooks_vendor": name,
+            "decide": decide,
+            "in_export": "yes" if name.lower() in exported else "no",
+            "expenses": len(txns),
+            "total": f"{total:.2f}",
+        }
+        if name in edits:
+            for col in ("slowbooks_vendor", "decide"):
+                row[col] = (edits[name].get(col) or "").strip()
+        plan.rows[name] = row
+
+    kept = Counter()
+    renamed = set()  # targets the first of their vendors is renamed to
+    for name, row in plan.rows.items():
+        target = row["slowbooks_vendor"]
+        vendor = _named(db, Vendor, name)
+        if row["decide"]:
+            plan.problems.append(f"vendors.csv {name!r}: {row['decide']}")
+        if not target:
+            row["action"] = "remove" if vendor else "skip"
+        elif vendor is None:
+            row["action"] = "new" if _named(db, Vendor, target) is None else "skip"
+        elif target == vendor.name:
+            row["action"] = "keep"
+        elif (
+            _named(db, Vendor, target) in (None, vendor)
+            and target.lower() not in renamed
+        ):
+            row["action"] = f"rename to {target}"
+            renamed.add(target.lower())
+        else:
+            row["action"] = f"merge into {target}"
+        if vendor is not None and row["action"] not in ("keep", "skip"):
+            if records := _vendor_records(db, vendor):
+                plan.problems.append(
+                    f"vendors.csv {name!r}: has {', '.join(records)}; merge it in "
+                    "SlowBooks instead, and set slowbooks_vendor back to its name."
+                )
+        if target:
+            kept[target.lower()] += 1
+
+    # reclassifications, as the person wrote them
+    for r in _read_edits(match / "reclass.csv", lambda r: r["reference"]).values():
+        ref = (r.get("reference") or "").strip()
+        if not ref:
+            continue
+        frm = _existing_account(db, (r.get("from_account") or "").strip())
+        to = _existing_account(db, (r.get("to_account") or "").strip())
+        amount = (r.get("amount") or "").strip().lower()
+        try:
+            when = date.fromisoformat((r.get("date") or "").strip())
+            value = None if amount == "all" else money(amount)
+        except ValueError:
+            plan.problems.append(f"reclass.csv {ref!r}: date or amount isn't valid.")
+            continue
+        for col, acct in (("from_account", frm), ("to_account", to)):
+            if acct is None:
+                plan.problems.append(
+                    f"reclass.csv {ref!r}: {col} {r.get(col)!r} isn't in the chart."
+                )
+        if frm is None or to is None:
+            continue
+        if value is None:
+            value = _balance(db, frm)  # as it stands; the import measures again
+        plan.reclass.append(
+            {
+                "ref": RECLASS_REF + ref,
+                "date": when,
+                "from": frm,
+                "to": to,
+                "amount": _q(value),
+                "all": amount == "all",
+                "memo": (r.get("memo") or "").strip() or f"Reclassify: {ref}",
+            }
+        )
+
+    actions = Counter(r["action"].split(" ")[0] for r in plan.rows.values())
+    plan.totals = {
+        "vendors": len(vendors),
+        "export": len(exported),
+        "keep": actions["keep"],
+        "merge": actions["merge"],
+        "rename": actions["rename"],
+        "remove": actions["remove"],
+        "new": actions["new"],
+        "after": len(kept),
+    }
+    return plan
+
+
+def vendors_report(plan: VendorsPlan) -> str:
+    t = plan.totals
+    out = [
+        "CRM vendors plan",
+        "================",
+        f"Vendors in the books: {t['vendors']}   names in the export: {t['export']}",
+        f"Kept {t['keep']}, merged {t['merge']}, renamed {t['rename']}, removed "
+        f"{t['remove']}, new {t['new']}: {t['after']} vendors after",
+        "",
+    ]
+    for row in plan.rows.values():
+        if row["action"] not in ("keep", "skip"):
+            out.append(
+                f"  {row['source_name']}: {row['action']} ({row['expenses']} expenses)"
+            )
+    for r in plan.reclass:
+        out.append(
+            f"  Reclassify {r['date']} ${r['amount']:,.2f} from {r['from'].name} to "
+            f"{r['to'].name}{' (then inactive)' if r['all'] else ''}: {r['memo']}"
+        )
+    out.append("")
+    if plan.problems:
+        out += [
+            f"PROBLEMS ({len(plan.problems)}) - answer these in match/vendors.csv "
+            "(set slowbooks_vendor, then clear decide) or match/reclass.csv:"
+        ]
+        out += [f"  - {p}" for p in plan.problems] + [""]
+    else:
+        out += ["No problems: ready to import.", ""]
+    if plan.notes:
+        out += ["Notes:"] + [f"  - {n}" for n in plan.notes]
+    return "\n".join(out) + "\n"
+
+
+def write_vendors_files(plan: VendorsPlan, folder: Path) -> Path:
+    out = Path(folder) / MATCH_DIR
+    out.mkdir(exist_ok=True)
+    with open(out / "vendors.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=VENDORS_HEADER, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(plan.rows.values())
+    if not (out / "reclass.csv").exists():
+        with open(out / "reclass.csv", "w", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerow(RECLASS_HEADER)
+    (out / "vendors-report.txt").write_text(vendors_report(plan), encoding="utf-8")
+    return out
+
+
+def apply_vendors_plan(db: Session, plan: VendorsPlan) -> dict:
+    """Merge, rename and remove vendors and post the reclassifications, in
+    ``db`` without committing. Refuses a plan with problems. A second run
+    changes nothing."""
+    if plan.problems:
+        raise ValueError(
+            f"The plan has {len(plan.problems)} problem(s); see vendors-report.txt."
+        )
+    made = Counter()
+    for name, row in plan.rows.items():
+        target = row["slowbooks_vendor"]
+        vendor = _named(db, Vendor, name)
+        if vendor is None:
+            if target and _named(db, Vendor, target) is None:
+                db.add(Vendor(name=target[:200]))
+                db.flush()
+                made["vendors created"] += 1
+            continue
+        if target == vendor.name:
+            continue
+        keep = _named(db, Vendor, target) if target else None
+        if keep is vendor or (target and keep is None):
+            # the first name for a vendor that isn't in the books yet: rename
+            old, vendor.name = vendor.name, target[:200]
+            for t in _expense_txns(db, vendor):
+                if t.description == f"Expense: {old}":
+                    t.description = f"Expense: {vendor.name}"
+            db.flush()
+            made["vendors renamed"] += 1
+            continue
+        for t in _expense_txns(db, vendor):
+            t.source_id = keep.id if keep else None
+            if t.description == f"Expense: {vendor.name}":
+                t.description = f"Expense: {keep.name}" if keep else "Expense"
+        if keep is not None:
+            for col in ("email", "phone", "address1", "city", "state", "zip"):
+                if getattr(vendor, col) and not getattr(keep, col):
+                    setattr(keep, col, getattr(vendor, col))
+            if "@" in vendor.name and not keep.email:
+                keep.email = vendor.name[:200]
+        db.delete(vendor)
+        db.flush()
+        made["vendors merged" if keep else "vendors removed"] += 1
+
+    for r in plan.reclass:
+        if _already_posted(db, r["ref"]):
+            continue
+        if r["all"]:
+            # what is left once the rows before it have posted
+            r["amount"] = _balance(db, r["from"])
+        if r["amount"] == 0:
+            if r["all"]:
+                r["from"].is_active = False
+            continue
+        debit_to = r["amount"] > 0
+        amount = abs(r["amount"])
+        create_journal_entry(
+            db,
+            r["date"],
+            r["memo"],
+            [
+                {
+                    "account_id": r["to"].id,
+                    "debit": amount if debit_to else Decimal("0"),
+                    "credit": Decimal("0") if debit_to else amount,
+                    "description": r["memo"],
+                },
+                {
+                    "account_id": r["from"].id,
+                    "debit": Decimal("0") if debit_to else amount,
+                    "credit": amount if debit_to else Decimal("0"),
+                    "description": r["memo"],
+                },
+            ],
+            source_type="manual",
+            reference=r["ref"],
+        )
+        if r["all"]:
+            r["from"].is_active = False
+        made["reclassifications"] += 1
+        db.flush()  # the next "all" row measures the balance this leaves
+    db.flush()
+    return dict(made)

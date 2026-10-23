@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.models.accounts import Account
+from app.models.accounts import Account, AccountType
 from app.models.contacts import Customer, Vendor
 from app.models.invoices import Invoice, InvoiceStatus
 from app.models.items import Item
@@ -641,3 +641,191 @@ def test_a_row_named_for_the_person_is_a_contact_of_the_customer(tmp_path, db_se
         "customers created": 0,
         "existing customers updated": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Vendors (--vendors): merge, rename and remove payees; reclassify
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def vendor_books(tmp_path, db_session, seed_accounts):
+    """Payees as the sales import made them, each with an expense."""
+    from app.services.accounting import create_journal_entry
+
+    checking = db_session.query(Account).filter_by(name="Checking").one()
+    for name in ("Account A", "Account B"):
+        db_session.add(Account(name=name, account_type=AccountType.EXPENSE))
+    db_session.flush()
+    a = db_session.query(Account).filter_by(name="Account A").one()
+    made = {}
+    for i, (payee, amount) in enumerate(
+        [("Lowe’s", "214.01"), ("Lowes", "12.05"), ("Transfer to Personal", "100")]
+    ):
+        v = Vendor(name=payee)
+        db_session.add(v)
+        db_session.flush()
+        create_journal_entry(
+            db_session,
+            date(2026, 7, 1 + i),
+            f"Expense: {payee}",
+            [
+                {"account_id": a.id, "debit": Decimal(amount), "credit": Decimal("0")},
+                {
+                    "account_id": checking.id,
+                    "debit": Decimal("0"),
+                    "credit": Decimal(amount),
+                },
+            ],
+            source_type="expense",
+            source_id=v.id,
+            reference=f"CRM expense {i}",
+        )
+        made[payee] = v
+    with open(tmp_path / "Vendors.csv", "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows(
+            [CONTACTS_HEAD]
+            + [
+                ["Transfer to Personal", "", "", "", "", "Transfer to Personal"]
+                + ["", "", "payee", "", "2026-07-15"],
+                [
+                    "Synology",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "Synology",
+                    "",
+                    "",
+                    "payee",
+                    "",
+                    "2026-09",
+                ],
+            ]
+        )
+    db_session.flush()
+    return tmp_path
+
+
+def _vendor_rows(export):
+    with open(export / "match" / "vendors.csv", newline="", encoding="utf-8-sig") as f:
+        return {r["source_name"]: r for r in csv.DictReader(f)}
+
+
+def test_the_vendors_plan_asks_about_lookalikes_and_writes_nothing(
+    vendor_books, db_session
+):
+    plan = crm_import.build_vendors_plan(db_session, vendor_books)
+    crm_import.write_vendors_files(plan, vendor_books)
+    rows = _vendor_rows(vendor_books)
+
+    assert rows["Lowes"]["decide"] == "Looks like 'Lowe’s': the same vendor?"
+    assert (rows["Lowe’s"]["expenses"], rows["Lowe’s"]["total"]) == ("1", "214.01")
+    assert rows["Synology"]["action"] == "new"  # only in the export
+    assert rows["Transfer to Personal"]["in_export"] == "yes"
+    assert len(plan.problems) == 2  # both Lowe rows
+    assert (
+        (vendor_books / "match" / "reclass.csv")
+        .read_text(encoding="utf-8-sig")
+        .startswith("reference,date,from_account")
+    )
+    assert db_session.query(Vendor).count() == 3
+
+
+def test_vendors_merge_rename_remove_and_reclassify(vendor_books, db_session):
+    plan = crm_import.build_vendors_plan(db_session, vendor_books)
+    crm_import.write_vendors_files(plan, vendor_books)
+    rows = _vendor_rows(vendor_books)
+    for name, target in (
+        ("Lowe’s", "Lowe's"),
+        ("Lowes", "Lowe's"),
+        ("Transfer to Personal", ""),
+    ):
+        rows[name]["slowbooks_vendor"], rows[name]["decide"] = target, ""
+    _rewrite(vendor_books, "vendors.csv", list(rows.values()))
+    _rewrite(
+        vendor_books,
+        "reclass.csv",
+        [
+            {
+                "reference": "Drill bit",
+                "date": "2026-07-02",
+                "from_account": "Account A",
+                "to_account": "Account B",
+                "amount": "12.05",
+                "memo": "",
+            },
+            {
+                "reference": "Empty A",
+                "date": "2026-10-23",
+                "from_account": "Account A",
+                "to_account": "Account B",
+                "amount": "all",
+                "memo": "Merge Account A into Account B",
+            },
+        ],
+    )
+    plan = crm_import.build_vendors_plan(db_session, vendor_books)
+    assert plan.problems == []
+    made = crm_import.apply_vendors_plan(db_session, plan)
+    assert made == {
+        "vendors renamed": 1,
+        "vendors merged": 1,
+        "vendors removed": 1,
+        "vendors created": 1,
+        "reclassifications": 2,
+    }
+
+    lowes = db_session.query(Vendor).filter_by(name="Lowe's").one()
+    txns = (
+        db_session.query(Transaction)
+        .filter_by(source_type="expense", source_id=lowes.id)
+        .all()
+    )
+    assert sorted(t.description for t in txns) == ["Expense: Lowe's"] * 2
+    transfer = db_session.query(Transaction).filter_by(reference="CRM expense 2").one()
+    assert (transfer.source_id, transfer.description) == (None, "Expense")
+    assert sorted(v.name for v in db_session.query(Vendor)) == ["Lowe's", "Synology"]
+
+    # the amounts moved, and the emptied account is inactive
+    a = db_session.query(Account).filter_by(name="Account A").one()
+    b = db_session.query(Account).filter_by(name="Account B").one()
+
+    def balance(acct):
+        return sum(
+            (ln.debit - ln.credit for ln in acct.transaction_lines), Decimal("0")
+        )
+
+    db_session.refresh(a)
+    db_session.refresh(b)
+    assert (balance(a), balance(b)) == (Decimal("0"), Decimal("326.06"))
+    assert a.is_active is False
+
+    # a second run changes nothing
+    plan = crm_import.build_vendors_plan(db_session, vendor_books)
+    assert crm_import.apply_vendors_plan(db_session, plan) == {}
+
+
+def test_a_vendor_with_bills_is_not_merged_here(vendor_books, db_session):
+    from app.models.bills import Bill
+
+    lowes = db_session.query(Vendor).filter_by(name="Lowes").one()
+    db_session.add(
+        Bill(
+            vendor_id=lowes.id,
+            bill_number="B-1",
+            date=date(2026, 7, 2),
+            due_date=date(2026, 8, 1),
+            total=Decimal("12.05"),
+        )
+    )
+    db_session.flush()
+    crm_import.write_vendors_files(
+        crm_import.build_vendors_plan(db_session, vendor_books), vendor_books
+    )
+    rows = _vendor_rows(vendor_books)
+    rows["Lowes"]["slowbooks_vendor"], rows["Lowes"]["decide"] = "Lowe’s", ""
+    rows["Lowe’s"]["decide"] = ""
+    _rewrite(vendor_books, "vendors.csv", list(rows.values()))
+    plan = crm_import.build_vendors_plan(db_session, vendor_books)
+    assert any("1 bills" in p for p in plan.problems)

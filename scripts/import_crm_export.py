@@ -21,6 +21,15 @@ Answer the questions in the file, plan again, then add --import:
     python scripts/import_crm_export.py ~/Desktop/hybcrm --company "My Books" --contacts
     python scripts/import_crm_export.py ~/Desktop/hybcrm --company "My Books" --contacts --import
 
+Vendors (--vendors) are cleaned up the same way: the plan writes
+match/vendors.csv (every vendor in the books and every name in
+vendors.csv: what it becomes; the same name on two rows merges them, a
+blank one removes the payee) and match/reclass.csv (amounts to move from
+one account to another; "all" empties an account and makes it inactive).
+
+    python scripts/import_crm_export.py ~/Desktop/hybcrm --company "My Books" --vendors
+    python scripts/import_crm_export.py ~/Desktop/hybcrm --company "My Books" --vendors --import
+
 --company names a desktop company (the company list under SLOWBOOKS_DATA_DIR);
 --create makes it first, empty, when there is none by that name.
 --database-url points at any database instead (a server's PostgreSQL).
@@ -98,9 +107,18 @@ def main() -> int:
         help="map every contact to a customer (match/contacts.csv) instead of "
         "importing sales; needs only contacts.csv",
     )
+    ap.add_argument(
+        "--vendors",
+        action="store_true",
+        help="merge, rename and remove vendors (match/vendors.csv) and post the "
+        "reclassifications in match/reclass.csv",
+    )
     args = ap.parse_args()
 
-    if not args.contacts and not (args.export / "invoices.csv").exists():
+    if (
+        not (args.contacts or args.vendors)
+        and not (args.export / "invoices.csv").exists()
+    ):
         sys.exit(f"{args.export} has no invoices.csv.")
     url = args.database_url or _company_url(args.company, args.create)
 
@@ -116,6 +134,9 @@ def main() -> int:
     if args.contacts:
         with Session(engine) as db:
             return _contacts(db, args, crm_import)
+    if args.vendors:
+        with Session(engine) as db:
+            return _vendors(db, args, crm_import)
     with Session(engine) as db:
         plan = crm_import.build_plan(db, args.export)
         out = crm_import.write_match_files(plan, args.export)
@@ -140,6 +161,28 @@ def main() -> int:
             print("Import failed; nothing was written.")
             raise
     print("Imported: " + ", ".join(f"{n} {what}" for what, n in made.items()))
+    return 0
+
+
+def _vendors(db, args, crm_import) -> int:
+    plan = crm_import.build_vendors_plan(db, args.export)
+    out = crm_import.write_vendors_files(plan, args.export)
+    print(crm_import.vendors_report(plan))
+    print(f"Mapping files: {out / 'vendors.csv'}, {out / 'reclass.csv'}")
+    if not args.do_import:
+        print("Dry run: nothing was written to the books. Add --import to post.")
+        return 1 if plan.problems else 0
+    if plan.problems:
+        print("Not imported: answer the questions above first.")
+        return 1
+    try:
+        made = crm_import.apply_vendors_plan(db, plan)
+        db.commit()
+    except Exception:
+        db.rollback()
+        print("Import failed; nothing was written.")
+        raise
+    print("Done: " + (", ".join(f"{n} {w}" for w, n in made.items()) or "no changes"))
     return 0
 
 
